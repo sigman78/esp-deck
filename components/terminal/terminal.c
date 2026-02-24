@@ -3,7 +3,6 @@
  */
 
 #include "terminal.h"
-#include "font.h"
 #include "esp_log.h"
 #include <string.h>
 #include <stdlib.h>
@@ -17,7 +16,6 @@ static struct {
     int cursor_x;
     int cursor_y;
     terminal_cell_t *buffer;
-    bool *dirty_rows;          // Track which rows need redrawing
     uint8_t current_fg;
     uint8_t current_bg;
     uint8_t current_attrs;
@@ -48,14 +46,6 @@ esp_err_t terminal_init(int cols, int rows)
         return ESP_ERR_NO_MEM;
     }
 
-    // Allocate dirty row tracking (one bool per row)
-    term.dirty_rows = calloc(rows, sizeof(bool));
-    if (!term.dirty_rows) {
-        ESP_LOGE(TAG, "Failed to allocate dirty row buffer");
-        free(term.buffer);
-        return ESP_ERR_NO_MEM;
-    }
-
     // Clear buffer
     for (int i = 0; i < cols * rows; i++) {
         term.buffer[i].ch = ' ';
@@ -64,19 +54,13 @@ esp_err_t terminal_init(int cols, int rows)
         term.buffer[i].attrs = 0;
     }
 
-    // Mark all rows as dirty for initial render
-    for (int i = 0; i < rows; i++) {
-        term.dirty_rows[i] = true;
-    }
-
     term.initialized = true;
 
-    ESP_LOGI(TAG, "Terminal initialized:");
-    ESP_LOGI(TAG, "  Buffer: %d bytes (SRAM)", buffer_size);
-    ESP_LOGI(TAG, "  Dirty tracking: %d bytes", rows);
-    ESP_LOGI(TAG, "  Total memory: %d bytes", buffer_size + rows);
+    // Share the cell buffer with the display component so the ISR can render
+    // from it directly during on_bounce_empty.
+    display_set_text_buffer(term.buffer, cols, rows);
 
-    terminal_render();
+    ESP_LOGI(TAG, "Terminal initialized: %dx%d, buffer %d bytes", cols, rows, buffer_size);
 
     return ESP_OK;
 }
@@ -126,9 +110,6 @@ static void put_char(char ch)
     term.buffer[idx].bg_color = term.current_bg;
     term.buffer[idx].attrs = term.current_attrs;
 
-    // Mark row as dirty
-    term.dirty_rows[term.cursor_y] = true;
-
     term.cursor_x++;
 }
 
@@ -145,8 +126,6 @@ void terminal_write(const char *data, size_t len)
     for (size_t i = 0; i < len; i++) {
         put_char(data[i]);
     }
-
-    terminal_render();
 }
 
 /**
@@ -171,15 +150,8 @@ void terminal_clear(void)
         term.buffer[i].attrs = 0;
     }
 
-    // Mark all rows as dirty
-    for (int i = 0; i < term.rows; i++) {
-        term.dirty_rows[i] = true;
-    }
-
     term.cursor_x = 0;
     term.cursor_y = 0;
-
-    terminal_render();
 }
 
 /**
@@ -226,69 +198,6 @@ void terminal_scroll_up(int lines)
         term.buffer[i].fg_color = term.current_fg;
         term.buffer[i].bg_color = term.current_bg;
         term.buffer[i].attrs = 0;
-    }
-
-    // Mark all rows as dirty after scroll
-    for (int i = 0; i < term.rows; i++) {
-        term.dirty_rows[i] = true;
-    }
-}
-
-/**
- * Render terminal to display using bounce buffer
- * Only renders dirty rows for efficiency
- */
-void terminal_render(void)
-{
-    if (!term.initialized) return;
-
-    color_t *bounce_buf = display_get_bounce_buffer();
-    if (!bounce_buf) return;
-
-    int dirty_count = 0;
-
-    // Render each dirty row
-    for (int row = 0; row < term.rows; row++) {
-        if (!term.dirty_rows[row]) {
-            continue;  // Skip clean rows
-        }
-
-        dirty_count++;
-
-        // Clear bounce buffer for this row
-        memset(bounce_buf, 0, BOUNCE_BUFFER_SIZE * sizeof(color_t));
-
-        // Render all characters in this row to bounce buffer
-        for (int col = 0; col < term.cols; col++) {
-            int idx = row * term.cols + col;
-            terminal_cell_t *cell = &term.buffer[idx];
-
-            int x = col * FONT_WIDTH;
-            int y = 0;  // Always 0 in bounce buffer (relative position)
-
-            color_t fg = ansi_to_rgb565(cell->fg_color);
-            color_t bg = ansi_to_rgb565(cell->bg_color);
-
-            // Handle reverse attribute
-            if (cell->attrs & ATTR_REVERSE) {
-                color_t tmp = fg;
-                fg = bg;
-                bg = tmp;
-            }
-
-            font_draw_char(x, y, cell->ch, fg, bg);
-        }
-
-        // Flush bounce buffer to this row on LCD
-        int lcd_row = row * FONT_HEIGHT;
-        display_flush_row(lcd_row, FONT_HEIGHT);
-
-        // Mark row as clean
-        term.dirty_rows[row] = false;
-    }
-
-    if (dirty_count > 0) {
-        ESP_LOGD(TAG, "Rendered %d dirty rows", dirty_count);
     }
 }
 

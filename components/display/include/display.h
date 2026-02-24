@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_err.h"
+#include "esp_attr.h"
 #include "esp_lcd_panel_ops.h"
 
 // Display dimensions
@@ -32,6 +33,23 @@ typedef uint16_t color_t;
 #define COLOR_CYAN      RGB565(0, 255, 255)
 #define COLOR_MAGENTA   RGB565(255, 0, 255)
 
+/*
+ * Terminal cell — defined here (not in terminal.h) so the display ISR can
+ * read cell data without creating a circular dependency.
+ */
+typedef struct {
+    char    ch;         // Character codepoint (Latin-1 for now)
+    uint8_t fg_color;   // Foreground ANSI-256 palette index
+    uint8_t bg_color;   // Background ANSI-256 palette index
+    uint8_t attrs;      // Attribute flags (see ATTR_* below)
+} terminal_cell_t;
+
+// Cell attribute flags
+#define ATTR_BOLD       (1 << 0)
+#define ATTR_UNDERLINE  (1 << 1)
+#define ATTR_REVERSE    (1 << 2)
+#define ATTR_BLINK      (1 << 3)
+
 /**
  * Initialize display driver
  */
@@ -43,40 +61,21 @@ esp_err_t display_init(void);
 esp_lcd_panel_handle_t display_get_panel(void);
 
 /**
- * Get bounce buffer pointer (for rendering)
- */
-color_t* display_get_bounce_buffer(void);
-
-/**
- * Transfer bounce buffer to specific LCD row
+ * Register the terminal cell buffer so the display ISR can render from it.
  *
- * @param row_start Y coordinate (0-479)
- * @param row_count Number of rows to transfer (typically 16 for one char row)
+ * Call once after terminal_init(). The pointer must remain valid for the
+ * lifetime of the display (never free the terminal buffer).
+ *
+ * @param buf   Pointer to cols*rows terminal_cell_t array (must be in DRAM)
+ * @param cols  Number of character columns
+ * @param rows  Number of character rows
  */
-esp_err_t display_flush_row(int row_start, int row_count);
-
-/**
- * Clear entire display (fill with color)
- * Uses bounce buffer to clear screen efficiently
- */
-esp_err_t display_clear_screen(color_t color);
+void display_set_text_buffer(const terminal_cell_t *buf, int cols, int rows);
 
 /**
  * Set backlight brightness (0-100%)
  */
 esp_err_t display_set_backlight(uint8_t brightness);
 
-/**
- * Convert ANSI 256-color to RGB565
- */
-color_t ansi_to_rgb565(uint8_t ansi_color);
-
-/*
- * Note: Direct pixel/rectangle drawing functions removed.
- * With bounce buffer rendering, all drawing happens through:
- * 1. Get bounce buffer with display_get_bounce_buffer()
- * 2. Render to bounce buffer
- * 3. Flush with display_flush_row()
- */
 
 #endif // DISPLAY_H

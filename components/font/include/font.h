@@ -6,6 +6,7 @@
 #define FONT_H
 
 #include <stdint.h>
+#include "esp_attr.h"
 #include "display.h"
 
 #define FONT_WIDTH  8
@@ -17,11 +18,11 @@
 void font_init(void);
 
 /**
- * Get font glyph bitmap
+ * Get font glyph bitmap — IRAM_ATTR, safe to call from ISR.
  *
  * @param ch Character
- * @return Pointer to 16-byte glyph bitmap
+ * @return Pointer to 16-byte glyph bitmap (in DRAM)
  */
-const uint8_t* font_get_glyph(char ch);
+const uint8_t* IRAM_ATTR font_get_glyph(char ch);
 
 #endif // FONT_H

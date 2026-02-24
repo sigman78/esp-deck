@@ -32,6 +32,13 @@ static bool on_bounce_empty(esp_lcd_panel_handle_t panel,
 static esp_lcd_panel_handle_t panel_handle = NULL;
 static color_t *bounce_buffer = NULL;
 
+// Cell buffer shared with the terminal — written by the terminal task,
+// read by the on_bounce_empty ISR.  Pointers and dimensions are plain
+// statics (already in DRAM), so the ISR can access them without issues.
+static const terminal_cell_t *s_cell_buf  = NULL;
+static int                    s_cell_cols = 0;
+static int                    s_cell_rows = 0;
+
 /**
  * Callback called when bounce buffer is empty and needs refilling
  * This is called from ISR context, so keep it fast!
@@ -157,7 +164,6 @@ esp_err_t display_init(void)
         .disp_gpio_num = -1,
         .data_gpio_nums = {14, 38, 18, 17, 10, 39, 0, 45, 48, 47, 21, 1, 2, 42, 41, 40},
     };
-    };*/
 
     // Create RGB panel
     ESP_LOGI(TAG, "Creating RGB panel...");
@@ -205,36 +211,22 @@ esp_lcd_panel_handle_t display_get_panel(void)
 }
 
 /**
- * Get bounce buffer pointer
+ * Get bounce buffer pointer — IRAM_ATTR so the ISR can call it safely.
  */
-color_t* display_get_bounce_buffer(void)
+color_t* IRAM_ATTR display_get_bounce_buffer(void)
 {
     return bounce_buffer;
 }
 
 /**
- * Flush bounce buffer to LCD at specific row
- *
- * NOTE: In callback-based bounce buffer mode, this doesn't actually "flush"
- * The panel's callback will pull data as needed. This function is kept for
- * API compatibility but just signals that data is ready.
+ * Register the terminal cell buffer for ISR rendering.
  */
-esp_err_t display_flush_row(int row_start, int row_count)
+void display_set_text_buffer(const terminal_cell_t *buf, int cols, int rows)
 {
-    if (!panel_handle || !bounce_buffer) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    if (row_start < 0 || row_start + row_count > DISPLAY_HEIGHT) {
-        ESP_LOGE(TAG, "Invalid row range: %d-%d", row_start, row_start + row_count);
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    // In bounce buffer callback mode, we can't use draw_bitmap
-    // The panel will call on_bounce_empty to get data
-    // Just return OK - the data in bounce_buffer will be used by the callback
-
-    return ESP_OK;
+    s_cell_buf  = buf;
+    s_cell_cols = cols;
+    s_cell_rows = rows;
+    ESP_LOGI(TAG, "Text buffer registered: %dx%d cells @ %p", cols, rows, buf);
 }
 
 /**
@@ -244,47 +236,18 @@ esp_err_t display_set_backlight(uint8_t brightness)
 {
     // Simple on/off for now
     // TODO: Implement PWM for gradual brightness control
-    gpio_set_level(PIN_NUM_BK_LIGHT, brightness > 0 ? LCD_BK_LIGHT_ON_LEVEL : LCD_BK_LIGHT_OFF_LEVEL);
+    //gpio_set_level(PIN_NUM_BK_LIGHT, brightness > 0 ? LCD_BK_LIGHT_ON_LEVEL : LCD_BK_LIGHT_OFF_LEVEL);
     return ESP_OK;
 }
 
 /**
- * Clear entire display using bounce buffer
- *
- * NOTE: In callback mode, we fill our bounce buffer with the color
- * and the panel's callback will continuously display it
+ * Convert ANSI 256-color to RGB565.
+ * IRAM_ATTR: callable from on_bounce_empty ISR.
+ * The palette table is DRAM_ATTR so it is reachable without Flash cache.
  */
-esp_err_t display_clear_screen(color_t color)
+color_t IRAM_ATTR ansi_to_rgb565(uint8_t ansi_color)
 {
-    if (!bounce_buffer) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    // Fill our bounce buffer with the color
-    for (int i = 0; i < BOUNCE_BUFFER_SIZE; i++) {
-        bounce_buffer[i] = color;
-    }
-
-    // In callback mode, the panel will call on_bounce_empty repeatedly
-    // and get this color data. We just wait a bit for it to take effect.
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    return ESP_OK;
-}
-
-/**
- * Note: With bounce buffer rendering, direct pixel drawing is not used.
- * Instead, render to bounce buffer and flush rows.
- * These functions are kept for compatibility but deprecated.
- */
-
-/**
- * Convert ANSI 256-color to RGB565
- */
-color_t ansi_to_rgb565(uint8_t ansi_color)
-{
-    // ANSI 256-color palette to RGB565 conversion
-    static const color_t ansi_palette[256] = {
+    static DRAM_ATTR const color_t ansi_palette[256] = {
         // 0-15: Standard colors
         RGB565(0, 0, 0),       // 0: Black
         RGB565(128, 0, 0),     // 1: Red

@@ -10,19 +10,7 @@
 #include "esp_err.h"
 #include "display.h"
 
-// Terminal cell attributes
-typedef struct {
-    char ch;              // Character
-    uint8_t fg_color;     // Foreground color (ANSI 256)
-    uint8_t bg_color;     // Background color (ANSI 256)
-    uint8_t attrs;        // Attributes (bold, underline, etc.)
-} terminal_cell_t;
-
-// Attribute flags
-#define ATTR_BOLD       (1 << 0)
-#define ATTR_UNDERLINE  (1 << 1)
-#define ATTR_REVERSE    (1 << 2)
-#define ATTR_BLINK      (1 << 3)
+// terminal_cell_t and ATTR_* flags are defined in display.h (included above).
 
 /**
  * Initialize terminal
@@ -75,10 +63,6 @@ void terminal_get_cursor(int *x, int *y);
  */
 void terminal_scroll_up(int lines);
 
-/**
- * Render terminal to display
- */
-void terminal_render(void);
 
 /**
  * Handle keyboard input
