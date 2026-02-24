@@ -59,23 +59,84 @@ static void init_network(void)
 }
 
 /**
- * Display splash screen
+ * Display splash screen with color capability demonstration.
+ *
+ * Layout (100×30 terminal):
+ *   Row  1-4  : title box
+ *   Row  5-6  : standard 16-color palette
+ *   Row  7-13 : 6×6×6 RGB cube (216 colors, indices 16-231)
+ *   Row 14-15 : 24-shade grayscale ramp (indices 232-255)
+ *   Row 16    : status line
  */
 static void show_splash_screen(void)
 {
     terminal_clear();
     terminal_set_cursor(0, 0);
+    terminal_set_attrs(0);
 
+    /* ── Title box ─────────────────────────────────────────────────────────
+     * Interior width: 56 chars  (2 leading spaces + ╔ + 56×═ + ╗)
+     * ─────────────────────────────────────────────────────────────────── */
+    terminal_set_color(11, 4);
+    terminal_print("\n"
+                   "  ╔════════════════════════════════════════════════════════╗  \n"
+                   "  ║");
+    terminal_set_color(14, 4);
+    terminal_print("              CYBERDECK SSH TERMINAL v0.1               ");
+    terminal_set_color(11, 4);
+    terminal_print("║  \n  ║");
+    terminal_set_color(8, 4);
+    terminal_print("               ☺ ESP32-S3 · Terminus 8×16               ");
+    terminal_set_color(11, 4);
+    terminal_print("║  \n"
+                   "  ╚════════════════════════════════════════════════════════╝  \n");
+
+    /* ── Standard 16-color palette ────────────────────────────────────────
+     * 16 × 3-char blocks = 48 chars, left-aligned with 2-char margin.
+     * Dark half (0-7) uses white fg for legibility; bright half (8-15) black.
+     * ─────────────────────────────────────────────────────────────────── */
+    terminal_set_color(7, 0);
+    terminal_print("\n  Standard palette:\n  ");
+
+    for (int c = 0; c < 16; c++) {
+        terminal_set_color(c < 8 ? 15 : 0, c);
+        terminal_print("   ");
+    }
+    terminal_set_color(7, 0);
     terminal_print("\n");
-    terminal_print("  ╔═══════════════════════════════════════════════════════╗\n");
-    terminal_print("  ║                                                       ║\n");
-    terminal_print("  ║              CYBERDECK SSH TERMINAL v0.1              ║\n");
-    terminal_print("  ║                                                       ║\n");
-    terminal_print("  ║         ESP32-S3 Portable Terminal Device             ║\n");
-    terminal_print("  ║                                                       ║\n");
-    terminal_print("  ╚═══════════════════════════════════════════════════════╝\n");
-    terminal_print("\n");
-    terminal_print("  Initializing system...\n\n");
+
+    /* ── 6×6×6 color cube (indices 16-231) ────────────────────────────────
+     * 6 rows, one per red channel value (r=0..5).
+     * Each row: 6 green groups × 6 blue steps, 2-char block each → 72 chars.
+     * ─────────────────────────────────────────────────────────────────── */
+    terminal_set_color(7, 0);
+    terminal_print("\n  Color cube:\n");
+
+    for (int r = 0; r < 6; r++) {
+        terminal_print("  ");
+        for (int g = 0; g < 6; g++) {
+            for (int b = 0; b < 6; b++) {
+                terminal_set_color(15, 16 + r * 36 + g * 6 + b);
+                terminal_print("  ");
+            }
+        }
+        terminal_set_color(7, 0);
+        terminal_print("\n");
+    }
+
+    /* ── Grayscale ramp (indices 232-255) ─────────────────────────────────
+     * 24 shades × 3-char blocks = 72 chars.
+     * Switch fg from white to black at the midpoint for legibility.
+     * ─────────────────────────────────────────────────────────────────── */
+    terminal_set_color(7, 0);
+    terminal_print("\n  Grayscale ramp:\n  ");
+
+    for (int i = 0; i < 24; i++) {
+        terminal_set_color(i < 12 ? 15 : 0, 232 + i);
+        terminal_print("   ");
+    }
+    terminal_set_color(7, 0);
+    terminal_print("\n\n  Initializing system...\n");
 }
 
 /**

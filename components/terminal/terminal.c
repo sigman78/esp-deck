@@ -185,6 +185,17 @@ void terminal_print(const char *str)
     terminal_write(str, strlen(str));
 }
 
+void terminal_set_color(uint8_t fg, uint8_t bg)
+{
+    term.current_fg = fg;
+    term.current_bg = bg;
+}
+
+void terminal_set_attrs(uint8_t attrs)
+{
+    term.current_attrs = attrs;
+}
+
 /**
  * Clear terminal screen
  */

@@ -36,6 +36,22 @@ void terminal_write(const char *data, size_t len);
 void terminal_print(const char *str);
 
 /**
+ * Set current text colors.
+ * All subsequent print/write calls use these colors until changed.
+ *
+ * @param fg  Foreground ANSI-256 palette index (0-255)
+ * @param bg  Background ANSI-256 palette index (0-255)
+ */
+void terminal_set_color(uint8_t fg, uint8_t bg);
+
+/**
+ * Set current text effect attributes.
+ *
+ * @param attrs  Bitmask of ATTR_* flags (ATTR_BOLD, ATTR_UNDERLINE, …)
+ */
+void terminal_set_attrs(uint8_t attrs);
+
+/**
  * Clear terminal screen
  */
 void terminal_clear(void);
