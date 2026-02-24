@@ -1,0 +1,21 @@
+# Main component CMakeLists.txt
+idf_component_register(
+    SRCS
+        "main.c"
+    INCLUDE_DIRS
+        "include"
+    REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_netif
+        esp_event
+        bt
+        esp_lcd
+        driver
+        display
+        terminal
+        ssh
+        input
+        wifi
+        font
+)
