@@ -126,7 +126,7 @@ static IRAM_ATTR bool on_bounce_empty(esp_lcd_panel_handle_t panel,
         color_t fg = ansi_to_rgb565(cell->fg_color);
         color_t bg = ansi_to_rgb565(cell->bg_color);
         if (cell->attrs & ATTR_REVERSE) { color_t t = fg; fg = bg; bg = t; }
-        s_col_cache[c].glyph = font_get_glyph(cell->ch);
+        s_col_cache[c].glyph = font_get_glyph(cell->cp);
         s_col_cache[c].bg    = bg;
         s_col_cache[c].xorfg = fg ^ bg;
     }

@@ -38,10 +38,10 @@ typedef uint16_t color_t;
  * read cell data without creating a circular dependency.
  */
 typedef struct {
-    char    ch;         // Character codepoint (Latin-1 for now)
-    uint8_t fg_color;   // Foreground ANSI-256 palette index
-    uint8_t bg_color;   // Background ANSI-256 palette index
-    uint8_t attrs;      // Attribute flags (see ATTR_* below)
+    uint16_t cp;        // Unicode codepoint (BMP, U+0000..U+FFFF)
+    uint8_t  fg_color;  // Foreground ANSI-256 palette index
+    uint8_t  bg_color;  // Background ANSI-256 palette index
+    uint8_t  attrs;     // Attribute flags (see ATTR_* below)
 } terminal_cell_t;
 
 // Cell attribute flags

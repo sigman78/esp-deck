@@ -21,9 +21,8 @@ void font_init(void)
 /**
  * Get font glyph bitmap — IRAM_ATTR so it is safe to call from the ISR.
  */
-const uint8_t* IRAM_ATTR font_get_glyph(char ch)
+const uint8_t* IRAM_ATTR font_get_glyph(uint16_t cp)
 {
-    uint16_t codepoint = (uint8_t)ch;
-    return terminus8x16_get_glyph(codepoint);
+    return terminus8x16_get_glyph(cp);
 }
 
