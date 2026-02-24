@@ -4,6 +4,4 @@ idf_component_register(
         "terminus8x16.c"
     INCLUDE_DIRS
         "include"
-    REQUIRES
-        display
 )

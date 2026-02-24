@@ -7,4 +7,5 @@ idf_component_register(
         esp_lcd
         driver
         esp_timer
+        font
 )

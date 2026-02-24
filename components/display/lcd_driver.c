@@ -6,6 +6,7 @@
  */
 
 #include "display.h"
+#include "font.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_rgb.h"
 #include "driver/gpio.h"
@@ -19,11 +20,12 @@
 static const char *TAG = "lcd_driver";
 
 // Forward declarations
-static bool on_bounce_empty(esp_lcd_panel_handle_t panel,
-                                       void *buf,
-                                       int pos_px,
-                                       int len_bytes,
-                                       void *user_ctx);
+static IRAM_ATTR bool on_bounce_empty(esp_lcd_panel_handle_t panel,
+                                      void *buf,
+                                      int   pos_px,
+                                      int   len_bytes,
+                                      void *user_ctx);
+color_t IRAM_ATTR ansi_to_rgb565(uint8_t ansi_color);
 
 // Backlight GPIO
 #define PIN_NUM_BK_LIGHT  2
@@ -39,75 +41,150 @@ static const terminal_cell_t *s_cell_buf  = NULL;
 static int                    s_cell_cols = 0;
 static int                    s_cell_rows = 0;
 
-/**
- * Callback called when bounce buffer is empty and needs refilling
- * This is called from ISR context, so keep it fast!
+/*
+ * Per-column rendering cache populated at the start of each on_bounce_empty
+ * call.  Static (not stack) to avoid blowing the ISR stack.  Safe because
+ * on_bounce_empty is non-reentrant for a single LCD panel.
  *
- * @param panel Panel handle
- * @param buf Pointer to bounce buffer to fill
- * @param pos_px Position in pixels (y-coordinate * width)
- * @param len_bytes Number of bytes to fill
- * @param user_ctx User context (not used)
+ * DRAM_ATTR ensures the cache is in internal SRAM, always reachable from ISR
+ * without going through the Flash cache.
+ */
+#define RENDER_MAX_COLS  (DISPLAY_WIDTH / FONT_WIDTH)   /* 100 */
+
+static DRAM_ATTR struct {
+    const uint8_t *glyph;   /* 16-byte bitmap in DRAM (from terminus8x16) */
+    uint16_t       bg;      /* background colour RGB565                    */
+    uint16_t       xorfg;   /* bg ^ fg — XOR in to switch bg→fg per bit   */
+} s_col_cache[RENDER_MAX_COLS];
+
+/*
+ * Branchless pixel-pair → 32-bit word (little-endian, 2×RGB565).
+ *
+ * Glyph byte `gb`, pixel positions p0 (left, bit MSB side) and p1 (right):
+ *   bit   = (gb >> (7-p)) & 1
+ *   mask  = 0xFFFF if bit=1, 0x0000 if bit=0  →  (uint16_t)(0u - bit)
+ *   pixel = bg ^ (xorfg & mask)          bg when bit=0, fg when bit=1
+ *
+ * Left pixel goes into the low 16 bits; right pixel into the high 16 bits
+ * (correct for little-endian memory layout expected by the RGB panel).
+ */
+#define GPAIR(gb, p0, p1, bg_v, xor_v)                                          \
+    (   (uint32_t)((uint16_t)((bg_v) ^ ((xor_v) &                               \
+            (uint16_t)(0u - (((unsigned)(gb) >> (7u - (p0))) & 1u)))))           \
+    |  ((uint32_t)((uint16_t)((bg_v) ^ ((xor_v) &                               \
+            (uint16_t)(0u - (((unsigned)(gb) >> (7u - (p1))) & 1u))))) << 16) )
+
+/**
+ * Bounce-buffer fill callback — ISR context.
+ *
+ * Assumptions (guaranteed by BOUNCE_BUFFER_HEIGHT == FONT_HEIGHT and the
+ * display height being an exact multiple of FONT_HEIGHT):
+ *   • buf is 32-bit aligned
+ *   • pos_px is always a multiple of DISPLAY_WIDTH (scanline-aligned)
+ *   • len_bytes covers an exact integer number of full scanlines
+ *   • The buffer always starts on a character-row boundary, so
+ *     glyph_line = scanline_index_within_buffer  (no modulo needed)
  */
 static IRAM_ATTR bool on_bounce_empty(esp_lcd_panel_handle_t panel,
-                                       void *buf,
-                                       int pos_px,
-                                       int len_bytes,
-                                       void *user_ctx)
+                                      void *buf,
+                                      int   pos_px,
+                                      int   len_bytes,
+                                      void *user_ctx)
 {
-    // Don't increment counter every time - too slow
-    // callback_count++;
+    if (!buf) return false;
 
-    if (!buf) {
+    /* Guard: cell buffer not yet registered — fill black. */
+    if (!s_cell_buf || s_cell_cols <= 0 || s_cell_rows <= 0) {
+        uint32_t *p = (uint32_t *)buf;
+        int words = len_bytes >> 2;
+        for (int i = 0; i < words; i++) p[i] = 0;
         return false;
     }
 
-    // Pre-calculated 32-bit words (two pixels each)
-    const uint32_t white_white = 0xFFFFFFFF;
-    const uint32_t red_red = ((uint32_t)COLOR_RED << 16) | COLOR_RED;
-    const uint32_t white_red = ((uint32_t)COLOR_RED << 16) | COLOR_WHITE;
-    const uint32_t red_white = ((uint32_t)COLOR_WHITE << 16) | COLOR_RED;
+    const int start_scan = pos_px / DISPLAY_WIDTH;
+    const int num_scans  = (len_bytes >> 1) / DISPLAY_WIDTH;  /* len/2 = pixels */
+    const int char_row   = start_scan / FONT_HEIGHT;
 
-    uint32_t *pixels32 = (uint32_t *)buf;
+    /* Below the text area — fill black. */
+    if (char_row >= s_cell_rows) {
+        uint32_t *p = (uint32_t *)buf;
+        int words = len_bytes >> 2;
+        for (int i = 0; i < words; i++) p[i] = 0;
+        return false;
+    }
 
-    // Calculate starting row and column from pos_px
-    int start_row = pos_px / DISPLAY_WIDTH;
-    //int start_col = pos_px - (start_row * DISPLAY_WIDTH);  // Faster than modulo
+    /* ------------------------------------------------------------------
+     * Build per-column cache for this character row.
+     * ansi_to_rgb565 and font_get_glyph are both IRAM_ATTR; their data
+     * (palette, glyph arrays, range table) is DRAM_ATTR — no Flash access.
+     * ------------------------------------------------------------------ */
+    const terminal_cell_t *row_cells = s_cell_buf + char_row * s_cell_cols;
+    const int ncols = s_cell_cols;
 
-    // assume bounce buffer update is always aligned to start of line and contains exact number of full lines
-    int num_lines = (len_bytes / 2) / DISPLAY_WIDTH;
+    for (int c = 0; c < ncols; c++) {
+        const terminal_cell_t *cell = &row_cells[c];
+        color_t fg = ansi_to_rgb565(cell->fg_color);
+        color_t bg = ansi_to_rgb565(cell->bg_color);
+        if (cell->attrs & ATTR_REVERSE) { color_t t = fg; fg = bg; bg = t; }
+        s_col_cache[c].glyph = font_get_glyph(cell->ch);
+        s_col_cache[c].bg    = bg;
+        s_col_cache[c].xorfg = fg ^ bg;
+    }
 
-    int i = 0;
-    for (int n = 0; n < num_lines; n++) {
-        // Calculate current position for this word (2 pixels)
-        int row = start_row + n;
+    /* ------------------------------------------------------------------
+     * Render scanlines.
+     *
+     * Because BOUNCE_BUFFER_HEIGHT == FONT_HEIGHT and the buffer is
+     * always char-row aligned, the glyph scanline index equals the
+     * scanline's index within the bounce buffer (n).
+     *
+     * Inner loop processes two adjacent columns per iteration → 16 pixels
+     * → 8 × uint32_t writes, all naturally 32-bit aligned.
+     * ------------------------------------------------------------------ */
+    color_t *dst_base = (color_t *)buf;
 
-        // Row check bit (32-pixel squares vertically)
-        int row_check = (row >> 5) & 1;
+    for (int n = 0; n < num_scans; n++) {
+        const uint8_t gl = (uint8_t)n;          /* glyph scanline 0-15 */
+        uint32_t *d = (uint32_t *)(dst_base + (unsigned)n * DISPLAY_WIDTH);
 
-        for(int dx = 0; dx < DISPLAY_WIDTH / 2; dx++) {
-            // Column check bits for the two pixels
-            int col_check0 = (dx >> 4) & 1;
-            int col_check1 = col_check0;
+        int c = 0;
+        for (; c + 1 < ncols; c += 2) {
+            const uint8_t b0 = s_col_cache[c    ].glyph ? s_col_cache[c    ].glyph[gl] : 0u;
+            const uint8_t b1 = s_col_cache[c + 1].glyph ? s_col_cache[c + 1].glyph[gl] : 0u;
+            const uint16_t bg0 = s_col_cache[c    ].bg,  xf0 = s_col_cache[c    ].xorfg;
+            const uint16_t bg1 = s_col_cache[c + 1].bg,  xf1 = s_col_cache[c + 1].xorfg;
 
-            // XOR with row to get checkerboard
-            int check0 = row_check ^ col_check0;
-            int check1 = row_check ^ col_check1;
+            /* Column c — 8 pixels as 4 × uint32_t, unrolled */
+            d[0] = GPAIR(b0, 0, 1, bg0, xf0);
+            d[1] = GPAIR(b0, 2, 3, bg0, xf0);
+            d[2] = GPAIR(b0, 4, 5, bg0, xf0);
+            d[3] = GPAIR(b0, 6, 7, bg0, xf0);
 
-            // Select the right pre-calculated word
-            if (check0 == check1) {
-                pixels32[i] = check0 ? white_white : red_red;
-            } else if (check0) {
-                pixels32[i] = white_red;  // First white, second red
-            } else {
-                pixels32[i] = red_white;  // First red, second white
-            }
-            i++;
+            /* Column c+1 — 8 pixels as 4 × uint32_t, unrolled */
+            d[4] = GPAIR(b1, 0, 1, bg1, xf1);
+            d[5] = GPAIR(b1, 2, 3, bg1, xf1);
+            d[6] = GPAIR(b1, 4, 5, bg1, xf1);
+            d[7] = GPAIR(b1, 6, 7, bg1, xf1);
+
+            d += 8;
+        }
+
+        /* Trailing odd column (defensive; 100 cols → never taken). */
+        if (c < ncols) {
+            const uint8_t b0   = s_col_cache[c].glyph ? s_col_cache[c].glyph[gl] : 0u;
+            const uint16_t bg0 = s_col_cache[c].bg, xf0 = s_col_cache[c].xorfg;
+            d[0] = GPAIR(b0, 0, 1, bg0, xf0);
+            d[1] = GPAIR(b0, 2, 3, bg0, xf0);
+            d[2] = GPAIR(b0, 4, 5, bg0, xf0);
+            d[3] = GPAIR(b0, 6, 7, bg0, xf0);
         }
     }
 
-    return false;  // Return false = no high priority task woken
+    return false;
 }
+
+#undef GPAIR
+#undef RENDER_MAX_COLS
 
 /**
  * Initialize backlight control GPIO

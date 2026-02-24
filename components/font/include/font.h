@@ -7,7 +7,6 @@
 
 #include <stdint.h>
 #include "esp_attr.h"
-#include "display.h"
 
 #define FONT_WIDTH  8
 #define FONT_HEIGHT 16
