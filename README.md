@@ -75,10 +75,7 @@ All configuration is in `idf.py menuconfig` → "Cyberdeck Configuration":
 
 ### 🚀 Bounce Buffer Rendering
 - **No framebuffer needed** - saves 768KB PSRAM!
-- Small 25.6KB bounce buffer in fast SRAM
-- Dirty row tracking for efficient updates
-- **15-180× faster** than traditional framebuffer approach
-- See [BOUNCE_BUFFER_RENDERING.md](BOUNCE_BUFFER_RENDERING.md) for details
+- Small bounce buffer in fast SRAM
 
 ## Current Status
 
@@ -114,18 +111,9 @@ All configuration is in `idf.py menuconfig` → "Cyberdeck Configuration":
 - **Flash**: 16MB
 
 **Display Configuration** (in `lcd_driver.c`):
-- PCLK: 16MHz
-- Backlight: GPIO 2
+- PCLK: 20MHz
 - Pin mapping configured for actual board (may differ from Waveshare documentation)
 - Bounce buffer: 25.6KB in SRAM (800×16 pixels)
-
-## Documentation
-
-- [Full Documentation](../CYBERDECK_POC_DOCUMENTATION.md) - Complete implementation guide
-- [Technical Specs](../TECHNICAL_SPECS.md) - Hardware/software specifications
-- [Quick Start Guide](../QUICK_START.md) - Setup and build instructions
-- [Bounce Buffer Rendering](BOUNCE_BUFFER_RENDERING.md) - **Rendering architecture details** ⭐
-- [Troubleshooting Guide](TROUBLESHOOTING.md) - **Common errors and solutions** 🔧
 
 ## License
 
