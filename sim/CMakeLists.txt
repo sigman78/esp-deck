@@ -4,6 +4,9 @@ set(CMAKE_C_STANDARD 11)
 
 set(ROOT ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
+# Mirror the IDF variable so component files can use ${PROJECT_DIR}/cmake/...
+set(PROJECT_DIR ${ROOT})
+
 # Preprocessor flag consumed by display.h and display_sdl.c
 add_compile_definitions(BUILD_SIMULATOR=1)
 
