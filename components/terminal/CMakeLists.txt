@@ -1,7 +1,6 @@
 idf_component_register(
     SRCS
         "terminal.c"
-        "ansi_parser.c"
     INCLUDE_DIRS
         "include"
     REQUIRES

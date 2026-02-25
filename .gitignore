@@ -51,3 +51,4 @@ private/
 secrets/
 *.key
 *.pem
+/build-sim

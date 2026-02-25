@@ -2,16 +2,8 @@ cmake_minimum_required(VERSION 3.16)
 project(terminal_unit_tests C)
 set(CMAKE_C_STANDARD 11)
 
-# CPM.cmake bootstrap
-set(CPM_VERSION 0.42.1)
-set(CPM_SCRIPT  "${CMAKE_CURRENT_BINARY_DIR}/cmake/CPM_${CPM_VERSION}.cmake")
-if(NOT EXISTS "${CPM_SCRIPT}")
-    file(DOWNLOAD
-        "https://github.com/cpm-cmake/CPM.cmake/releases/download/v${CPM_VERSION}/CPM.cmake"
-        "${CPM_SCRIPT}"
-    )
-endif()
-include("${CPM_SCRIPT}")
+# CPM.cmake bootstrap — shared with sim/
+include(../../cmake/get_cpm.cmake)
 
 # Dependencies
 CPMAddPackage(

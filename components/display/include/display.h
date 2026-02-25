@@ -9,7 +9,9 @@
 #include <stdbool.h>
 #include "esp_err.h"
 #include "esp_attr.h"
+#ifndef BUILD_SIMULATOR
 #include "esp_lcd_panel_ops.h"
+#endif
 
 // Display dimensions
 #define DISPLAY_WIDTH   800
@@ -55,10 +57,12 @@ typedef struct {
  */
 esp_err_t display_init(void);
 
+#ifndef BUILD_SIMULATOR
 /**
- * Get LCD panel handle
+ * Get LCD panel handle (hardware target only)
  */
 esp_lcd_panel_handle_t display_get_panel(void);
+#endif /* BUILD_SIMULATOR */
 
 /**
  * Register the terminal cell buffer so the display ISR can render from it.
@@ -77,5 +81,12 @@ void display_set_text_buffer(const terminal_cell_t *buf, int cols, int rows);
  */
 esp_err_t display_set_backlight(uint8_t brightness);
 
+#ifdef BUILD_SIMULATOR
+/**
+ * Render one full frame to the SDL2 window (simulator only).
+ * Call once per iteration of the main event loop.
+ */
+void display_render_frame(void);
+#endif /* BUILD_SIMULATOR */
 
 #endif // DISPLAY_H

@@ -1,5 +1,6 @@
 idf_component_register(
     SRCS
+        "display_render.c"
         "lcd_driver.c"
     INCLUDE_DIRS
         "include"
