@@ -20,6 +20,18 @@ static DRAM_ATTR int                    s_cell_cols = 0;
 static DRAM_ATTR int                    s_cell_rows = 0;
 
 /* -------------------------------------------------------------------------
+ * Cursor state — updated by terminal via display_set_cursor().
+ * Blink is driven internally by a frame counter; ~2 Hz at 60 fps.
+ * ---------------------------------------------------------------------- */
+#define CURSOR_BLINK_FRAMES  15   /* toggle every 15 frames ≈ 250 ms at 60 fps */
+
+static DRAM_ATTR int           s_cursor_x       = 0;
+static DRAM_ATTR int           s_cursor_y       = 0;
+static DRAM_ATTR cursor_mode_t s_cursor_mode    = CURSOR_NONE;
+static DRAM_ATTR uint32_t      s_blink_count    = 0;
+static DRAM_ATTR bool          s_cursor_visible = true;
+
+/* -------------------------------------------------------------------------
  * Per-column rendering cache.
  * Static (not stack) to avoid blowing the ISR stack on ESP32.
  * DRAM_ATTR keeps it in internal SRAM — reachable from ISR without Flash cache.
@@ -102,6 +114,17 @@ void display_set_text_buffer(const terminal_cell_t *buf, int cols, int rows)
     s_cell_rows = rows;
 }
 
+void display_set_cursor(int x, int y, cursor_mode_t mode)
+{
+    if (x != s_cursor_x || y != s_cursor_y) {
+        s_blink_count    = 0;
+        s_cursor_visible = true;
+    }
+    s_cursor_x    = x;
+    s_cursor_y    = y;
+    s_cursor_mode = mode;
+}
+
 /**
  * Render one horizontal band (one character-row height) into dst.
  *
@@ -125,6 +148,14 @@ void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
     const int start_scan = pos_px / DISPLAY_WIDTH;
     const int num_scans  = (n_bytes >> 1) / DISPLAY_WIDTH;  /* n_bytes/2 = pixels */
     const int char_row   = start_scan / FONT_HEIGHT;
+
+    /* Tick blink counter once per full frame (char_row 0 = start of new frame). */
+    if (char_row == 0) {
+        if (++s_blink_count >= CURSOR_BLINK_FRAMES) {
+            s_blink_count    = 0;
+            s_cursor_visible = !s_cursor_visible;
+        }
+    }
 
     /* Below the text area — fill black. */
     if (char_row >= s_cell_rows) {
@@ -194,6 +225,39 @@ void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
             d[1] = GPAIR(b0, 2, 3, bg0, xf0);
             d[2] = GPAIR(b0, 4, 5, bg0, xf0);
             d[3] = GPAIR(b0, 6, 7, bg0, xf0);
+        }
+    }
+
+    /* ------------------------------------------------------------------
+     * Cursor overlay — XOR every pixel in the cursor region with
+     * 0xFFFFFFFF, inverting all bits and guaranteeing contrast.
+     * FONT_WIDTH=8 px × 2 B = 16 B = 4 × uint32_t per scanline.
+     * Alignment is guaranteed: dst_base is 4-byte aligned,
+     * DISPLAY_WIDTH×sizeof(color_t)=1600 B and cx×16 B are both ×4.
+     * ------------------------------------------------------------------ */
+    if (s_cursor_mode != CURSOR_NONE && s_cursor_visible &&
+            s_cursor_y == char_row && s_cursor_x >= 0 && s_cursor_x < ncols) {
+
+        const int cx       = s_cursor_x;
+        const int px_start = cx * FONT_WIDTH;
+
+        if (s_cursor_mode == CURSOR_UNDERSCORE) {
+            const int first = num_scans >= 2 ? num_scans - 2 : 0;
+            for (int n = first; n < num_scans; n++) {
+                uint32_t *p = (uint32_t *)(dst_base + n * DISPLAY_WIDTH + px_start);
+                p[0] ^= 0xFFFFFFFFu;
+                p[1] ^= 0xFFFFFFFFu;
+                p[2] ^= 0xFFFFFFFFu;
+                p[3] ^= 0xFFFFFFFFu;
+            }
+        } else { /* CURSOR_BLOCK */
+            for (int n = 0; n < num_scans; n++) {
+                uint32_t *p = (uint32_t *)(dst_base + n * DISPLAY_WIDTH + px_start);
+                p[0] ^= 0xFFFFFFFFu;
+                p[1] ^= 0xFFFFFFFFu;
+                p[2] ^= 0xFFFFFFFFu;
+                p[3] ^= 0xFFFFFFFFu;
+            }
         }
     }
 }

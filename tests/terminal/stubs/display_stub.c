@@ -16,3 +16,8 @@ void display_set_text_buffer(const terminal_cell_t *buf, int cols, int rows)
     g_test_cell_cols = cols;
     g_test_cell_rows = rows;
 }
+
+void display_set_cursor(int x, int y, cursor_mode_t mode)
+{
+    (void)x; (void)y; (void)mode;
+}

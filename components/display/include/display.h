@@ -52,6 +52,13 @@ typedef struct {
 #define ATTR_REVERSE    (1 << 2)
 #define ATTR_BLINK      (1 << 3)
 
+// Cursor shape
+typedef enum {
+    CURSOR_NONE = 0,    // invisible
+    CURSOR_UNDERSCORE,  // horizontal bar — last 2 scanlines of cell
+    CURSOR_BLOCK,       // full character cell, XOR
+} cursor_mode_t;
+
 /**
  * Initialize display driver
  */
@@ -80,6 +87,12 @@ void display_set_text_buffer(const terminal_cell_t *buf, int cols, int rows);
  * Set backlight brightness (0-100%)
  */
 esp_err_t display_set_backlight(uint8_t brightness);
+
+/**
+ * Update the cursor position and shape.
+ * Called by the terminal whenever the cursor moves or its mode changes.
+ */
+void display_set_cursor(int x, int y, cursor_mode_t mode);
 
 #ifdef BUILD_SIMULATOR
 /**

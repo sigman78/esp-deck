@@ -73,6 +73,16 @@ void terminal_set_cursor(int x, int y);
 void terminal_get_cursor(int *x, int *y);
 
 /**
+ * Set cursor shape (CURSOR_NONE hides the cursor).
+ */
+void terminal_set_cursor_mode(cursor_mode_t mode);
+
+/**
+ * Get current cursor shape.
+ */
+cursor_mode_t terminal_get_cursor_mode(void);
+
+/**
  * Scroll terminal up by N lines
  *
  * @param lines Number of lines to scroll

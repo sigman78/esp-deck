@@ -15,6 +15,7 @@ static struct {
     int rows;
     int cursor_x;
     int cursor_y;
+    cursor_mode_t cursor_mode;
     terminal_cell_t *buffer;
     uint8_t current_fg;
     uint8_t current_bg;
@@ -37,8 +38,9 @@ esp_err_t terminal_init(int cols, int rows)
 
     term.cols = cols;
     term.rows = rows;
-    term.cursor_x = 0;
-    term.cursor_y = 0;
+    term.cursor_x    = 0;
+    term.cursor_y    = 0;
+    term.cursor_mode = CURSOR_BLOCK;
     term.current_fg    = 7;  // White
     term.current_bg    = 0;  // Black
     term.current_attrs = 0;
@@ -68,8 +70,9 @@ esp_err_t terminal_init(int cols, int rows)
     // Share the cell buffer with the display component so the ISR can render
     // from it directly during on_bounce_empty.
     display_set_text_buffer(term.buffer, cols, rows);
+    display_set_cursor(0, 0, term.cursor_mode);
 
-    ESP_LOGI(TAG, "Terminal initialized: %dx%d, buffer %d bytes", cols, rows, buffer_size);
+    ESP_LOGI(TAG, "Terminal initialized: %dx%d, buffer %zu bytes", cols, rows, buffer_size);
 
     return ESP_OK;
 }
@@ -175,6 +178,8 @@ void terminal_write(const char *data, size_t len)
     for (size_t i = 0; i < len; i++) {
         utf8_feed((uint8_t)data[i]);
     }
+
+    display_set_cursor(term.cursor_x, term.cursor_y, term.cursor_mode);
 }
 
 /**
@@ -212,6 +217,7 @@ void terminal_clear(void)
 
     term.cursor_x = 0;
     term.cursor_y = 0;
+    display_set_cursor(0, 0, term.cursor_mode);
 }
 
 /**
@@ -225,6 +231,7 @@ void terminal_set_cursor(int x, int y)
     if (y >= 0 && y < term.rows) {
         term.cursor_y = y;
     }
+    display_set_cursor(term.cursor_x, term.cursor_y, term.cursor_mode);
 }
 
 /**
@@ -259,6 +266,17 @@ void terminal_scroll_up(int lines)
         term.buffer[i].bg_color = term.current_bg;
         term.buffer[i].attrs = 0;
     }
+}
+
+void terminal_set_cursor_mode(cursor_mode_t mode)
+{
+    term.cursor_mode = mode;
+    display_set_cursor(term.cursor_x, term.cursor_y, mode);
+}
+
+cursor_mode_t terminal_get_cursor_mode(void)
+{
+    return term.cursor_mode;
 }
 
 /**

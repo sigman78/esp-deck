@@ -35,5 +35,11 @@ typedef struct {
 #define ATTR_REVERSE    (1 << 2)
 #define ATTR_BLINK      (1 << 3)
 
-/* Only the function called by terminal.c needs a declaration here. */
+typedef enum {
+    CURSOR_NONE = 0,
+    CURSOR_UNDERSCORE,
+    CURSOR_BLOCK,
+} cursor_mode_t;
+
 void display_set_text_buffer(const terminal_cell_t *buf, int cols, int rows);
+void display_set_cursor(int x, int y, cursor_mode_t mode);
