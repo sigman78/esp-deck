@@ -16,6 +16,8 @@ CPMAddPackage(
 set(STUBS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/stubs)
 set(TERM_DIR  ${CMAKE_CURRENT_SOURCE_DIR}/../../components/terminal)
 
+add_subdirectory(../../idfsim ${CMAKE_CURRENT_BINARY_DIR}/idfsim)
+
 add_executable(test_terminal
     test_terminal.c
     ${TERM_DIR}/terminal.c
@@ -28,7 +30,7 @@ target_include_directories(test_terminal PRIVATE
     ${unity_SOURCE_DIR}/src
 )
 
-target_link_libraries(test_terminal PRIVATE unity)
+target_link_libraries(test_terminal PRIVATE unity idfsim)
 
 enable_testing()
 add_test(NAME terminal_tests COMMAND test_terminal)
