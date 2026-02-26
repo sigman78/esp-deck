@@ -23,8 +23,10 @@ CPMAddPackage(
 add_subdirectory(${ROOT}/idfsim              idfsim)
 add_subdirectory(${ROOT}/components/font     font)
 add_subdirectory(${ROOT}/components/display  display)
+add_subdirectory(${ROOT}/components/libtsm   libtsm)
 add_subdirectory(${ROOT}/components/terminal terminal)
+add_subdirectory(${ROOT}/components/vterm    vterm)
 
 add_executable(cyberdeck_sim main.c)
 # SDL2main provides WinMain on Windows (SDL.h renames main -> SDL_main)
-target_link_libraries(cyberdeck_sim PRIVATE SDL2::SDL2main terminal)
+target_link_libraries(cyberdeck_sim PRIVATE SDL2::SDL2main vterm)

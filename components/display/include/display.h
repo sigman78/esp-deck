@@ -38,13 +38,24 @@ typedef uint16_t color_t;
 /*
  * Terminal cell — defined here (not in terminal.h) so the display ISR can
  * read cell data without creating a circular dependency.
+ *
+ * fg_color / bg_color store pre-converted RGB565 values so the renderer can
+ * use them directly without a per-cell palette lookup.  Both terminal.c and
+ * vterm.c call display_ansi_to_rgb565() when writing cells.
  */
 typedef struct {
     uint16_t cp;        // Unicode codepoint (BMP, U+0000..U+FFFF)
-    uint8_t  fg_color;  // Foreground ANSI-256 palette index
-    uint8_t  bg_color;  // Background ANSI-256 palette index
+    uint16_t fg_color;  // Foreground RGB565
+    uint16_t bg_color;  // Background RGB565
     uint8_t  attrs;     // Attribute flags (see ATTR_* below)
 } terminal_cell_t;
+
+/**
+ * Convert an ANSI-256 palette index to an RGB565 value.
+ * Covers the full range: 0-15 named, 16-231 6×6×6 cube, 232-255 grayscale.
+ * IRAM_ATTR — safe to call from the ESP32 bounce-buffer ISR.
+ */
+color_t IRAM_ATTR display_ansi_to_rgb565(uint8_t ansi);
 
 // Cell attribute flags
 #define ATTR_BOLD       (1 << 0)

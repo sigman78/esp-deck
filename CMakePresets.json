@@ -15,8 +15,7 @@
       "name": "tests",
       "displayName": "Unit Tests",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/tests/terminal/build",
-      "sourceDir": "${sourceDir}/tests/terminal"
+      "binaryDir": "${sourceDir}/tests/terminal/build"
     }
   ]
 }

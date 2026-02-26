@@ -14,6 +14,7 @@ idf_component_register(
         driver
         display
         terminal
+        vterm
         ssh
         input
         wifi
