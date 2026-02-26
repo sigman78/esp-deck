@@ -63,7 +63,7 @@ static DRAM_ATTR struct {
  * ANSI-256 colour → RGB565.
  * IRAM_ATTR: callable from ESP32 ISR without going through Flash cache.
  * ---------------------------------------------------------------------- */
-color_t IRAM_ATTR ansi_to_rgb565(uint8_t ansi_color)
+color_t IRAM_ATTR display_ansi_to_rgb565(uint8_t ansi_color)
 {
     /* 0-15: standard 16 colours */
     static DRAM_ATTR const color_t ansi_palette[16] = {
@@ -175,8 +175,8 @@ void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
 
     for (int c = 0; c < ncols; c++) {
         const terminal_cell_t *cell = &row_cells[c];
-        color_t fg = ansi_to_rgb565(cell->fg_color);
-        color_t bg = ansi_to_rgb565(cell->bg_color);
+        color_t fg = cell->fg_color;   /* already RGB565 */
+        color_t bg = cell->bg_color;
         if (cell->attrs & ATTR_REVERSE) { color_t t = fg; fg = bg; bg = t; }
         s_col_cache[c].glyph = font_get_glyph(cell->cp);
         s_col_cache[c].bg    = bg;
