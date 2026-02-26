@@ -13,6 +13,10 @@
 #include <string.h>
 #include <stdlib.h>
 
+#ifndef VTERM_BUF_SIZE
+#define VTERM_BUF_SIZE 256
+#endif
+
 static const char *TAG = "vterm";
 
 static struct tsm_screen  *s_screen;
@@ -26,6 +30,10 @@ static vterm_response_cb_t s_response_cb;
 static void               *s_response_user;
 
 static bool                s_initialized;
+static tsm_age_t           s_last_age;    /* 0 = force full redraw */
+
+static char                s_wbuf[VTERM_BUF_SIZE];
+static size_t              s_wbuf_len;
 
 /* -------------------------------------------------------------------------
  * libtsm callbacks
@@ -51,9 +59,14 @@ static int draw_cb(struct tsm_screen *screen,
                    tsm_age_t age,
                    void *data)
 {
-    (void)screen; (void)id; (void)width; (void)age; (void)data;
+    (void)screen; (void)id; (void)width; (void)data;
 
     if ((int)posx >= s_cols || (int)posy >= s_rows)
+        return 0;
+
+    /* age == 0 means age_reset (counter overflow) — always redraw.
+     * age <= s_last_age means cell unchanged since last draw — skip. */
+    if (age != 0 && age <= s_last_age)
         return 0;
 
     int idx = (int)posy * s_cols + (int)posx;
@@ -99,12 +112,20 @@ static int draw_cb(struct tsm_screen *screen,
     return 0;
 }
 
-static void refresh_display(void)
+static inline void refresh_display(void)
 {
-    tsm_screen_draw(s_screen, draw_cb, NULL);
+    s_last_age = tsm_screen_draw(s_screen, draw_cb, NULL);
     display_set_cursor((int)tsm_screen_get_cursor_x(s_screen),
                        (int)tsm_screen_get_cursor_y(s_screen),
                        CURSOR_BLOCK);
+}
+
+static inline void flush_buf(void)
+{
+    if (s_wbuf_len == 0) return;
+    tsm_vte_input(s_vte, s_wbuf, s_wbuf_len);
+    s_wbuf_len = 0;
+    refresh_display();
 }
 
 /* -------------------------------------------------------------------------
@@ -160,9 +181,33 @@ esp_err_t vterm_init(int cols, int rows)
 
 void vterm_write(const char *data, size_t len)
 {
+    if (!s_initialized || len == 0) return;
+    while (len > 0) {
+        size_t avail = VTERM_BUF_SIZE - s_wbuf_len;
+        size_t scan  = len < avail ? len : avail;
+        const char *lf = memchr(data, '\n', scan);
+        size_t copy = lf ? (size_t)(lf - data) + 1 : scan;
+        memcpy(s_wbuf + s_wbuf_len, data, copy);
+        s_wbuf_len += copy;
+        data += copy;
+        len  -= copy;
+        if (lf || s_wbuf_len == VTERM_BUF_SIZE)
+            flush_buf();
+    }
+}
+
+void vterm_write_dir(const char *data, size_t len)
+{
     if (!s_initialized) return;
+    flush_buf();
     tsm_vte_input(s_vte, data, len);
     refresh_display();
+}
+
+void vterm_flush(void)
+{
+    if (!s_initialized) return;
+    flush_buf();
 }
 
 void vterm_set_response_cb(vterm_response_cb_t cb, void *user)
@@ -174,6 +219,8 @@ void vterm_set_response_cb(vterm_response_cb_t cb, void *user)
 void vterm_reset(void)
 {
     if (!s_initialized) return;
+    flush_buf();
+    s_last_age = 0;          /* force full redraw after reset */
     tsm_vte_reset(s_vte);
     refresh_display();
 }

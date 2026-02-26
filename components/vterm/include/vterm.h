@@ -24,13 +24,30 @@ esp_err_t vterm_init(int cols, int rows);
 
 /**
  * Feed raw bytes from the remote (SSH/PTY) into the VT parser.
- * Escape sequences are interpreted; the display cell buffer is
- * refreshed on return.
+ * Bytes are accumulated in an internal buffer (VTERM_BUF_SIZE, default 256).
+ * The display is refreshed automatically when a newline is encountered or
+ * the buffer is full.  Call vterm_flush() to push any remaining bytes.
  *
  * @param data  Byte stream (may contain VT escape sequences).
  * @param len   Number of bytes.
  */
 void vterm_write(const char *data, size_t len);
+
+/**
+ * Feed bytes directly into the VT parser without buffering.
+ * Any pending buffered bytes are flushed first, then @p data is fed
+ * immediately and the display is refreshed on return.
+ *
+ * @param data  Byte stream (may contain VT escape sequences).
+ * @param len   Number of bytes.
+ */
+void vterm_write_dir(const char *data, size_t len);
+
+/**
+ * Flush any bytes held in the internal write buffer to the VT parser
+ * and refresh the display.  No-op if the buffer is empty.
+ */
+void vterm_flush(void);
 
 /**
  * Register a callback for bytes the terminal state machine needs to
