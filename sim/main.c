@@ -99,8 +99,8 @@ static void scene_colors(void)
     static const char *names[16] = {
         "Black",   "Red",     "Green",   "Yellow",
         "Blue",    "Magenta", "Cyan",    "White",
-        "Br-Black","Br-Red",  "Br-Green","Br-Yellow",
-        "Br-Blue", "Br-Mag",  "Br-Cyan", "Br-White",
+        "Black",   "Red",     "Green",   "Yellow",
+        "Blue",    "Magenta", "Cyan",    "White",
     };
 
     scene_header(0, "ANSI-16 colors & SGR attributes");
@@ -176,13 +176,13 @@ static void scene_256(void)
     nl();
 
     /* 6×6×6 color cube — 6 rows of 36 swatches (index = 16 + row*36 + col) */
-    fg(15); vw(BOLD "  6\xc3\x97" "6\xc3\x97" "6 color cube  16-231:" RST); nl();
+    fg(15); vw(BOLD "  6×6×6 color cube  16-231:" RST); nl();
     for (int r = 0; r < 6; r++) {
         vw("  ");
         for (int c = 0; c < 36; c++) {
             bg(16 + r * 36 + c); vw("  "); vw(RST);
         }
-        fg(239); vf("  %3d" "\xe2\x80\x93" "%3d", 16 + r * 36, 16 + r * 36 + 35);
+        fg(239); vf("  %3d–%3d", 16 + r * 36, 16 + r * 36 + 35);
         vw(RST); nl();
     }
     nl();
@@ -236,7 +236,7 @@ static void hline_split(int at)
 
 static void scene_monitor(void)
 {
-    scene_header(2, "System monitor \xe2\x80\x94 box-drawing & 256-color demo");
+    scene_header(2, "System monitor — box-drawing & 256-color demo");
     nl();
 
     /* ╔══════════╗ */
@@ -256,9 +256,9 @@ static void scene_monitor(void)
     static const struct {
         const char *label; int pct; int color; const char *info;
     } res[] = {
-        { "CPU ", 58, 154, "  Xtensa LX7  240 MHz   tasks: 12 running" },
+        { "CPU ", 58, 154, "  Xtensa LX7  240 MHz   tasks: 12 running " },
         { "HEAP", 76, 214, "  406 KB free / 512 KB total              " },
-        { "PSRAM",35,  81, "  2.8 MB free / 4.0 MB total              " },
+        { "PRAM", 35,  81, "  2.8 MB free / 4.0 MB total              " },
     };
     for (int i = 0; i < 3; i++) {
         row_l();
@@ -280,15 +280,15 @@ static void scene_monitor(void)
     hline_split(40);  /* ╟────────────────────────────────────────┼─────...─╢ */
 
     static const char *net[4] = {
-        "  SSID:  CyberNet_5G",
+        "  SSID:  CyberNet_5G ",
         "  IP:    192.168.1.42",
-        "  RSSI:  \xe2\x88\x92" "54 dBm",
-        "  Auth:  publickey",
+        "  RSSI:  54 dBm      ",
+        "  Auth:  publickey   ",
     };
     static const char *term[4] = {
         "  Backend:    libtsm 4.3.0",
         "  Emulation:  VT220 / xterm-256color",
-        "  Size:       100\xc3\x97" "30   UTF-8",
+        "  Size:       100×30   UTF-8",
         "  SSH:        cyberdeck@dev.example.com:22",
     };
     for (int i = 0; i < 4; i++) {

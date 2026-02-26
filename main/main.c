@@ -46,11 +46,15 @@ static EventGroupHandle_t s_system_event_group;
 #define BLE_PAIRED_BIT      BIT2
 
 /* -------------------------------------------------------------------------
- * ANSI helper macros — same shorthand used in sim/main.c
+ * ANSI helper macros — \e is a GCC extension (= ESC = 0x1B)
  * ---------------------------------------------------------------------- */
-#define ESC  "\x1b"
-#define CSI  ESC "["
-#define RST  CSI "0m"
+#define AC_RESET  "\e[0m"
+#define AC_BOLD   "\e[1m"
+#define AC_UNDER  "\e[4m"
+#define AC_BLINK  "\e[5m"
+#define AC_REV    "\e[7m"
+#define AC_CLS    "\e[2J"
+#define AC_HOME   "\e[H"
 
 /* Write literal string via vterm */
 #define vw(s)  vterm_write((s), sizeof(s) - 1)
@@ -68,14 +72,11 @@ static void vf(const char *fmt, ...)
 }
 
 /* Set ANSI-256 foreground / background colour */
-static void fg(int n) { vf(CSI "38;5;%dm", n); }
-static void bg(int n) { vf(CSI "48;5;%dm", n); }
+static void fg(int n) { vf("\e[38;5;%dm", n); }
+static void bg(int n) { vf("\e[48;5;%dm", n); }
 
-/* Newline */
-#define nl()  vw("\r\n")
-
-/* Reset colours then newline */
-#define rnl() vw(RST "\r\n")
+/* Combined fg+bg in one escape sequence */
+static void fgbg(int f, int b) { vf("\e[38;5;%d;48;5;%dm", f, b); }
 
 /* -------------------------------------------------------------------------
  * Initialize NVS flash storage
@@ -129,64 +130,58 @@ static void init_network(void)
 static void show_splash_screen(void)
 {
     /* Clear screen, home cursor */
-    vw(CSI "2J" CSI "H");
+    vw(AC_CLS AC_HOME);
 
     /* ── Title bar (full width) ─────────────────────────────────────── */
-    fg(14); bg(17);  /* bright cyan on bright black (dark grey) */
-    vw(CSI "1m");    /* bold */
-    /* 100 chars: 2 sp + left pad + text + right pad + 2 sp */
-    vw("  " "\xe2\x95\x94");   /* ╔ */
-    for (int i = 0; i < 94; i++) vw("\xe2\x95\x90"); /* ═ ×94 */
-    vw("\xe2\x95\x97" "  "); rnl(); /* ╗ */
+    fgbg(14, 17);
+    vw(AC_BOLD "  ╔");
+    for (int i = 0; i < 94; i++) vw("═");
+    vw("╗  \r\n");
 
-    fg(14); bg(17); vw(CSI "1m");
-    vw("  " "\xe2\x95\x91"); /* ║ */
-    fg(15); bg(17); vw(CSI "1m");
-    vw("          CYBERDECK SSH TERMINAL v0.1"
-       "          ESP32-S3 \xc2\xb7 Terminus 8\xc3\x97" "16          ");
-    fg(14); bg(17); vw(CSI "1m");
-    vw("\xe2\x95\x91" "  "); rnl(); /* ║ */
+    fgbg(14, 17); vw(AC_BOLD "  ║");
+    fgbg(15, 17); vw(AC_BOLD
+       "                CYBERDECK SSH TERMINAL v0.1"
+       "          ESP32-S3 · Terminus 8×16                 ");
+    fgbg(14, 17); vw(AC_BOLD "║  \r\n");
 
-    fg(14); bg(17);
-    vw("  " "\xe2\x95\x9a");   /* ╚ */
-    for (int i = 0; i < 94; i++) vw("\xe2\x95\x90"); /* ═ ×94 */
-    vw("\xe2\x95\x9d" "  "); rnl(); /* ╝ */
-    vw(RST); nl();
+    fgbg(14, 17); vw(AC_BOLD "  ╚");
+    for (int i = 0; i < 94; i++) vw("═");
+    vw("╝  \r\n");
+    vw(AC_RESET "\r\n");
 
     /* ── ANSI-16 foreground colours ─────────────────────────────────── */
-    fg(7); bg(0);
-    vw(CSI "1m" "  FG: " RST);
+    fgbg(7, 0);
+    vw(AC_BOLD "  FG: " AC_RESET);
     for (int c = 0; c < 16; c++) {
-        vf(CSI "38;5;%dm", c);
-        bg(c < 8 ? 0 : 8);  /* dark half on black, bright half on dark grey */
-        vw(" \xe2\x96\x88\xe2\x96\x88 ");  /* ██ */
+        vf("\e[38;5;%dm", c);
+        bg(c < 8 ? 8 : 0);  /* dark half on black, bright half on dark grey */
+        vf(" %2d ", c);
+        //vw(" ██ ");
     }
-    vw(RST); nl();
+    vw(AC_RESET "\r\n");
 
     /* ── ANSI-16 background colours ─────────────────────────────────── */
-    fg(7); bg(0);
-    vw(CSI "1m" "  BG: " RST);
+    fgbg(7, 0);
+    vw(AC_BOLD "  BG: " AC_RESET);
     for (int c = 0; c < 16; c++) {
         fg(c < 8 ? 15 : 0);
-        vf(CSI "48;5;%dm", c);
+        vf("\e[48;5;%dm", c);
         vf(" %2d ", c);
     }
-    vw(RST); nl(); nl();
+    vw(AC_RESET "\r\n\r\n");
 
     /* ── SGR attribute demo ──────────────────────────────────────────── */
-    fg(7); bg(0);
-    vw("  " CSI "1m" "Bold" RST
-       "  " CSI "4m" "Underline" RST
-       "  " CSI "7m" "Reverse" RST
-       "  " CSI "1;32m" "Bold+Green" RST
-       "  " CSI "4;33m" "Underline+Yellow" RST
-       "  " CSI "7;35m" "Reverse+Magenta" RST);
-    nl(); nl();
+    fgbg(7, 0);
+    vw("  " AC_BOLD    "Bold"             AC_RESET
+       "  " AC_UNDER   "Underline"        AC_RESET
+       "  " AC_REV     "Reverse"          AC_RESET
+       "  \e[1;32m"    "Bold+Green"       AC_RESET
+       "  \e[4;33m"    "Underline+Yellow" AC_RESET
+       "  \e[7;35m"    "Reverse+Magenta"  AC_RESET "\r\n\r\n");
 
     /* ── 6×6×6 colour cube (ANSI 16-231) ───────────────────────────── */
-    fg(7); bg(0);
-    vw(CSI "1m" "  256-color cube:" RST);
-    nl();
+    fgbg(7, 0);
+    vw(AC_BOLD "  256-color cube:" AC_RESET "\r\n");
 
     for (int r = 0; r < 6; r++) {
         vw("  ");
@@ -195,29 +190,26 @@ static void show_splash_screen(void)
                 int idx = 16 + r * 36 + g * 6 + b;
                 /* pick fg for legibility */
                 int light = (r > 2 || g > 2 || (r + g + b) > 6);
-                vf(CSI "38;5;%dm" CSI "48;5;%dm", light ? 0 : 15, idx);
+                vf("\e[38;5;%d;48;5;%dm", light ? 0 : 15, idx);
                 vw("  ");
             }
-            if (g < 5) { fg(0); bg(0); vw(" "); }  /* gap between green groups */
+            if (g < 5) { fgbg(0, 0); vw(" "); }  /* gap between green groups */
         }
-        vw(RST); nl();
+        vw(AC_RESET "\r\n");
     }
-    nl();
+    vw("\r\n");
 
     /* ── Grayscale ramp (ANSI 232-255) ──────────────────────────────── */
-    fg(7); bg(0);
-    vw(CSI "1m" "  Grayscale:" RST);
-    vw("  ");
+    fgbg(7, 0);
+    vw(AC_BOLD "  Grayscale:" AC_RESET "  ");
     for (int i = 0; i < 24; i++) {
-        vf(CSI "38;5;%dm" CSI "48;5;%dm", (i < 12) ? 15 : 0, 232 + i);
+        vf("\e[38;5;%d;48;5;%dm", (i < 12) ? 15 : 0, 232 + i);
         vf("%3d", 232 + i);
     }
-    vw(RST); nl(); nl();
+    vw(AC_RESET "\r\n\r\n");
 
     /* ── Status line ─────────────────────────────────────────────────── */
-    fg(10); bg(0); vw(CSI "1m");
-    vw("  Initializing system...");
-    vw(RST); nl();
+    fgbg(10, 0); vw(AC_BOLD "  Initializing system..." AC_RESET "\r\n");
 }
 
 /* -------------------------------------------------------------------------
@@ -228,35 +220,32 @@ static void show_splash_screen(void)
  * ---------------------------------------------------------------------- */
 static void status_info(const char *msg)
 {
-    fg(6); bg(0); vw(CSI "1m");
-    vw("  [");
+    fgbg(6, 0); vw(AC_BOLD "  [");
     fg(14); vw("*");
-    fg(6);  vw("] ");
-    vw(RST); fg(7); bg(0);
+    fg(6);  vw("] " AC_RESET);
+    fgbg(7, 0);
     vterm_write(msg, strlen(msg));
-    vw(RST); nl();
+    vw(AC_RESET "\r\n");
 }
 
 static void status_ok(const char *msg)
 {
-    fg(2); bg(0); vw(CSI "1m");
-    vw("  [");
-    fg(10); vw("\xe2\x9c\x93");  /* ✓ */
-    fg(2);  vw("] ");
-    vw(RST); fg(7); bg(0);
+    fgbg(2, 0); vw(AC_BOLD "  [");
+    fg(10); vw("✓");
+    fg(2);  vw("] " AC_RESET);
+    fgbg(7, 0);
     vterm_write(msg, strlen(msg));
-    vw(RST); nl();
+    vw(AC_RESET "\r\n");
 }
 
 static void status_fail(const char *msg)
 {
-    fg(1); bg(0); vw(CSI "1m");
-    vw("  [");
-    fg(9);  vw("\xe2\x9c\x97");  /* ✗ */
-    fg(1);  vw("] ");
-    vw(RST); fg(7); bg(0);
+    fgbg(1, 0); vw(AC_BOLD "  [");
+    fg(9);  vw("✗");
+    fg(1);  vw("] " AC_RESET);
+    fgbg(7, 0);
     vterm_write(msg, strlen(msg));
-    vw(RST); nl();
+    vw(AC_RESET "\r\n");
 }
 
 /* -------------------------------------------------------------------------
@@ -296,7 +285,7 @@ static void main_task(void *pvParameters)
         vTaskDelay(pdMS_TO_TICKS(3000));
 
         // Connect to SSH server
-        nl();
+        vw("\r\n");
         status_info("Connecting to SSH server...");
 
         ssh_config_t ssh_cfg = {
@@ -312,7 +301,7 @@ static void main_task(void *pvParameters)
 
             /* Clear screen and hand off to SSH callbacks */
             vTaskDelay(pdMS_TO_TICKS(1000));
-            vw(CSI "2J" CSI "H");
+            vw(AC_CLS AC_HOME);
 
             /* Main loop — actual I/O handled by SSH client callbacks */
             while (1) {
