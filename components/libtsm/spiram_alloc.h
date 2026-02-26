@@ -20,18 +20,20 @@
 #undef realloc
 #undef free
 
+#define TSM_MEMORY_ALLOC_THRESHOLD 512
+
 static inline void *_tsm_malloc(size_t n)
 {
-    void *p = heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!p) p = heap_caps_malloc(n, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    return p;
+    if (n > TSM_MEMORY_ALLOC_THRESHOLD)
+        return heap_caps_malloc(n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return heap_caps_malloc(n, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 }
 
 static inline void *_tsm_calloc(size_t n, size_t sz)
 {
-    void *p = heap_caps_calloc(n, sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!p) p = heap_caps_calloc(n, sz, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    return p;
+    if (n*sz > TSM_MEMORY_ALLOC_THRESHOLD)
+        return heap_caps_calloc(n, sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return heap_caps_calloc(n, sz, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 }
 
 /*
@@ -40,9 +42,7 @@ static inline void *_tsm_calloc(size_t n, size_t sz)
  */
 static inline void *_tsm_realloc(void *ptr, size_t n)
 {
-    void *p = heap_caps_realloc(ptr, n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!p) p = heap_caps_realloc(ptr, n, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    return p;
+    return heap_caps_realloc(ptr, n, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 }
 
 #define malloc(n)      _tsm_malloc(n)
