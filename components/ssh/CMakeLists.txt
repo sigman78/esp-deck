@@ -7,6 +7,7 @@ idf_component_register(
         mbedtls
         lwip
         terminal
+        libssh2_esp
 )
 
 # TODO: Add libssh when ported
