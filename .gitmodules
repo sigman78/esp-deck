@@ -1,0 +1,3 @@
+[submodule "components/libssh2_esp"]
+	path = components/libssh2_esp
+	url = https://github.com/skuodi/libssh2_esp.git

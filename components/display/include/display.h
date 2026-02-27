@@ -55,7 +55,7 @@ typedef struct {
  * Covers the full range: 0-15 named, 16-231 6×6×6 cube, 232-255 grayscale.
  * IRAM_ATTR — safe to call from the ESP32 bounce-buffer ISR.
  */
-color_t IRAM_ATTR display_ansi_to_rgb565(uint8_t ansi);
+color_t display_ansi_to_rgb565(uint8_t ansi);
 
 // Cell attribute flags
 #define ATTR_BOLD       (1 << 0)

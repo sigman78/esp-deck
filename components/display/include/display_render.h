@@ -22,6 +22,6 @@
  * @param n_bytes  Byte count of the band
  *                 (= DISPLAY_WIDTH × FONT_HEIGHT × sizeof(color_t) per chunk).
  */
-void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes);
+void display_render_chunk(color_t *dst, int pos_px, int n_bytes);
 
 #endif /* DISPLAY_RENDER_H */

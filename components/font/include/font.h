@@ -22,6 +22,6 @@ void font_init(void);
  * @param cp Unicode codepoint (BMP, U+0000..U+FFFF)
  * @return   Pointer to 16-byte glyph bitmap in DRAM, or fallback glyph
  */
-const uint8_t* IRAM_ATTR font_get_glyph(uint16_t cp);
+const uint8_t* font_get_glyph(uint16_t cp);
 
 #endif // FONT_H
