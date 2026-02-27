@@ -22,7 +22,7 @@
 #include "display.h"
 #include "vterm.h"
 #include "ssh_client.h"
-#include "ble_keyboard.h"
+#include "input_hal.h"
 #include "wifi_manager.h"
 #include "font.h"
 
@@ -261,6 +261,15 @@ static void main_task(void *pvParameters)
     ESP_LOGI(TAG, "Splash done");
     vTaskDelay(pdMS_TO_TICKS(2000));
 
+    vterm_bench_report();
+
+    // Initialise input HAL (BLE scan + UART run in background)
+    status_info("Initializing input...");
+    if (input_hal_init() == ESP_OK)
+        status_ok("Input ready (BLE scanning + UART)");
+    else
+        status_info("Input init failed (non-fatal)");
+
     // Initialize WiFi
     log_heap("before wifi_connect");
     heap_caps_print_heap_info(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -276,13 +285,6 @@ static void main_task(void *pvParameters)
 
     if (bits & WIFI_CONNECTED_BIT) {
         status_ok("WiFi connected");
-
-        // Initialize BLE keyboard (optional)
-        status_info("Waiting for BLE keyboard...");
-        ble_keyboard_init();
-
-        // Wait a bit for BLE pairing
-        vTaskDelay(pdMS_TO_TICKS(3000));
 
         // Connect to SSH server
         vw("\r\n");
@@ -303,9 +305,11 @@ static void main_task(void *pvParameters)
             vTaskDelay(pdMS_TO_TICKS(1000));
             vw(AC_CLS AC_HOME);
 
-            /* Main loop — actual I/O handled by SSH client callbacks */
-            while (1) {
-                vTaskDelay(pdMS_TO_TICKS(100));
+            /* Main loop — forward keyboard input to SSH */
+            input_event_t ev;
+            while (ssh_client_is_connected()) {
+                if (input_hal_read(&ev, 100))
+                    ssh_client_send(ev.buf, ev.len);
             }
         } else {
             status_fail("SSH connection failed");
