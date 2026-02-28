@@ -255,6 +255,9 @@ esp_err_t ssh_client_connect(const ssh_config_t *config)
         return ESP_FAIL;
     }
 
+    int tcpFlag = 1;
+    setsockopt(s_sock, IPPROTO_TCP, TCP_NODELAY, &tcpFlag, sizeof(int));
+
     ESP_LOGI(TAG, "Connecting TCP socket...");
     if (connect(s_sock, res->ai_addr, res->ai_addrlen) != 0) {
         ESP_LOGE(TAG, "TCP connect failed");

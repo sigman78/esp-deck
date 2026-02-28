@@ -65,4 +65,23 @@ void vterm_set_response_cb(vterm_response_cb_t cb, void *user);
  */
 void vterm_reset(void);
 
+/**
+ * Returns true when the remote has enabled application cursor key mode
+ * (DECCKM, ESC [ ? 1 h).  Use this to decide whether arrow keys should
+ * be sent as ESC O A/B/C/D (application) or ESC [ A/B/C/D (normal).
+ */
+bool vterm_app_cursor_keys(void);
+
+/**
+ * Log a performance summary (flushes, bytes, VTE cycles, draw cycles,
+ * cell update/skip counts).  No-op when CONFIG_VTERM_BENCH is disabled.
+ */
+void vterm_bench_report(void);
+
+/**
+ * Clear all performance accumulators.
+ * No-op when CONFIG_VTERM_BENCH is disabled.
+ */
+void vterm_bench_reset(void);
+
 #endif /* VTERM_H */

@@ -111,6 +111,13 @@ void display_set_cursor(int x, int y, cursor_mode_t mode);
  * Call once per iteration of the main event loop.
  */
 void display_render_frame(void);
+
+/**
+ * Toggle the SDL2 window between 1× and 2× scale (simulator only).
+ * The texture resolution stays fixed at DISPLAY_WIDTH × DISPLAY_HEIGHT;
+ * SDL scales it to fill the window.
+ */
+void display_toggle_scale(void);
 #endif /* BUILD_SIMULATOR */
 
 #endif // DISPLAY_H

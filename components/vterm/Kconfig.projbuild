@@ -1,0 +1,18 @@
+menu "vterm"
+
+    config VTERM_BUF_SIZE
+        int "Write buffer size (bytes)"
+        default 256
+        help
+            Internal accumulation buffer for vterm_write().
+
+    config VTERM_BENCH
+        bool "Enable performance instrumentation"
+        default n
+        help
+            Accumulates cycle counts and cell statistics across flush_buf()
+            calls. Call vterm_bench_report() to log a summary and
+            vterm_bench_reset() to clear accumulators.
+            Zero overhead when disabled.
+
+endmenu

@@ -151,6 +151,7 @@ static void main_task(void *pvParameters)
                 if (input_hal_read(&ev, 100))
                     ssh_client_send(ev.buf, ev.len);
             }
+            vterm_bench_report();
 #if CONFIG_SSH_AUTO_RECONNECT
             ESP_LOGI(TAG, "SSH session ended, reconnecting...");
             state = STATE_SSH_CONNECT;

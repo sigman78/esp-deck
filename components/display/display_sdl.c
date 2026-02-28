@@ -22,6 +22,7 @@ static const char *TAG = "display_sdl";
 static SDL_Window   *s_window   = NULL;
 static SDL_Renderer *s_renderer = NULL;
 static SDL_Texture  *s_texture  = NULL;
+static int           s_scale    = 1;   /* 1 or 2 */
 
 /* -------------------------------------------------------------------------
  * display.h public API
@@ -35,7 +36,7 @@ esp_err_t display_init(void)
         "unbreezy cyberdeck — simulator",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         DISPLAY_WIDTH, DISPLAY_HEIGHT,
-        SDL_WINDOW_SHOWN);
+        SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
     if (!s_window) {
         ESP_LOGE(TAG, "SDL_CreateWindow failed: %s", SDL_GetError());
         return ESP_FAIL;
@@ -100,6 +101,13 @@ void display_render_frame(void)
     SDL_UnlockTexture(s_texture);
     SDL_RenderCopy(s_renderer, s_texture, NULL, NULL);
     SDL_RenderPresent(s_renderer);
+}
+
+void display_toggle_scale(void)
+{
+    s_scale = (s_scale == 1) ? 2 : 1;
+    SDL_SetWindowSize(s_window, DISPLAY_WIDTH * s_scale, DISPLAY_HEIGHT * s_scale);
+    SDL_SetWindowPosition(s_window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
 }
 
 #endif /* BUILD_SIMULATOR */

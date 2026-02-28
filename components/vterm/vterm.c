@@ -12,9 +12,26 @@
 #include "esp_log.h"
 #include <string.h>
 #include <stdlib.h>
+#include <inttypes.h>
 
-#ifndef VTERM_BUF_SIZE
+#ifdef CONFIG_VTERM_BUF_SIZE
+#define VTERM_BUF_SIZE CONFIG_VTERM_BUF_SIZE
+#else
 #define VTERM_BUF_SIZE 256
+#endif
+
+#ifdef CONFIG_VTERM_BENCH
+#include "esp_cpu.h"
+typedef struct {
+    uint32_t flush_count;       /* flush_buf() calls */
+    uint32_t bytes_fed;         /* total bytes into tsm_vte_input */
+    uint64_t vte_cycles;        /* cycles inside tsm_vte_input */
+    uint64_t draw_cycles;       /* cycles inside tsm_screen_draw */
+    uint32_t draw_cb_total;     /* draw_cb() invocations (inc. skipped) */
+    uint32_t draw_cb_updated;   /* draw_cb() invocations that wrote a cell */
+} vterm_bench_t;
+
+static vterm_bench_t s_bench;
 #endif
 
 static const char *TAG = "vterm";
@@ -64,10 +81,18 @@ static int draw_cb(struct tsm_screen *screen,
     if ((int)posx >= s_cols || (int)posy >= s_rows)
         return 0;
 
+#ifdef CONFIG_VTERM_BENCH
+    s_bench.draw_cb_total++;
+#endif
+
     /* age == 0 means age_reset (counter overflow) — always redraw.
      * age <= s_last_age means cell unchanged since last draw — skip. */
     if (age != 0 && age <= s_last_age)
         return 0;
+
+#ifdef CONFIG_VTERM_BENCH
+    s_bench.draw_cb_updated++;
+#endif
 
     int idx = (int)posy * s_cols + (int)posx;
 
@@ -114,18 +139,38 @@ static int draw_cb(struct tsm_screen *screen,
 
 static inline void refresh_display(void)
 {
+#ifdef CONFIG_VTERM_BENCH
+    uint32_t t0 = esp_cpu_get_cycle_count();
+#endif
     s_last_age = tsm_screen_draw(s_screen, draw_cb, NULL);
+#ifdef CONFIG_VTERM_BENCH
+    uint32_t t1 = esp_cpu_get_cycle_count();
+    s_bench.draw_cycles += (t1 - t0);
+#endif
+    cursor_mode_t cmode = (tsm_screen_get_flags(s_screen) & TSM_SCREEN_HIDE_CURSOR)
+                          ? CURSOR_NONE : CURSOR_BLOCK;
     display_set_cursor((int)tsm_screen_get_cursor_x(s_screen),
                        (int)tsm_screen_get_cursor_y(s_screen),
-                       CURSOR_BLOCK);
+                       cmode);
 }
 
 static inline void flush_buf(void)
 {
     if (s_wbuf_len == 0) return;
+#ifdef CONFIG_VTERM_BENCH
+    uint32_t t0 = esp_cpu_get_cycle_count();
+#endif
     tsm_vte_input(s_vte, s_wbuf, s_wbuf_len);
+#ifdef CONFIG_VTERM_BENCH
+    uint32_t t1 = esp_cpu_get_cycle_count();
+    s_bench.vte_cycles += (t1 - t0);
+    s_bench.bytes_fed  += s_wbuf_len;
+#endif
     s_wbuf_len = 0;
     refresh_display();
+#ifdef CONFIG_VTERM_BENCH
+    s_bench.flush_count++;
+#endif
 }
 
 /* -------------------------------------------------------------------------
@@ -223,4 +268,36 @@ void vterm_reset(void)
     s_last_age = 0;          /* force full redraw after reset */
     tsm_vte_reset(s_vte);
     refresh_display();
+}
+
+bool vterm_app_cursor_keys(void)
+{
+    if (!s_initialized) return false;
+    return (tsm_vte_get_flags(s_vte) & TSM_VTE_FLAG_CURSOR_KEY_MODE) != 0;
+}
+
+void vterm_bench_report(void)
+{
+#ifdef CONFIG_VTERM_BENCH
+    uint32_t skip     = s_bench.draw_cb_total - s_bench.draw_cb_updated;
+    uint32_t vte_us   = (uint32_t)(s_bench.vte_cycles  / 240);
+    uint32_t draw_us  = (uint32_t)(s_bench.draw_cycles / 240);
+    uint32_t total_us = vte_us + draw_us;
+    ESP_LOGI("vterm_bench",
+        "flushes=%" PRIu32 "  bytes=%" PRIu32 "  "
+        "vte=%" PRIu32 "µs  draw=%" PRIu32 "µs  total=%" PRIu32 "µs  "
+        "cells_upd=%" PRIu32 "  cells_skip=%" PRIu32 "  skip%%=%" PRIu32,
+        s_bench.flush_count,
+        s_bench.bytes_fed,
+        vte_us, draw_us, total_us,
+        s_bench.draw_cb_updated, skip,
+        s_bench.draw_cb_total ? skip * 100 / s_bench.draw_cb_total : 0);
+#endif
+}
+
+void vterm_bench_reset(void)
+{
+#ifdef CONFIG_VTERM_BENCH
+    memset(&s_bench, 0, sizeof(s_bench));
+#endif
 }
