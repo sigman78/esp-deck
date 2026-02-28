@@ -4,11 +4,9 @@ idf_component_register(
     INCLUDE_DIRS
         "include"
     REQUIRES
-        mbedtls
-        lwip
-        terminal
         libssh2_esp
+        lwip
+        mbedtls
+        vterm
+        freertos
 )
-
-# TODO: Add libssh when ported
-# PRIV_REQUIRES libssh

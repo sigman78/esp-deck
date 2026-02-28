@@ -1,34 +1,34 @@
 /*
- * Cyberdeck SSH Terminal - Main Application
+ * Cyberdeck SSH Terminal — Application Entry Point
  *
- * ESP32-S3 based portable SSH terminal with BLE keyboard and 7" display.
- * Uses the vterm component (libtsm backend) for full VT/ANSI output.
+ * ESP32-S3 portable SSH terminal with BLE keyboard and 7" display.
+ * State machine: BOOT → WIFI_WAIT → SSH_CONNECT → SESSION → (loop)
  */
 
 #include <stdio.h>
 #include <string.h>
-#include <stdarg.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/event_groups.h"
 #include "esp_system.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "esp_netif.h"
 #include "esp_event.h"
-
-// Component headers
 #include "esp_heap_caps.h"
+
 #include "display.h"
+#include "font.h"
 #include "vterm.h"
-#include "ssh_client.h"
 #include "input_hal.h"
 #include "wifi_manager.h"
-#include "font.h"
+#include "ssh_client.h"
+#include "splash.h"
 
 static const char *TAG = "cyberdeck";
 
-/* Log both total and internal-DRAM heap in one line. */
+/* -------------------------------------------------------------------------
+ * Heap diagnostic helper
+ * ---------------------------------------------------------------------- */
 static void log_heap(const char *label)
 {
     ESP_LOGI(TAG, "Heap %-30s  total=%7u  int=%7u  int_blk=%7u",
@@ -38,48 +38,8 @@ static void log_heap(const char *label)
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 }
 
-// Event group for system state
-static EventGroupHandle_t s_system_event_group;
-
-#define WIFI_CONNECTED_BIT  BIT0
-#define SSH_CONNECTED_BIT   BIT1
-#define BLE_PAIRED_BIT      BIT2
-
 /* -------------------------------------------------------------------------
- * ANSI helper macros — \e is a GCC extension (= ESC = 0x1B)
- * ---------------------------------------------------------------------- */
-#define AC_RESET  "\e[0m"
-#define AC_BOLD   "\e[1m"
-#define AC_UNDER  "\e[4m"
-#define AC_BLINK  "\e[5m"
-#define AC_REV    "\e[7m"
-#define AC_CLS    "\e[2J"
-#define AC_HOME   "\e[H"
-
-/* Write literal string via vterm */
-#define vw(s)  vterm_write((s), sizeof(s) - 1)
-
-/* Write formatted string via vterm */
-static void vf(const char *fmt, ...)
-{
-    char buf[128];
-    va_list ap;
-    va_start(ap, fmt);
-    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-    if (n > 0)
-        vterm_write(buf, (size_t)n);
-}
-
-/* Set ANSI-256 foreground / background colour */
-static void fg(int n) { vf("\e[38;5;%dm", n); }
-static void bg(int n) { vf("\e[48;5;%dm", n); }
-
-/* Combined fg+bg in one escape sequence */
-static void fgbg(int f, int b) { vf("\e[38;5;%d;48;5;%dm", f, b); }
-
-/* -------------------------------------------------------------------------
- * Initialize NVS flash storage
+ * System init helpers
  * ---------------------------------------------------------------------- */
 static void init_nvs(void)
 {
@@ -94,9 +54,6 @@ static void init_nvs(void)
     ESP_LOGI(TAG, "NVS initialized");
 }
 
-/* -------------------------------------------------------------------------
- * Initialize network stack
- * ---------------------------------------------------------------------- */
 static void init_network(void)
 {
     ESP_ERROR_CHECK(esp_netif_init());
@@ -105,222 +62,112 @@ static void init_network(void)
 }
 
 /* -------------------------------------------------------------------------
- * Splash screen — colour capability showcase.
- *
- * Uses full ANSI escape sequences via vterm; the same libtsm/display
- * pipeline used for SSH session output.
- *
- * Layout (100 × 30 terminal):
- *   Row  0     : blank
- *   Row  1     : title bar (full-width, bright cyan on dark blue)
- *   Row  2     : subtitle
- *   Row  3     : blank
- *   Row  4-5   : ANSI-16 FG colour strip
- *   Row  6-7   : ANSI-16 BG colour strip
- *   Row  8     : SGR attributes
- *   Row  9     : blank
- *   Row 10     : colour cube label
- *   Row 11-16  : 6 × 6×6 RGB cube rows (6 green groups × 6 blue, 2-char ea)
- *   Row 17     : blank
- *   Row 18     : grayscale label
- *   Row 19     : 24-step grayscale ramp (3-char ea, 72 chars)
- *   Row 20     : blank
- *   Row 21     : status / ready line
+ * Application state machine
  * ---------------------------------------------------------------------- */
-static void show_splash_screen(void)
-{
-    /* Clear screen, home cursor */
-    vw(AC_CLS AC_HOME);
+typedef enum {
+    STATE_BOOT,
+    STATE_WIFI_WAIT,
+    STATE_SSH_CONNECT,
+    STATE_SESSION,
+    STATE_ERROR,
+} app_state_t;
 
-    /* ── Title bar (full width) ─────────────────────────────────────── */
-    fgbg(14, 17);
-    vw(AC_BOLD "  ╔");
-    for (int i = 0; i < 94; i++) vw("═");
-    vw("╗  \r\n");
-
-    fgbg(14, 17); vw(AC_BOLD "  ║");
-    fgbg(15, 17); vw(AC_BOLD
-       "                CYBERDECK SSH TERMINAL v0.1"
-       "          ESP32-S3 · Terminus 8×16                 ");
-    fgbg(14, 17); vw(AC_BOLD "║  \r\n");
-
-    fgbg(14, 17); vw(AC_BOLD "  ╚");
-    for (int i = 0; i < 94; i++) vw("═");
-    vw("╝  \r\n");
-    vw(AC_RESET "\r\n");
-
-    /* ── ANSI-16 foreground colours ─────────────────────────────────── */
-    fgbg(7, 0);
-    vw(AC_BOLD "  FG: " AC_RESET);
-    for (int c = 0; c < 16; c++) {
-        vf("\e[38;5;%dm", c);
-        bg(c < 8 ? 8 : 0);  /* dark half on black, bright half on dark grey */
-        vf(" %2d ", c);
-        //vw(" ██ ");
-    }
-    vw(AC_RESET "\r\n");
-
-    /* ── ANSI-16 background colours ─────────────────────────────────── */
-    fgbg(7, 0);
-    vw(AC_BOLD "  BG: " AC_RESET);
-    for (int c = 0; c < 16; c++) {
-        fg(c < 8 ? 15 : 0);
-        vf("\e[48;5;%dm", c);
-        vf(" %2d ", c);
-    }
-    vw(AC_RESET "\r\n\r\n");
-
-    /* ── SGR attribute demo ──────────────────────────────────────────── */
-    fgbg(7, 0);
-    vw("  " AC_BOLD    "Bold"             AC_RESET
-       "  " AC_UNDER   "Underline"        AC_RESET
-       "  " AC_REV     "Reverse"          AC_RESET
-       "  \e[1;32m"    "Bold+Green"       AC_RESET
-       "  \e[4;33m"    "Underline+Yellow" AC_RESET
-       "  \e[7;35m"    "Reverse+Magenta"  AC_RESET "\r\n\r\n");
-
-    /* ── 6×6×6 colour cube (ANSI 16-231) ───────────────────────────── */
-    fgbg(7, 0);
-    vw(AC_BOLD "  256-color cube:" AC_RESET "\r\n");
-
-    for (int r = 0; r < 6; r++) {
-        vw("  ");
-        for (int g = 0; g < 6; g++) {
-            for (int b = 0; b < 6; b++) {
-                int idx = 16 + r * 36 + g * 6 + b;
-                /* pick fg for legibility */
-                int light = (r > 2 || g > 2 || (r + g + b) > 6);
-                vf("\e[38;5;%d;48;5;%dm", light ? 0 : 15, idx);
-                vw("  ");
-            }
-            if (g < 5) { fgbg(0, 0); vw(" "); }  /* gap between green groups */
-        }
-        vw(AC_RESET "\r\n");
-    }
-    vw("\r\n");
-
-    /* ── Grayscale ramp (ANSI 232-255) ──────────────────────────────── */
-    fgbg(7, 0);
-    vw(AC_BOLD "  Grayscale:" AC_RESET "  ");
-    for (int i = 0; i < 24; i++) {
-        vf("\e[38;5;%d;48;5;%dm", (i < 12) ? 15 : 0, 232 + i);
-        vf("%3d", 232 + i);
-    }
-    vw(AC_RESET "\r\n\r\n");
-
-    /* ── Status line ─────────────────────────────────────────────────── */
-    fgbg(10, 0); vw(AC_BOLD "  Initializing system..." AC_RESET "\r\n");
-}
-
-/* -------------------------------------------------------------------------
- * Coloured status helpers
- *   info  — cyan   [*]
- *   ok    — green  [✓]
- *   fail  — red    [✗]
- * ---------------------------------------------------------------------- */
-static void status_info(const char *msg)
-{
-    fgbg(6, 0); vw(AC_BOLD "  [");
-    fg(14); vw("*");
-    fg(6);  vw("] " AC_RESET);
-    fgbg(7, 0);
-    vterm_write(msg, strlen(msg));
-    vw(AC_RESET "\r\n");
-}
-
-static void status_ok(const char *msg)
-{
-    fgbg(2, 0); vw(AC_BOLD "  [");
-    fg(10); vw("✓");
-    fg(2);  vw("] " AC_RESET);
-    fgbg(7, 0);
-    vterm_write(msg, strlen(msg));
-    vw(AC_RESET "\r\n");
-}
-
-static void status_fail(const char *msg)
-{
-    fgbg(1, 0); vw(AC_BOLD "  [");
-    fg(9);  vw("✗");
-    fg(1);  vw("] " AC_RESET);
-    fgbg(7, 0);
-    vterm_write(msg, strlen(msg));
-    vw(AC_RESET "\r\n");
-}
-
-/* -------------------------------------------------------------------------
- * Main application task
- * ---------------------------------------------------------------------- */
 static void main_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "Main task started");
 
-    // Show splash screen
-    ESP_LOGI(TAG, "Calling show_splash_screen");
-    show_splash_screen();
-    ESP_LOGI(TAG, "Splash done");
-    vTaskDelay(pdMS_TO_TICKS(2000));
+    app_state_t state = STATE_BOOT;
+    bool wifi_started = false;
+    TickType_t wifi_timeout_tick = 0;
 
-    vterm_bench_report();
+    for (;;) {
+        switch (state) {
 
-    // Initialise input HAL (BLE scan + UART run in background)
-    status_info("Initializing input...");
-    if (input_hal_init() == ESP_OK)
-        status_ok("Input ready (BLE scanning + UART)");
-    else
-        status_info("Input init failed (non-fatal)");
+        /* ── BOOT: show splash, then wait for WiFi ─────────────────── */
+        case STATE_BOOT:
+            splash_show();
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            vterm_bench_report();
+            state = STATE_WIFI_WAIT;
+            break;
 
-    // Initialize WiFi
-    log_heap("before wifi_connect");
-    heap_caps_print_heap_info(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    status_info("Connecting to WiFi...");
-    wifi_manager_connect();
+        /* ── WIFI_WAIT: kick WiFi once, poll until connected ────────── */
+        case STATE_WIFI_WAIT:
+            if (!wifi_started) {
+                splash_status_info("Connecting to WiFi...");
+                wifi_manager_connect();
+                wifi_started = true;
+                wifi_timeout_tick = xTaskGetTickCount() + pdMS_TO_TICKS(30000);
+            }
+            if (wifi_manager_is_connected()) {
+                splash_status_ok("WiFi connected");
+                state = STATE_SSH_CONNECT;
+            } else if (xTaskGetTickCount() >= wifi_timeout_tick) {
+                splash_status_fail("WiFi connection timeout");
+                state = STATE_ERROR;
+            } else {
+                vTaskDelay(pdMS_TO_TICKS(200));
+            }
+            break;
 
-    // Wait for WiFi connection
-    EventBits_t bits = xEventGroupWaitBits(s_system_event_group,
-                                           WIFI_CONNECTED_BIT,
-                                           pdFALSE,
-                                           pdFALSE,
-                                           pdMS_TO_TICKS(10000));
+        /* ── SSH_CONNECT: attempt connection, retry on failure ──────── */
+        case STATE_SSH_CONNECT: {
+            /* If WiFi dropped while we were here, go back to WIFI_WAIT */
+            if (!wifi_manager_is_connected()) {
+                ESP_LOGW(TAG, "WiFi lost, waiting for reconnect");
+                wifi_started = false;
+                state = STATE_WIFI_WAIT;
+                break;
+            }
 
-    if (bits & WIFI_CONNECTED_BIT) {
-        status_ok("WiFi connected");
+            ssh_config_t ssh_cfg = {
+                .host        = CONFIG_SSH_DEFAULT_HOST,
+                .port        = CONFIG_SSH_DEFAULT_PORT,
+                .username    = CONFIG_SSH_DEFAULT_USER,
+                .password    = CONFIG_SSH_DEFAULT_PASSWORD,
+                .private_key = NULL,
+            };
 
-        // Connect to SSH server
-        vw("\r\n");
-        status_info("Connecting to SSH server...");
+            splash_status_info("Connecting to SSH server...");
+            if (ssh_client_connect(&ssh_cfg) == ESP_OK) {
+                splash_status_ok("SSH connected");
+                vTaskDelay(pdMS_TO_TICKS(500));
+                /* Clear screen and hand off to SSH session */
+                vterm_write("\e[2J\e[H", 7);
+                vterm_flush();
+                state = STATE_SESSION;
+            } else {
+                splash_status_fail("SSH connection failed — retrying in 5 s...");
+                vTaskDelay(pdMS_TO_TICKS(5000));
+                /* stay in STATE_SSH_CONNECT */
+            }
+            break;
+        }
 
-        ssh_config_t ssh_cfg = {
-            .host     = CONFIG_SSH_DEFAULT_HOST,
-            .port     = CONFIG_SSH_DEFAULT_PORT,
-            .username = CONFIG_SSH_DEFAULT_USER,
-            .password = "",  /* TODO: prompt for password */
-        };
-
-        if (ssh_client_connect(&ssh_cfg) == ESP_OK) {
-            status_ok("SSH connected");
-            xEventGroupSetBits(s_system_event_group, SSH_CONNECTED_BIT);
-
-            /* Clear screen and hand off to SSH callbacks */
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            vw(AC_CLS AC_HOME);
-
-            /* Main loop — forward keyboard input to SSH */
+        /* ── SESSION: forward keyboard input until remote exits ─────── */
+        case STATE_SESSION: {
             input_event_t ev;
             while (ssh_client_is_connected()) {
                 if (input_hal_read(&ev, 100))
                     ssh_client_send(ev.buf, ev.len);
             }
-        } else {
-            status_fail("SSH connection failed");
+#if CONFIG_SSH_AUTO_RECONNECT
+            ESP_LOGI(TAG, "SSH session ended, reconnecting...");
+            state = STATE_SSH_CONNECT;
+#else
+            splash_status_fail("SSH session ended");
+            state = STATE_ERROR;
+#endif
+            break;
         }
-    } else {
-        status_fail("WiFi connection timeout");
-    }
 
-    // Cleanup
-    ESP_LOGI(TAG, "Main task ending");
-    vTaskDelete(NULL);
+        /* ── ERROR: display message and halt ────────────────────────── */
+        case STATE_ERROR:
+            splash_status_fail("Fatal error — system halted");
+            for (;;) vTaskDelay(portMAX_DELAY);
+            break;
+        }
+    }
 }
 
 /* -------------------------------------------------------------------------
@@ -333,13 +180,10 @@ void app_main(void)
     ESP_LOGI(TAG, "ESP32-S3 @ %d MHz", CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
     ESP_LOGI(TAG, "===========================================");
 
-    // Create system event group
-    s_system_event_group = xEventGroupCreate();
-
-    // Initialize subsystems
     log_heap("boot");
     init_nvs();
     log_heap("after nvs_init");
+
     init_network();
     log_heap("after netif_init");
 
@@ -355,37 +199,40 @@ void app_main(void)
     vterm_init(CONFIG_TERMINAL_WIDTH, CONFIG_TERMINAL_HEIGHT);
     log_heap("after vterm_init");
 
-    /* Try to allocate the task stack from SPIRAM first so that scarce
-     * internal DRAM is not exhausted.  Fall back to internal DRAM with
-     * a smaller stack if no SPIRAM is present.                          */
+    ESP_LOGI(TAG, "Initializing input HAL...");
+    if (input_hal_init() != ESP_OK)
+        ESP_LOGW(TAG, "Input HAL init failed (non-fatal)");
+    log_heap("after input_hal_init");
+
+    /* Try to allocate task stack from SPIRAM; fall back to internal DRAM. */
 #define MAIN_TASK_STACK  16384
-    StackType_t  *task_stack = heap_caps_malloc(MAIN_TASK_STACK,
-                                                MALLOC_CAP_SPIRAM |
-                                                MALLOC_CAP_8BIT);
+    StackType_t *task_stack = heap_caps_malloc(MAIN_TASK_STACK,
+                                               MALLOC_CAP_SPIRAM |
+                                               MALLOC_CAP_8BIT);
     if (!task_stack) {
-        ESP_LOGW(TAG, "No SPIRAM for task stack, trying internal DRAM");
+        ESP_LOGW(TAG, "No SPIRAM for task stack, falling back to internal DRAM");
         task_stack = heap_caps_malloc(MAIN_TASK_STACK,
                                       MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     }
 
-    static StaticTask_t s_main_task_tcb;   /* TCB must be static / long-lived */
+    static StaticTask_t s_main_task_tcb;
 
     if (!task_stack) {
-        ESP_LOGE(TAG, "Cannot allocate task stack (%u B) — halting",
-                 MAIN_TASK_STACK);
-    } else {
-        ESP_LOGI(TAG, "Task stack @ %p (%u B)", task_stack, MAIN_TASK_STACK);
-        xTaskCreateStaticPinnedToCore(
-            main_task,
-            "main_task",
-            MAIN_TASK_STACK / sizeof(StackType_t),
-            NULL,
-            5,
-            task_stack,
-            &s_main_task_tcb,
-            1   /* Pin to core 1 */
-        );
+        ESP_LOGE(TAG, "Cannot allocate task stack (%u B) — halting", MAIN_TASK_STACK);
+        for (;;) vTaskDelay(portMAX_DELAY);
     }
+
+    ESP_LOGI(TAG, "Task stack @ %p (%u B)", task_stack, MAIN_TASK_STACK);
+    xTaskCreateStaticPinnedToCore(
+        main_task,
+        "main_task",
+        MAIN_TASK_STACK / sizeof(StackType_t),
+        NULL,
+        5,
+        task_stack,
+        &s_main_task_tcb,
+        1   /* Pin to core 1 */
+    );
 #undef MAIN_TASK_STACK
 
     ESP_LOGI(TAG, "System initialized");

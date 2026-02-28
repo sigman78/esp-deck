@@ -2,6 +2,7 @@
 idf_component_register(
     SRCS
         "main.c"
+        "splash.c"
     INCLUDE_DIRS
         "include"
     REQUIRES
@@ -13,7 +14,6 @@ idf_component_register(
         esp_lcd
         driver
         display
-        terminal
         vterm
         ssh
         input
