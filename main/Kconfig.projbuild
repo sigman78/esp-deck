@@ -94,4 +94,15 @@ menu "Cyberdeck Configuration"
             a session ends or drops.  When disabled, it halts in STATE_ERROR
             so the disconnect is visible and must be reset manually.
 
+    config SSH_RECV_WINDOW
+        int "SSH receive window size (bytes)"
+        default 32768
+        range 4096 262144
+        help
+            Advertised SSH channel receive window. The server will not send more
+            than this many bytes before waiting for our acknowledgment.
+            Smaller values reduce libssh2 heap (packet brigade) at the cost of
+            more round-trips for bulk output. 32768 (32 KB) covers any terminal
+            screen refresh.
+
 endmenu

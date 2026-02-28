@@ -34,27 +34,43 @@ static const char *TAG = "ssh_client";
  * Custom libssh2 allocators — prefer SPIRAM for session/channel/packet
  * buffers so that fragmented internal DRAM is not exhausted by large SSH
  * receive bursts.  Falls back to internal DRAM when SPIRAM is unavailable.
+ *
+ * s_alloc_bytes tracks live bytes held by libssh2 at any moment.
+ * heap_caps_get_allocated_size() returns the actual block size so the
+ * counter reflects real heap consumption including allocator overhead.
  * ---------------------------------------------------------------------- */
+static volatile size_t s_alloc_bytes = 0;
+
 static void *ssh_malloc(size_t size, void **abstract)
 {
     (void)abstract;
     void *p = heap_caps_malloc(size, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
     if (!p) p = heap_caps_malloc(size, MALLOC_CAP_8BIT);
+    if (p) s_alloc_bytes += heap_caps_get_allocated_size(p);
     return p;
 }
 
 static void *ssh_realloc(void *ptr, size_t size, void **abstract)
 {
     (void)abstract;
+    size_t old_size = ptr ? heap_caps_get_allocated_size(ptr) : 0;
     void *p = heap_caps_realloc(ptr, size, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM);
     if (!p) p = heap_caps_realloc(ptr, size, MALLOC_CAP_8BIT);
+    if (p) {
+        s_alloc_bytes -= old_size;
+        s_alloc_bytes += heap_caps_get_allocated_size(p);
+    }
+    /* On failure ptr is still valid; its size remains counted — no change. */
     return p;
 }
 
 static void ssh_free(void *ptr, void **abstract)
 {
     (void)abstract;
-    heap_caps_free(ptr);
+    if (ptr) {
+        s_alloc_bytes -= heap_caps_get_allocated_size(ptr);
+        heap_caps_free(ptr);
+    }
 }
 
 /* Password stashed during connection for the kbd-interactive callback. */
@@ -90,6 +106,7 @@ static void ssh_cleanup(void)
         s_sock = -1;
     }
     s_connected = false;
+    ESP_LOGI(TAG, "SSH cleanup done  — libssh2 heap: %zu B (expect 0)", s_alloc_bytes);
 }
 
 /* -------------------------------------------------------------------------
@@ -132,6 +149,7 @@ static void log_last_error(const char *context)
 static void ssh_read_task(void *arg)
 {
     char buf[512];
+    TickType_t last_stat = xTaskGetTickCount();
 
     while (s_connected) {
         int n = libssh2_channel_read(s_channel, buf, sizeof(buf));
@@ -155,6 +173,13 @@ static void ssh_read_task(void *arg)
             ESP_LOGI(TAG, "ssh_read_task: channel EOF");
             s_connected = false;
             break;
+        }
+
+        /* Periodic memory stat — once every 10 s. */
+        TickType_t now = xTaskGetTickCount();
+        if ((now - last_stat) >= pdMS_TO_TICKS(30000)) {
+            ESP_LOGI(TAG, "libssh2 heap: %zu B", s_alloc_bytes);
+            last_stat = now;
         }
 
         /* Yield every iteration so IDLE0 can run and reset the task WDT.
@@ -344,7 +369,11 @@ auth_done:
     ESP_LOGI(TAG, "Authenticated");
 
     /* ── 7. Open shell channel ──────────────────────────────────────── */
-    s_channel = libssh2_channel_open_session(s_session);
+    s_channel = libssh2_channel_open_ex(s_session,
+                                        "session", sizeof("session") - 1,
+                                        CONFIG_SSH_RECV_WINDOW,
+                                        LIBSSH2_CHANNEL_PACKET_DEFAULT,
+                                        NULL, 0);
     if (!s_channel) {
         ESP_LOGE(TAG, "Channel open failed");
         ssh_cleanup();
@@ -389,7 +418,7 @@ auth_done:
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "SSH session ready");
+    ESP_LOGI(TAG, "SSH session ready — libssh2 heap: %zu B", s_alloc_bytes);
     return ESP_OK;
 }
 
