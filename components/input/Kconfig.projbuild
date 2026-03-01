@@ -1,0 +1,29 @@
+menu "Input HAL"
+
+    choice INPUT_BACKEND
+        prompt "Input backend"
+        default INPUT_AUTO
+        help
+            Select which input backend(s) to compile and initialise.
+            AUTO enables both BLE HID and USB-Serial-JTAG simultaneously.
+
+        config INPUT_AUTO
+            bool "AUTO (BLE HID + USB-Serial-JTAG)"
+
+        config INPUT_BLE
+            bool "BLE HID only"
+
+        config INPUT_UART
+            bool "USB-Serial-JTAG only"
+    endchoice
+
+    config INPUT_BLE_SCAN_DURATION
+        int "BLE scan duration (seconds)"
+        depends on INPUT_BLE || INPUT_AUTO
+        default 10
+        range 1 60
+        help
+            How long each scan window lasts before giving up and waiting
+            for the next reconnect attempt.
+
+endmenu

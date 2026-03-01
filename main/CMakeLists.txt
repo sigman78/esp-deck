@@ -7,6 +7,7 @@ idf_component_register(
         "include"
     REQUIRES
         nvs_flash
+        storage
         esp_wifi
         esp_netif
         esp_event

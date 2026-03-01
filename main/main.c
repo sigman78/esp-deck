@@ -22,9 +22,14 @@
 #include "input_hal.h"
 #include "wifi_manager.h"
 #include "ssh_client.h"
+#include "storage.h"
 #include "splash.h"
 
 static const char *TAG = "cyberdeck";
+
+#define MAIN_MAX_PROFILES 8
+static conn_profile_t s_profiles[MAIN_MAX_PROFILES];
+static int            s_profile_count = 0;
 
 /* -------------------------------------------------------------------------
  * Heap diagnostic helper
@@ -127,6 +132,18 @@ static void main_task(void *pvParameters)
                 .password    = CONFIG_SSH_DEFAULT_PASSWORD,
                 .private_key = NULL,
             };
+            const conn_profile_t *prof =
+                storage_find_profile(s_profiles, s_profile_count, "default");
+            if (prof) {
+                ssh_cfg.host     = prof->host;
+                ssh_cfg.port     = prof->port;
+                ssh_cfg.username = prof->user;
+                ssh_cfg.password = (prof->auth == STORAGE_AUTH_PASSWORD)
+                                   ? prof->password : NULL;
+                /* key auth: TODO wire storage_get_key → private_key */
+                ESP_LOGI(TAG, "Using stored profile 'default': %s@%s:%u",
+                         ssh_cfg.username, ssh_cfg.host, (unsigned)ssh_cfg.port);
+            }
 
             splash_status_info("Connecting to SSH server...");
             if (ssh_client_connect(&ssh_cfg) == ESP_OK) {
@@ -184,6 +201,12 @@ void app_main(void)
     log_heap("boot");
     init_nvs();
     log_heap("after nvs_init");
+
+    if (storage_init() != ESP_OK)
+        ESP_LOGW(TAG, "Storage init failed — using Kconfig defaults");
+    else
+        storage_load_profiles(s_profiles, &s_profile_count, MAIN_MAX_PROFILES);
+    log_heap("after storage_init");
 
     init_network();
     log_heap("after netif_init");

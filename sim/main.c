@@ -18,6 +18,7 @@
 #include "vterm.h"
 #include "ssh_client.h"
 #include "wifi_manager.h"
+#include "storage.h"
 
 #define SIM_COLS 100
 #define SIM_ROWS  30
@@ -92,10 +93,29 @@ static const char *translate_key(SDL_Keycode sym, SDL_Keymod mod)
 
 int main(int argc, char *argv[])
 {
-    const char *host     = (argc > 1) ? argv[1] : CONFIG_SSH_DEFAULT_HOST;
-    int         port_i   = (argc > 2) ? atoi(argv[2]) : CONFIG_SSH_DEFAULT_PORT;
-    const char *user     = (argc > 3) ? argv[3] : CONFIG_SSH_DEFAULT_USER;
-    const char *password = (argc > 4) ? argv[4] : CONFIG_SSH_DEFAULT_PASS;
+    /* Load profiles; priority: argv > stored "default" > Kconfig macros */
+    if (storage_init() != ESP_OK)
+        fprintf(stderr, "storage_init() failed — using defaults\n");
+
+    static conn_profile_t s_profiles[8];
+    int profile_count = 0;
+    storage_load_profiles(s_profiles, &profile_count, 8);
+    const conn_profile_t *def =
+        storage_find_profile(s_profiles, profile_count, "default");
+
+    const char *host     = (argc > 1) ? argv[1]
+                         : (def)      ? def->host
+                         :               CONFIG_SSH_DEFAULT_HOST;
+    int         port_i   = (argc > 2) ? atoi(argv[2])
+                         : (def)      ? (int)def->port
+                         :               CONFIG_SSH_DEFAULT_PORT;
+    const char *user     = (argc > 3) ? argv[3]
+                         : (def)      ? def->user
+                         :               CONFIG_SSH_DEFAULT_USER;
+    const char *password = (argc > 4) ? argv[4]
+                         : (def && def->auth == STORAGE_AUTH_PASSWORD)
+                                       ? def->password
+                         :               CONFIG_SSH_DEFAULT_PASS;
     uint16_t    port     = (uint16_t)port_i;
 
     /* ── SDL + display stack ── */

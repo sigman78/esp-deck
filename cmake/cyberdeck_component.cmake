@@ -42,6 +42,8 @@ macro(cyberdeck_component_register)
             target_include_directories(${_CCR_NAME} PUBLIC ${_CCR_INCLUDE_DIRS})
         endif()
 
+        target_compile_options(${_CCR_NAME} PRIVATE -Wno-deprecated-declarations)
+
         # idfsim provides ESP-IDF header stubs; always needed on the host.
         target_link_libraries(${_CCR_NAME} PUBLIC
             ${_CCR_REQUIRES}

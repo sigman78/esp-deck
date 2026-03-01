@@ -28,7 +28,7 @@ CPMAddPackage(
     OPTIONS "SDL_SHARED OFF" "SDL_STATIC ON" "SDL_TEST OFF"
 )
 
-# Component dependency order: idfsim → font → display → libtsm → terminal → vterm → libssh2_esp → wifi → ssh
+# Component dependency order: idfsim → font → display → libtsm → terminal → vterm → libssh2_esp → wifi → storage → ssh
 add_subdirectory(${ROOT}/idfsim                    idfsim)
 add_subdirectory(${ROOT}/components/font           font)
 add_subdirectory(${ROOT}/components/display        display)
@@ -38,8 +38,9 @@ add_subdirectory(${ROOT}/components/vterm          vterm)
 add_subdirectory(${ROOT}/components/libssh2_esp    libssh2_esp)
 add_subdirectory(${ROOT}/components/wifi           wifi)
 target_link_libraries(wifi PUBLIC ws2_32)   # wifi_manager_sim.c uses Winsock
+add_subdirectory(${ROOT}/components/storage        storage)
 add_subdirectory(${ROOT}/components/ssh            ssh)
 
 add_executable(cyberdeck_sim main.c)
 # SDL2main provides WinMain on Windows (SDL.h renames main -> SDL_main)
-target_link_libraries(cyberdeck_sim PRIVATE SDL2::SDL2main ssh wifi)
+target_link_libraries(cyberdeck_sim PRIVATE SDL2::SDL2main ssh wifi storage)
