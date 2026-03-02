@@ -29,5 +29,23 @@ target_include_directories(test_vtparse PRIVATE
 
 target_link_libraries(test_vtparse PRIVATE unity)
 
+# termstate tests — pure C (no ESP-IDF)
+add_executable(test_termstate
+    test_termstate.c
+    ${TSM_SRC}/vtparse.c
+    ${TSM_SRC}/color.c
+    ${TSM_SRC}/charsets.c
+    ${TSM_SRC}/termstate.c
+)
+
+target_include_directories(test_termstate PRIVATE
+    ${TSM_INC}
+    ${TSM_SRC}
+    ${unity_SOURCE_DIR}/src
+)
+
+target_link_libraries(test_termstate PRIVATE unity)
+
 enable_testing()
-add_test(NAME vtparse_tests COMMAND test_vtparse)
+add_test(NAME vtparse_tests   COMMAND test_vtparse)
+add_test(NAME termstate_tests COMMAND test_termstate)

@@ -15,50 +15,39 @@
 
 /* ── Cell ────────────────────────────────────────────────────────────────────
  *
- * 8 bytes, 4-byte aligned.  Binary-compatible with the existing
- * terminal_cell_t used by display_render_chunk() so a cast is safe
- * (uint16_t cp lives at offset 0 in both structs).
+ * 8 bytes.  Binary-compatible with terminal_cell_t in display.h so a direct
+ * cast (or memcpy-free pointer pass) to display_set_text_buffer() is safe.
  *
- *  word[15: 0]  Unicode codepoint (BMP, U+0000–U+FFFF)
- *  word[20:16]  reserved (SMP extension, unused)
- *  word[   21]  CELL_FLAG_WIDE_RIGHT  — right-half placeholder of wide glyph
- *  word[   22]  CELL_FLAG_PROTECTED   — DECSCA protected cell
- *  word[   23]  CELL_ATTR_BOLD
- *  word[   24]  CELL_ATTR_DIM
- *  word[   25]  CELL_ATTR_ITALIC
- *  word[   26]  CELL_ATTR_UNDERLINE
- *  word[   27]  CELL_ATTR_BLINK
- *  word[   28]  CELL_ATTR_INVERSE
- *  word[   29]  CELL_ATTR_INVISIBLE
- *  word[   30]  CELL_ATTR_STRIKE
- *  word[   31]  CELL_ATTR_OVERLINE
+ * Layout matches terminal_cell_t exactly:
+ *   offset 0  cp       uint16_t  Unicode codepoint (BMP, U+0000–U+FFFF)
+ *   offset 2  fg       uint16_t  foreground RGB565
+ *   offset 4  bg       uint16_t  background RGB565
+ *   offset 6  attrs    uint8_t   primary attribute flags (BOLD/UNDERLINE/…)
+ *   offset 7  attrs2   uint8_t   extended attribute flags + cell flags
  */
 typedef struct {
-    uint32_t word;   /* codepoint + flags + attrs (see above) */
-    uint16_t fg;     /* foreground RGB565, pre-converted at SGR parse time */
-    uint16_t bg;     /* background RGB565, pre-converted at SGR parse time */
+    uint16_t cp;      /* Unicode codepoint (BMP)                              */
+    uint16_t fg;      /* foreground RGB565, pre-converted at SGR parse time   */
+    uint16_t bg;      /* background RGB565, pre-converted at SGR parse time   */
+    uint8_t  attrs;   /* primary SGR attributes (see CELL_ATTR_* below)       */
+    uint8_t  attrs2;  /* extended attrs + cell flags (see CELL_ATTR2_* below) */
 } tsm_cell_t;
 
-/* Codepoint access */
-#define CELL_CP(c)        ((uint16_t)((c).word & 0xFFFFu))
-#define CELL_SET_CP(c,v)  ((c).word = ((c).word & ~0xFFFFu) | ((uint16_t)(v)))
+/* Primary attributes — attrs byte (offset 6).
+ * Lower nibble matches display.h ATTR_* bits for ISR compatibility. */
+#define CELL_ATTR_BOLD        (1u << 0)   /* SGR 1  */
+#define CELL_ATTR_UNDERLINE   (1u << 1)   /* SGR 4  */
+#define CELL_ATTR_INVERSE     (1u << 2)   /* SGR 7  */
+#define CELL_ATTR_BLINK       (1u << 3)   /* SGR 5  */
+#define CELL_ATTR_DIM         (1u << 4)   /* SGR 2  */
+#define CELL_ATTR_ITALIC      (1u << 5)   /* SGR 3  */
+#define CELL_ATTR_INVISIBLE   (1u << 6)   /* SGR 8  */
+#define CELL_ATTR_STRIKE      (1u << 7)   /* SGR 9  */
 
-/* Flags */
-#define CELL_FLAG_WIDE_RIGHT  (1u << 21)
-#define CELL_FLAG_PROTECTED   (1u << 22)
-
-/* Attributes (SGR) */
-#define CELL_ATTR_BOLD        (1u << 23)
-#define CELL_ATTR_DIM         (1u << 24)
-#define CELL_ATTR_ITALIC      (1u << 25)
-#define CELL_ATTR_UNDERLINE   (1u << 26)
-#define CELL_ATTR_BLINK       (1u << 27)
-#define CELL_ATTR_INVERSE     (1u << 28)
-#define CELL_ATTR_INVISIBLE   (1u << 29)
-#define CELL_ATTR_STRIKE      (1u << 30)
-#define CELL_ATTR_OVERLINE    (1u << 31)
-
-#define CELL_ATTRS_MASK       (0xFF800000u)
+/* Extended attributes + cell flags — attrs2 byte (offset 7) */
+#define CELL_ATTR2_OVERLINE   (1u << 0)   /* SGR 53 */
+#define CELL_ATTR2_PROTECTED  (1u << 1)   /* DECSCA — protected from erase  */
+#define CELL_ATTR2_WIDE_RIGHT (1u << 2)   /* right-half placeholder of wide glyph */
 
 /* ── Dirty row segment ───────────────────────────────────────────────────────
  *
@@ -73,3 +62,47 @@ typedef struct {
 /* Clean sentinel values */
 #define TSM_DIRTY_L_CLEAN  0xFFu
 #define TSM_DIRTY_R_CLEAN  0x00u
+
+/* ── Terminal dimensions ─────────────────────────────────────────────────── */
+
+#define TSM_COLS_MAX  220   /* practical max for 800px / 4px font */
+#define TSM_ROWS_MAX  60    /* practical max for 480px / 8px font */
+
+/* ── Forward declarations (Phase 2) ─────────────────────────────────────── */
+
+typedef struct tsm_s tsm_t;
+
+/* Callback: called once per completed frame with updated dirty map.
+ * rows_dirty[r].l > rows_dirty[r].r  →  row r is clean. */
+typedef void (*tsm_dirty_fn)(tsm_t *tsm, void *user);
+
+/* ── Terminal API ────────────────────────────────────────────────────────── */
+
+/* Allocate and initialise a new terminal of cols×rows.
+ * Returns NULL on allocation failure. */
+tsm_t *tsm_new(uint8_t cols, uint8_t rows);
+
+/* Free all resources. */
+void tsm_free(tsm_t *tsm);
+
+/* Feed raw bytes from the host (VT sequences + UTF-8 text). */
+void tsm_feed(tsm_t *tsm, const uint8_t *data, size_t len);
+
+/* Direct pointer to the cell grid (cols*rows tsm_cell_t, row-major).
+ * Binary-compatible with terminal_cell_t; pass directly to
+ * display_set_text_buffer(). */
+const tsm_cell_t *tsm_screen(const tsm_t *tsm);
+
+/* Current cursor position and visibility. */
+void tsm_cursor(const tsm_t *tsm, uint8_t *col, uint8_t *row, bool *visible);
+
+/* Dirty row segments since last tsm_clear_dirty().
+ * Returns pointer to array of rows tsm_row_dirty_t entries. */
+const tsm_row_dirty_t *tsm_dirty(const tsm_t *tsm);
+
+/* Mark all rows clean. */
+void tsm_clear_dirty(tsm_t *tsm);
+
+/* Dimensions. */
+uint8_t tsm_cols(const tsm_t *tsm);
+uint8_t tsm_rows(const tsm_t *tsm);
