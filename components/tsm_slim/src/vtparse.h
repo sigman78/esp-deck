@@ -30,47 +30,26 @@
 /* Maximum codepoints buffered before a VT_EV_PRINT span is flushed. */
 #define VTP_PRINT_BUF   64
 
-/* ── Event types ──────────────────────────────────────────────────────────── */
-
-typedef enum {
-    VT_EV_PRINT,  /* printable span — .cps[0..ncp-1] hold codepoints         */
-    VT_EV_C0,     /* C0 control byte    — .byte holds the raw byte           */
-    VT_EV_ESC,    /* ESC sequence       — .intermediate, .final              */
-    VT_EV_CSI,    /* CSI sequence       — .prefix, .params[], .nparams,
-                   *                      .intermediate, .final              */
-    VT_EV_OSC,    /* OSC string         — .osc, .osc_len                     */
-    VT_EV_DCS,    /* DCS (stub)         — .final set on hook; passthrough
-                   *                      data not forwarded in Phase 1      */
-} vt_ev_type_t;
+/* ── Per-type callback vtable ─────────────────────────────────────────────── */
 
 typedef struct {
-    vt_ev_type_t   type;
-
-    /* VT_EV_PRINT (span) */
-    const uint32_t *cps;            /* codepoints; valid during callback only */
-    int             ncp;            /* codepoint count (≥ 1)                 */
-
-    /* VT_EV_C0 */
-    uint8_t        byte;            /* raw control byte                      */
-
-    /* VT_EV_ESC, VT_EV_CSI */
-    uint8_t        intermediate;    /* first intermediate byte (0x20–0x2F),
-                                     * or 0 if none                          */
-    uint8_t        final;           /* final byte                            */
-
-    /* VT_EV_CSI only */
-    uint8_t        prefix;          /* private-use marker: '<' '=' '>' '?'
-                                     * or 0 if absent                        */
-    int32_t        params[VTP_PARAMS_MAX]; /* -1 = omitted / use default     */
-    int            nparams;         /* number of param slots populated       */
-
-    /* VT_EV_OSC */
-    const uint8_t *osc;             /* points into parser's internal buffer; */
-    int            osc_len;         /* valid only during the callback        */
-} vt_event_t;
-
-/* Dispatch callback: called once per completed sequence. */
-typedef void (*vt_dispatch_fn)(const vt_event_t *ev, void *user);
+    /* Printable span: cps[0..ncp-1] are codepoints (valid only during cb). */
+    void (*print)(const uint32_t *cps, int ncp, void *user);
+    /* C0 control byte. */
+    void (*c0)   (uint8_t byte, void *user);
+    /* ESC sequence. */
+    void (*esc)  (uint8_t intermediate, uint8_t final, void *user);
+    /* CSI sequence.  params/nparams point directly into the parser buffer —
+     * no copy; valid only during the callback. */
+    void (*csi)  (uint8_t prefix, uint8_t intermediate, uint8_t final,
+                  const int32_t *params, int nparams, void *user);
+    /* OSC string.  data is null-terminated; len excludes the terminator. */
+    void (*osc)  (const uint8_t *data, int len, void *user);
+    /* DCS hook (stub).  params point into the parser buffer. */
+    void (*dcs)  (uint8_t prefix, uint8_t intermediate, uint8_t final,
+                  const int32_t *params, int nparams, void *user);
+} vt_callbacks_t;
+/* All slots MUST be non-NULL.  Use a silent no-op for unused event types. */
 
 /* ── Parser state ─────────────────────────────────────────────────────────── */
 
@@ -122,16 +101,17 @@ typedef struct {
     uint32_t       print_buf[VTP_PRINT_BUF];
     int            print_len;
 
-    /* Dispatch */
-    vt_dispatch_fn dispatch;
+    /* Dispatch vtable (copied in by vtparse_init) */
+    vt_callbacks_t cb;
     void          *user;
 } vtparse_t;
 
 /* ── Public API ───────────────────────────────────────────────────────────── */
 
 /* Initialise (or re-initialise) a parser.  The struct need not be zeroed
- * beforehand; vtparse_init does a full memset internally. */
-void vtparse_init(vtparse_t *p, vt_dispatch_fn dispatch, void *user);
+ * beforehand; vtparse_init does a full memset internally.
+ * The vtable is copied; the caller's vt_callbacks_t need not remain live. */
+void vtparse_init(vtparse_t *p, const vt_callbacks_t *cb, void *user);
 
 /* Feed raw bytes.  May call dispatch zero or more times per byte. */
 void vtparse_feed(vtparse_t *p, const uint8_t *data, size_t len);

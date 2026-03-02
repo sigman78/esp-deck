@@ -25,10 +25,10 @@
 /* ── Utilities ────────────────────────────────────────────────────────────── */
 
 /* Resolve a CSI parameter; return def if the slot is -1 (omitted). */
-static inline int32_t param(const vt_event_t *ev, int i, int32_t def)
+static inline int32_t param(const int32_t *params, int nparams, int i, int32_t def)
 {
-    if (i >= ev->nparams || ev->params[i] < 0) return def;
-    return ev->params[i];
+    if (i >= nparams || params[i] < 0) return def;
+    return params[i];
 }
 
 /* Pointer to cell (col, row) on the active screen. */
@@ -194,9 +194,9 @@ static void switch_to_primary(tsm_t *t)
 
 /* ── SGR (Select Graphic Rendition) ──────────────────────────────────────── */
 
-static void do_sgr(tsm_t *t, const vt_event_t *ev)
+static void do_sgr(tsm_t *t, const int32_t *params, int nparams)
 {
-    int np = ev->nparams;
+    int np = nparams;
     if (np == 0) {
         t->attrs = 0; t->attrs2 = 0;
         t->fg = COLOR_DEFAULT_FG; t->bg = COLOR_DEFAULT_BG;
@@ -204,7 +204,7 @@ static void do_sgr(tsm_t *t, const vt_event_t *ev)
     }
 
     for (int i = 0; i < np; ) {
-        int32_t p0 = ev->params[i] < 0 ? 0 : ev->params[i];
+        int32_t p0 = params[i] < 0 ? 0 : params[i];
         switch (p0) {
         case  0: t->attrs = 0; t->attrs2 = 0;
                  t->fg = COLOR_DEFAULT_FG; t->bg = COLOR_DEFAULT_BG; i++; break;
@@ -234,19 +234,19 @@ static void do_sgr(tsm_t *t, const vt_event_t *ev)
             if (p0 >= 100 && p0 <= 107) { t->bg = color_ansi((uint8_t)(p0-100+8)); i++; break; }
             /* 38 / 48: extended color */
             if ((p0 == 38 || p0 == 48) && i + 1 < np) {
-                int32_t mode = ev->params[i+1] < 0 ? 0 : ev->params[i+1];
+                int32_t mode = params[i+1] < 0 ? 0 : params[i+1];
                 bool is_fg = (p0 == 38);
                 if (mode == 5 && i + 2 < np) {
                     /* 256-color: 38;5;n or 48;5;n */
-                    int32_t idx = ev->params[i+2];
+                    int32_t idx = params[i+2];
                     uint16_t c = color_ansi(idx < 0 ? 0 : (uint8_t)idx);
                     if (is_fg) t->fg = c; else t->bg = c;
                     i += 3;
                 } else if (mode == 2 && i + 4 < np) {
                     /* truecolor: 38;2;r;g;b or 48;2;r;g;b */
-                    int32_t r = ev->params[i+2];
-                    int32_t g = ev->params[i+3];
-                    int32_t b = ev->params[i+4];
+                    int32_t r = params[i+2];
+                    int32_t g = params[i+3];
+                    int32_t b = params[i+4];
                     uint16_t c = color_rgb(r<0?0:(uint8_t)r, g<0?0:(uint8_t)g, b<0?0:(uint8_t)b);
                     if (is_fg) t->fg = c; else t->bg = c;
                     i += 5;
@@ -261,16 +261,17 @@ static void do_sgr(tsm_t *t, const vt_event_t *ev)
 
 /* ── CSI dispatch ─────────────────────────────────────────────────────────── */
 
-static void do_csi(tsm_t *t, const vt_event_t *ev)
+static void do_csi(tsm_t *t, uint8_t prefix, uint8_t intermediate, uint8_t final,
+                   const int32_t *params, int nparams)
 {
-    int32_t p1 = param(ev, 0, -1);
-    int32_t p2 = param(ev, 1, -1);
+    int32_t p1 = param(params, nparams, 0, -1);
+    int32_t p2 = param(params, nparams, 1, -1);
 
     /* Private sequences (prefix '?') */
-    if (ev->prefix == '?') {
+    if (prefix == '?') {
         int32_t mode_n = p1 < 0 ? 0 : p1;
-        bool set   = (ev->final == 'h');
-        bool reset = (ev->final == 'l');
+        bool set   = (final == 'h');
+        bool reset = (final == 'l');
         if (!set && !reset) return;
         switch (mode_n) {
         case    1: /* DECCKM cursor keys — ignored */             break;
@@ -293,7 +294,7 @@ static void do_csi(tsm_t *t, const vt_event_t *ev)
     }
 
     /* Standard CSI sequences */
-    switch (ev->final) {
+    switch (final) {
 
     /* ── Cursor movement ─────────────────────────────────────────────────── */
     case 'A': /* CUU — cursor up */
@@ -419,7 +420,7 @@ static void do_csi(tsm_t *t, const vt_event_t *ev)
 
     /* ── Misc ────────────────────────────────────────────────────────────── */
     case 'm': /* SGR */
-        do_sgr(t, ev);
+        do_sgr(t, params, nparams);
         break;
     case 'r': /* DECSTBM — set scroll region */
     {
@@ -433,11 +434,11 @@ static void do_csi(tsm_t *t, const vt_event_t *ev)
         break;
     }
     case 's': /* DECSC (also CSI s — save cursor) */
-        if (ev->intermediate == 0 && ev->prefix == 0)
+        if (intermediate == 0 && prefix == 0)
             save_cursor(t, &t->saved);
         break;
     case 'u': /* DECRC (also CSI u — restore cursor) */
-        if (ev->intermediate == 0 && ev->prefix == 0)
+        if (intermediate == 0 && prefix == 0)
             restore_cursor(t, &t->saved);
         break;
     case 'h': /* SM — set mode */
@@ -456,14 +457,14 @@ static void do_csi(tsm_t *t, const vt_event_t *ev)
 
 /* ── ESC dispatch ─────────────────────────────────────────────────────────── */
 
-static void do_esc(tsm_t *t, const vt_event_t *ev)
+static void do_esc(tsm_t *t, uint8_t intermediate, uint8_t final)
 {
-    if (ev->intermediate == '(') {
-        t->g[0] = (ev->final == '0') ? CHARSET_DEC_GFX : CHARSET_ASCII;
-    } else if (ev->intermediate == ')') {
-        t->g[1] = (ev->final == '0') ? CHARSET_DEC_GFX : CHARSET_ASCII;
-    } else if (ev->intermediate == 0) {
-        switch (ev->final) {
+    if (intermediate == '(') {
+        t->g[0] = (final == '0') ? CHARSET_DEC_GFX : CHARSET_ASCII;
+    } else if (intermediate == ')') {
+        t->g[1] = (final == '0') ? CHARSET_DEC_GFX : CHARSET_ASCII;
+    } else if (intermediate == 0) {
+        switch (final) {
         case '7': save_cursor(t, &t->saved);    break; /* DECSC */
         case '8': restore_cursor(t, &t->saved); break; /* DECRC */
         case 'D': /* IND — index (like LF) */
@@ -497,20 +498,20 @@ static void do_esc(tsm_t *t, const vt_event_t *ev)
 
 /* ── OSC dispatch ────────────────────────────────────────────────────────── */
 
-static void do_osc(tsm_t *t, const vt_event_t *ev)
+static void do_osc(tsm_t *t, const uint8_t *data, int len)
 {
-    if (ev->osc_len < 2) return;
-    const uint8_t *d = ev->osc;
+    if (len < 2) return;
+    const uint8_t *d = data;
     int ps = 0;
     int i  = 0;
-    while (i < ev->osc_len && d[i] >= '0' && d[i] <= '9')
+    while (i < len && d[i] >= '0' && d[i] <= '9')
         ps = ps * 10 + (d[i++] - '0');
-    if (i < ev->osc_len && d[i] == ';') i++;
+    if (i < len && d[i] == ';') i++;
     if (ps == 0 || ps == 2) {
-        int len = ev->osc_len - i;
-        if (len >= (int)sizeof(t->title)) len = (int)sizeof(t->title) - 1;
-        memcpy(t->title, &d[i], (size_t)len);
-        t->title[len] = '\0';
+        int tlen = len - i;
+        if (tlen >= (int)sizeof(t->title)) tlen = (int)sizeof(t->title) - 1;
+        memcpy(t->title, &d[i], (size_t)tlen);
+        t->title[tlen] = '\0';
     }
 }
 
@@ -587,20 +588,30 @@ static void do_print_span(tsm_t *t, const uint32_t *cps, int count)
     }
 }
 
-/* ── VT parser callback ───────────────────────────────────────────────────── */
+/* ── Per-type vtable callbacks ────────────────────────────────────────────── */
 
-static void vt_dispatch(const vt_event_t *ev, void *user)
+static void on_print(const uint32_t *cps, int ncp, void *user)
+    { do_print_span((tsm_t *)user, cps, ncp); }
+static void on_c0(uint8_t byte, void *user)
+    { do_c0((tsm_t *)user, byte); }
+static void on_esc(uint8_t intermediate, uint8_t final, void *user)
+    { do_esc((tsm_t *)user, intermediate, final); }
+static void on_csi(uint8_t prefix, uint8_t intermediate, uint8_t final,
+                   const int32_t *params, int nparams, void *user)
+    { do_csi((tsm_t *)user, prefix, intermediate, final, params, nparams); }
+static void on_osc(const uint8_t *data, int len, void *user)
+    { do_osc((tsm_t *)user, data, len); }
+static void on_dcs(uint8_t prefix, uint8_t intermediate, uint8_t final,
+                   const int32_t *params, int nparams, void *user)
 {
-    tsm_t *t = (tsm_t *)user;
-    switch (ev->type) {
-    case VT_EV_PRINT: do_print_span(t, ev->cps, ev->ncp);  break;
-    case VT_EV_C0:    do_c0(t, ev->byte);                  break;
-    case VT_EV_ESC:   do_esc(t, ev);                       break;
-    case VT_EV_CSI:   do_csi(t, ev);                       break;
-    case VT_EV_OSC:   do_osc(t, ev);                       break;
-    case VT_EV_DCS:   /* stub — passthrough data ignored */ break;
-    }
+    (void)prefix; (void)intermediate; (void)final;
+    (void)params; (void)nparams; (void)user;
 }
+
+static const vt_callbacks_t s_tsm_cb = {
+    .print = on_print, .c0 = on_c0, .esc = on_esc,
+    .csi   = on_csi,   .osc = on_osc, .dcs = on_dcs,
+};
 
 /* ── Public API ───────────────────────────────────────────────────────────── */
 
@@ -636,7 +647,7 @@ tsm_t *tsm_new(int cols, int rows)
     erase_screen(t);
     tsm_clear_dirty(t);
 
-    vtparse_init(&t->vtp, vt_dispatch, t);
+    vtparse_init(&t->vtp, &s_tsm_cb, t);
 
     return t;
 }

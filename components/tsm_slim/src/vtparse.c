@@ -65,14 +65,10 @@ static void do_prefix(vtparse_t *p, uint8_t b)
 
 static void flush_print(vtparse_t *p)
 {
-    if (p->print_len == 0) return;
-    vt_event_t ev;
-    memset(&ev, 0, sizeof(ev));
-    ev.type = VT_EV_PRINT;
-    ev.cps  = p->print_buf;
-    ev.ncp  = p->print_len;
+    int n = p->print_len;
+    if (n == 0) return;
     p->print_len = 0;
-    p->dispatch(&ev, p->user);
+    p->cb.print(p->print_buf, n, p->user);
 }
 
 static void append_print(vtparse_t *p, uint32_t cp)
@@ -82,62 +78,30 @@ static void append_print(vtparse_t *p, uint32_t cp)
     p->print_buf[p->print_len++] = cp;
 }
 
-static void emit_c0(vtparse_t *p, uint8_t b)
+static inline void emit_c0(vtparse_t *p, uint8_t b)
 {
-    vt_event_t ev;
-    memset(&ev, 0, sizeof(ev));
-    ev.type = VT_EV_C0;
-    ev.byte = b;
-    p->dispatch(&ev, p->user);
+    p->cb.c0(b, p->user);
 }
 
-static void emit_esc(vtparse_t *p, uint8_t final)
+static inline void emit_esc(vtparse_t *p, uint8_t final)
 {
-    vt_event_t ev;
-    memset(&ev, 0, sizeof(ev));
-    ev.type         = VT_EV_ESC;
-    ev.intermediate = p->intermediate;
-    ev.final        = final;
-    p->dispatch(&ev, p->user);
+    p->cb.esc(p->intermediate, final, p->user);
 }
 
-static void emit_csi(vtparse_t *p, uint8_t final)
+static inline void emit_csi(vtparse_t *p, uint8_t final)
 {
-    vt_event_t ev;
-    memset(&ev, 0, sizeof(ev));
-    ev.type         = VT_EV_CSI;
-    ev.prefix       = p->prefix;
-    ev.intermediate = p->intermediate;
-    ev.final        = final;
-    ev.nparams      = p->nparams;
-    for (int i = 0; i < p->nparams && i < VTP_PARAMS_MAX; i++)
-        ev.params[i] = p->params[i];
-    p->dispatch(&ev, p->user);
+    p->cb.csi(p->prefix, p->intermediate, final, p->params, p->nparams, p->user);
 }
 
 static void emit_osc(vtparse_t *p)
 {
-    p->osc_buf[p->osc_len] = 0; /* null-terminate for consumer convenience */
-    vt_event_t ev;
-    memset(&ev, 0, sizeof(ev));
-    ev.type    = VT_EV_OSC;
-    ev.osc     = p->osc_buf;
-    ev.osc_len = p->osc_len;
-    p->dispatch(&ev, p->user);
+    p->osc_buf[p->osc_len] = 0; /* null-terminate */
+    p->cb.osc(p->osc_buf, p->osc_len, p->user);
 }
 
-static void emit_dcs(vtparse_t *p, uint8_t final)
+static inline void emit_dcs(vtparse_t *p, uint8_t final)
 {
-    vt_event_t ev;
-    memset(&ev, 0, sizeof(ev));
-    ev.type         = VT_EV_DCS;
-    ev.prefix       = p->prefix;
-    ev.intermediate = p->intermediate;
-    ev.nparams      = p->nparams;
-    for (int i = 0; i < p->nparams && i < VTP_PARAMS_MAX; i++)
-        ev.params[i] = p->params[i];
-    ev.final        = final;
-    p->dispatch(&ev, p->user);
+    p->cb.dcs(p->prefix, p->intermediate, final, p->params, p->nparams, p->user);
 }
 
 /* ── State transitions ────────────────────────────────────────────────────── */
@@ -419,12 +383,12 @@ static bool utf8_start(vtparse_t *p, uint8_t b)
 
 /* ── Public API ───────────────────────────────────────────────────────────── */
 
-void vtparse_init(vtparse_t *p, vt_dispatch_fn dispatch, void *user)
+void vtparse_init(vtparse_t *p, const vt_callbacks_t *cb, void *user)
 {
     memset(p, 0, sizeof(*p));
-    p->dispatch = dispatch;
-    p->user     = user;
-    p->state    = VTP_ST_GROUND;
+    p->cb    = *cb;
+    p->user  = user;
+    p->state = VTP_ST_GROUND;
     for (int i = 0; i < VTP_PARAMS_MAX; i++)
         p->params[i] = -1;
 }
