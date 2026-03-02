@@ -25,29 +25,29 @@
 /* ── Utilities ────────────────────────────────────────────────────────────── */
 
 /* Resolve a CSI parameter; return def if the slot is -1 (omitted). */
-static inline int32_t param(const vt_event_t *ev, uint8_t i, int32_t def)
+static inline int32_t param(const vt_event_t *ev, int i, int32_t def)
 {
     if (i >= ev->nparams || ev->params[i] < 0) return def;
     return ev->params[i];
 }
 
 /* Pointer to cell (col, row) on the active screen. */
-static inline tsm_cell_t *cell_at(tsm_t *t, uint8_t col, uint8_t row)
+static inline tsm_cell_t *cell_at(tsm_t *t, int col, int row)
 {
     return &t->cells[row * t->cols + col];
 }
 
 /* Mark column range [l, r] on row as dirty. */
-static void mark_dirty(tsm_t *t, uint8_t row, uint8_t l, uint8_t r)
+static void mark_dirty(tsm_t *t, int row, int l, int r)
 {
-    if (t->dirty[row].l > l) t->dirty[row].l = l;
-    if (t->dirty[row].r < r) t->dirty[row].r = r;
+    if (t->dirty[row].l > (uint8_t)l) t->dirty[row].l = (uint8_t)l;
+    if (t->dirty[row].r < (uint8_t)r) t->dirty[row].r = (uint8_t)r;
 }
 
 /* Mark entire row dirty. */
-static inline void mark_row_dirty(tsm_t *t, uint8_t row)
+static inline void mark_row_dirty(tsm_t *t, int row)
 {
-    mark_dirty(t, row, 0, (uint8_t)(t->cols - 1));
+    mark_dirty(t, row, 0, t->cols - 1);
 }
 
 /* ── Blank cell using current SGR ────────────────────────────────────────── */
@@ -60,57 +60,57 @@ static inline tsm_cell_t blank_cell(tsm_t *t)
 
 /* ── Screen fill / erase ─────────────────────────────────────────────────── */
 
-/* Erase [col_l, col_r] on row with current bg color. */
-static void erase_range(tsm_t *t, uint8_t row, uint8_t l, uint8_t r)
+/* Erase columns [l, r] on row with current bg color. */
+static void erase_range(tsm_t *t, int row, int l, int r)
 {
     tsm_cell_t b = blank_cell(t);
-    for (uint8_t c = l; c <= r; c++)
+    for (int c = l; c <= r; c++)
         *cell_at(t, c, row) = b;
     mark_dirty(t, row, l, r);
 }
 
 /* Erase entire row. */
-static inline void erase_row(tsm_t *t, uint8_t row)
+static inline void erase_row(tsm_t *t, int row)
 {
-    erase_range(t, row, 0, (uint8_t)(t->cols - 1));
+    erase_range(t, row, 0, t->cols - 1);
 }
 
 /* Erase entire screen. */
 static void erase_screen(tsm_t *t)
 {
-    for (uint8_t r = 0; r < t->rows; r++) erase_row(t, r);
+    for (int r = 0; r < t->rows; r++) erase_row(t, r);
 }
 
 /* ── Scrolling ───────────────────────────────────────────────────────────── */
 
 /* Scroll [top, bot] up by n lines; new lines at bottom are blank. */
-static void scroll_up(tsm_t *t, uint8_t n)
+static void scroll_up(tsm_t *t, int n)
 {
-    if (n == 0) return;
-    uint8_t top = t->scroll_top;
-    uint8_t bot = t->scroll_bot;
-    uint8_t span = bot - top + 1;
-    if (n >= span) { for (uint8_t r = top; r <= bot; r++) erase_row(t, r); return; }
+    if (n <= 0) return;
+    int top  = t->scroll_top;
+    int bot  = t->scroll_bot;
+    int span = bot - top + 1;
+    if (n >= span) { for (int r = top; r <= bot; r++) erase_row(t, r); return; }
     memmove(&t->cells[top * t->cols],
             &t->cells[(top + n) * t->cols],
-            (size_t)(span - n) * t->cols * sizeof(tsm_cell_t));
-    for (uint8_t r = (uint8_t)(bot - n + 1); r <= bot; r++) erase_row(t, r);
-    for (uint8_t r = top; r <= bot; r++) mark_row_dirty(t, r);
+            (size_t)(span - n) * (size_t)t->cols * sizeof(tsm_cell_t));
+    for (int r = bot - n + 1; r <= bot; r++) erase_row(t, r);
+    for (int r = top; r <= bot; r++) mark_row_dirty(t, r);
 }
 
 /* Scroll [top, bot] down by n lines; new lines at top are blank. */
-static void scroll_down(tsm_t *t, uint8_t n)
+static void scroll_down(tsm_t *t, int n)
 {
-    if (n == 0) return;
-    uint8_t top = t->scroll_top;
-    uint8_t bot = t->scroll_bot;
-    uint8_t span = bot - top + 1;
-    if (n >= span) { for (uint8_t r = top; r <= bot; r++) erase_row(t, r); return; }
+    if (n <= 0) return;
+    int top  = t->scroll_top;
+    int bot  = t->scroll_bot;
+    int span = bot - top + 1;
+    if (n >= span) { for (int r = top; r <= bot; r++) erase_row(t, r); return; }
     memmove(&t->cells[(top + n) * t->cols],
             &t->cells[top * t->cols],
-            (size_t)(span - n) * t->cols * sizeof(tsm_cell_t));
-    for (uint8_t r = top; r < (uint8_t)(top + n); r++) erase_row(t, r);
-    for (uint8_t r = top; r <= bot; r++) mark_row_dirty(t, r);
+            (size_t)(span - n) * (size_t)t->cols * sizeof(tsm_cell_t));
+    for (int r = top; r < top + n; r++) erase_row(t, r);
+    for (int r = top; r <= bot; r++) mark_row_dirty(t, r);
 }
 
 /* ── Cursor movement ─────────────────────────────────────────────────────── */
@@ -118,10 +118,10 @@ static void scroll_down(tsm_t *t, uint8_t n)
 /* Move cursor to absolute (col, row) — clamped to screen. */
 static void cursor_goto(tsm_t *t, int col, int row)
 {
-    uint8_t top = t->mode.decom ? t->scroll_top : 0;
-    uint8_t bot = t->mode.decom ? t->scroll_bot : (uint8_t)(t->rows - 1);
-    t->cx = clamp8(col, 0, (uint8_t)(t->cols - 1));
-    t->cy = clamp8(row, (int)top, (int)bot);
+    int top = t->mode.decom ? t->scroll_top : 0;
+    int bot = t->mode.decom ? t->scroll_bot : t->rows - 1;
+    t->cx = clampi(col, 0, t->cols - 1);
+    t->cy = clampi(row, top, bot);
     t->pending_wrap = false;
 }
 
@@ -159,8 +159,8 @@ static void save_cursor(tsm_t *t, tsm_cursor_save_t *s)
 
 static void restore_cursor(tsm_t *t, const tsm_cursor_save_t *s)
 {
-    t->cx = clamp8(s->col, 0, (uint8_t)(t->cols - 1));
-    t->cy = clamp8(s->row, 0, (uint8_t)(t->rows - 1));
+    t->cx = clampi(s->col, 0, t->cols - 1);
+    t->cy = clampi(s->row, 0, t->rows - 1);
     t->attrs = s->attrs; t->attrs2 = s->attrs2;
     t->fg = s->fg; t->bg = s->bg;
     t->g[0] = s->g0; t->g[1] = s->g1; t->gl = s->gl;
@@ -173,7 +173,6 @@ static void switch_to_alt(tsm_t *t)
 {
     if (t->mode.decalt) return;
     save_cursor(t, &t->saved);
-    /* swap cell buffers */
     tsm_cell_t *tmp = t->cells;
     t->cells = t->alt_cells;
     t->alt_cells = tmp;
@@ -197,15 +196,14 @@ static void switch_to_primary(tsm_t *t)
 
 static void do_sgr(tsm_t *t, const vt_event_t *ev)
 {
-    /* With no params, SGR 0 (reset). */
-    uint8_t np = ev->nparams;
+    int np = ev->nparams;
     if (np == 0) {
         t->attrs = 0; t->attrs2 = 0;
         t->fg = COLOR_DEFAULT_FG; t->bg = COLOR_DEFAULT_BG;
         return;
     }
 
-    for (uint8_t i = 0; i < np; ) {
+    for (int i = 0; i < np; ) {
         int32_t p0 = ev->params[i] < 0 ? 0 : ev->params[i];
         switch (p0) {
         case  0: t->attrs = 0; t->attrs2 = 0;
@@ -265,13 +263,13 @@ static void do_sgr(tsm_t *t, const vt_event_t *ev)
 
 static void do_csi(tsm_t *t, const vt_event_t *ev)
 {
-    int32_t p1 = param(ev, 0, -1);  /* first param or -1 */
-    int32_t p2 = param(ev, 1, -1);  /* second param or -1 */
+    int32_t p1 = param(ev, 0, -1);
+    int32_t p2 = param(ev, 1, -1);
 
     /* Private sequences (prefix '?') */
     if (ev->prefix == '?') {
         int32_t mode_n = p1 < 0 ? 0 : p1;
-        bool set = (ev->final == 'h');
+        bool set   = (ev->final == 'h');
         bool reset = (ev->final == 'l');
         if (!set && !reset) return;
         switch (mode_n) {
@@ -322,10 +320,10 @@ static void do_csi(tsm_t *t, const vt_event_t *ev)
     case 'H': /* CUP — cursor position */
     case 'f': /* HVP — horizontal vertical position */
     {
-        int r = (int)(p1 < 1 ? 1 : p1) - 1;
-        int c = (int)(p2 < 1 ? 1 : p2) - 1;
-        if (t->mode.decom) { r += t->scroll_top; }
-        cursor_goto(t, c, r);
+        int row = (int)(p1 < 1 ? 1 : p1) - 1;
+        int col = (int)(p2 < 1 ? 1 : p2) - 1;
+        if (t->mode.decom) { row += t->scroll_top; }
+        cursor_goto(t, col, row);
         break;
     }
     case 'd': /* VPA — vertical position absolute */
@@ -336,22 +334,22 @@ static void do_csi(tsm_t *t, const vt_event_t *ev)
     case 'J': /* ED — erase display */
         switch (p1 < 0 ? 0 : p1) {
         case 0: /* from cursor to end */
-            erase_range(t, t->cy, t->cx, (uint8_t)(t->cols - 1));
-            for (uint8_t r = t->cy + 1; r < t->rows; r++) erase_row(t, r);
+            erase_range(t, t->cy, t->cx, t->cols - 1);
+            for (int r = t->cy + 1; r < t->rows; r++) erase_row(t, r);
             break;
         case 1: /* from start to cursor */
-            for (uint8_t r = 0; r < t->cy; r++) erase_row(t, r);
+            for (int r = 0; r < t->cy; r++) erase_row(t, r);
             erase_range(t, t->cy, 0, t->cx);
             break;
         case 2: /* whole screen */
-        case 3: /* whole screen + scrollback (scrollback not implemented) */
+        case 3: /* whole screen + scrollback (not implemented) */
             erase_screen(t);
             break;
         }
         break;
     case 'K': /* EL — erase line */
         switch (p1 < 0 ? 0 : p1) {
-        case 0: erase_range(t, t->cy, t->cx, (uint8_t)(t->cols - 1)); break;
+        case 0: erase_range(t, t->cy, t->cx, t->cols - 1); break;
         case 1: erase_range(t, t->cy, 0, t->cx); break;
         case 2: erase_row(t, t->cy); break;
         }
@@ -360,10 +358,9 @@ static void do_csi(tsm_t *t, const vt_event_t *ev)
     /* ── Insert / delete ─────────────────────────────────────────────────── */
     case 'L': /* IL — insert lines */
     {
-        uint8_t n = (uint8_t)(p1 < 1 ? 1 : p1);
+        int n = (int)(p1 < 1 ? 1 : p1);
         if (t->cy >= t->scroll_top && t->cy <= t->scroll_bot) {
-            /* Temporarily restrict scroll region top to cy */
-            uint8_t saved_top = t->scroll_top;
+            int saved_top = t->scroll_top;
             t->scroll_top = t->cy;
             scroll_down(t, n);
             t->scroll_top = saved_top;
@@ -372,9 +369,9 @@ static void do_csi(tsm_t *t, const vt_event_t *ev)
     }
     case 'M': /* DL — delete lines */
     {
-        uint8_t n = (uint8_t)(p1 < 1 ? 1 : p1);
+        int n = (int)(p1 < 1 ? 1 : p1);
         if (t->cy >= t->scroll_top && t->cy <= t->scroll_bot) {
-            uint8_t saved_top = t->scroll_top;
+            int saved_top = t->scroll_top;
             t->scroll_top = t->cy;
             scroll_up(t, n);
             t->scroll_top = saved_top;
@@ -383,42 +380,41 @@ static void do_csi(tsm_t *t, const vt_event_t *ev)
     }
     case '@': /* ICH — insert characters */
     {
-        uint8_t n = (uint8_t)(p1 < 1 ? 1 : p1);
-        uint8_t end = (uint8_t)(t->cols - 1);
-        if (n > t->cols - t->cx) n = (uint8_t)(t->cols - t->cx);
+        int n = (int)(p1 < 1 ? 1 : p1);
+        if (n > t->cols - t->cx) n = t->cols - t->cx;
         memmove(cell_at(t, t->cx + n, t->cy),
                 cell_at(t, t->cx,     t->cy),
                 (size_t)(t->cols - t->cx - n) * sizeof(tsm_cell_t));
-        erase_range(t, t->cy, t->cx, (uint8_t)(t->cx + n - 1));
-        mark_dirty(t, t->cy, t->cx, end);
+        erase_range(t, t->cy, t->cx, t->cx + n - 1);
+        mark_dirty(t, t->cy, t->cx, t->cols - 1);
         break;
     }
     case 'P': /* DCH — delete characters */
     {
-        uint8_t n = (uint8_t)(p1 < 1 ? 1 : p1);
-        if (n > t->cols - t->cx) n = (uint8_t)(t->cols - t->cx);
+        int n = (int)(p1 < 1 ? 1 : p1);
+        if (n > t->cols - t->cx) n = t->cols - t->cx;
         memmove(cell_at(t, t->cx,     t->cy),
                 cell_at(t, t->cx + n, t->cy),
                 (size_t)(t->cols - t->cx - n) * sizeof(tsm_cell_t));
-        erase_range(t, t->cy, (uint8_t)(t->cols - n), (uint8_t)(t->cols - 1));
-        mark_dirty(t, t->cy, t->cx, (uint8_t)(t->cols - 1));
+        erase_range(t, t->cy, t->cols - n, t->cols - 1);
+        mark_dirty(t, t->cy, t->cx, t->cols - 1);
         break;
     }
     case 'X': /* ECH — erase characters */
     {
-        uint8_t n = (uint8_t)(p1 < 1 ? 1 : p1);
-        uint8_t end = (uint8_t)(t->cx + n - 1);
-        if (end >= t->cols) end = (uint8_t)(t->cols - 1);
+        int n = (int)(p1 < 1 ? 1 : p1);
+        int end = t->cx + n - 1;
+        if (end >= t->cols) end = t->cols - 1;
         erase_range(t, t->cy, t->cx, end);
         break;
     }
 
     /* ── Scroll ──────────────────────────────────────────────────────────── */
     case 'S': /* SU — scroll up */
-        scroll_up(t, (uint8_t)(p1 < 1 ? 1 : p1));
+        scroll_up(t, (int)(p1 < 1 ? 1 : p1));
         break;
     case 'T': /* SD — scroll down */
-        scroll_down(t, (uint8_t)(p1 < 1 ? 1 : p1));
+        scroll_down(t, (int)(p1 < 1 ? 1 : p1));
         break;
 
     /* ── Misc ────────────────────────────────────────────────────────────── */
@@ -427,13 +423,13 @@ static void do_csi(tsm_t *t, const vt_event_t *ev)
         break;
     case 'r': /* DECSTBM — set scroll region */
     {
-        uint8_t top = (uint8_t)((p1 < 1 ? 1 : p1) - 1);
-        uint8_t bot = (uint8_t)((p2 < 1 ? (int32_t)t->rows : p2) - 1);
+        int top = (int)(p1 < 1 ? 1 : p1) - 1;
+        int bot = (int)(p2 < 1 ? (int32_t)t->rows : p2) - 1;
         if (top < bot && bot < t->rows) {
             t->scroll_top = top;
             t->scroll_bot = bot;
         }
-        cursor_goto(t, 0, t->mode.decom ? (int)t->scroll_top : 0);
+        cursor_goto(t, 0, t->mode.decom ? t->scroll_top : 0);
         break;
     }
     case 's': /* DECSC (also CSI s — save cursor) */
@@ -445,21 +441,16 @@ static void do_csi(tsm_t *t, const vt_event_t *ev)
             restore_cursor(t, &t->saved);
         break;
     case 'h': /* SM — set mode */
-        if (p1 == 4) t->mode.irm = true;  /* IRM */
-        if (p1 == 20) t->mode.lnm = true; /* LNM */
+        if (p1 == 4)  t->mode.irm = true;   /* IRM */
+        if (p1 == 20) t->mode.lnm = true;   /* LNM */
         break;
     case 'l': /* RM — reset mode */
-        if (p1 == 4) t->mode.irm = false;
+        if (p1 == 4)  t->mode.irm = false;
         if (p1 == 20) t->mode.lnm = false;
         break;
-    case 'n': /* DSR — device status report */
-        /* Responses would need write-back; stub for now */
-        break;
-    case 'c': /* DA — device attributes */
-        /* Stub */
-        break;
-    default:
-        break;
+    case 'n': /* DSR — device status report (stub) */ break;
+    case 'c': /* DA  — device attributes (stub)    */ break;
+    default:  break;
     }
 }
 
@@ -468,10 +459,8 @@ static void do_csi(tsm_t *t, const vt_event_t *ev)
 static void do_esc(tsm_t *t, const vt_event_t *ev)
 {
     if (ev->intermediate == '(') {
-        /* G0 designation */
         t->g[0] = (ev->final == '0') ? CHARSET_DEC_GFX : CHARSET_ASCII;
     } else if (ev->intermediate == ')') {
-        /* G1 designation */
         t->g[1] = (ev->final == '0') ? CHARSET_DEC_GFX : CHARSET_ASCII;
     } else if (ev->intermediate == 0) {
         switch (ev->final) {
@@ -496,7 +485,7 @@ static void do_esc(tsm_t *t, const vt_event_t *ev)
             t->attrs = 0; t->attrs2 = 0;
             t->fg = COLOR_DEFAULT_FG; t->bg = COLOR_DEFAULT_BG;
             t->g[0] = CHARSET_ASCII; t->g[1] = CHARSET_ASCII; t->gl = 0;
-            t->scroll_top = 0; t->scroll_bot = (uint8_t)(t->rows - 1);
+            t->scroll_top = 0; t->scroll_bot = t->rows - 1;
             memset(&t->mode, 0, sizeof(t->mode));
             t->mode.decawm = true; t->mode.dectcem = true;
             t->pending_wrap = false;
@@ -510,19 +499,17 @@ static void do_esc(tsm_t *t, const vt_event_t *ev)
 
 static void do_osc(tsm_t *t, const vt_event_t *ev)
 {
-    /* OSC 0 and OSC 2: set icon name / window title (stored locally). */
     if (ev->osc_len < 2) return;
     const uint8_t *d = ev->osc;
-    /* Expect "Ps;string" where Ps is 0 or 2 */
     int ps = 0;
-    uint16_t i = 0;
+    int i  = 0;
     while (i < ev->osc_len && d[i] >= '0' && d[i] <= '9')
         ps = ps * 10 + (d[i++] - '0');
     if (i < ev->osc_len && d[i] == ';') i++;
     if (ps == 0 || ps == 2) {
-        uint16_t len = ev->osc_len - i;
-        if (len >= (uint16_t)sizeof(t->title)) len = (uint16_t)(sizeof(t->title) - 1);
-        memcpy(t->title, &d[i], len);
+        int len = ev->osc_len - i;
+        if (len >= (int)sizeof(t->title)) len = (int)sizeof(t->title) - 1;
+        memcpy(t->title, &d[i], (size_t)len);
         t->title[len] = '\0';
     }
 }
@@ -537,8 +524,8 @@ static void do_c0(tsm_t *t, uint8_t byte)
         break;
     case 0x09: /* HT — horizontal tab (advance to next tab stop, 8-col) */
     {
-        uint8_t next = (uint8_t)((t->cx + 8) & ~7u);
-        if (next >= t->cols) next = (uint8_t)(t->cols - 1);
+        int next = (t->cx + 8) & ~7;
+        if (next >= t->cols) next = t->cols - 1;
         t->cx = next;
         t->pending_wrap = false;
         break;
@@ -569,7 +556,6 @@ static void do_c0(tsm_t *t, uint8_t byte)
 
 static void do_print(tsm_t *t, uint32_t cp)
 {
-    /* Apply character set translation for 7-bit codepoints */
     uint16_t glyph;
     if (cp < 0x80u) {
         glyph = charset_xlat(t->g[t->gl], (uint8_t)cp);
@@ -577,25 +563,23 @@ static void do_print(tsm_t *t, uint32_t cp)
         glyph = (cp <= 0xFFFFu) ? (uint16_t)cp : '?';
     }
 
-    /* Handle pending auto-wrap */
     if (t->pending_wrap) do_wrap(t);
 
-    /* IRM: shift right before write */
     if (t->mode.irm) {
         if (t->cx + 1 < t->cols) {
             memmove(cell_at(t, t->cx + 1, t->cy),
                     cell_at(t, t->cx,     t->cy),
                     (size_t)(t->cols - t->cx - 1) * sizeof(tsm_cell_t));
-            mark_dirty(t, t->cy, t->cx, (uint8_t)(t->cols - 1));
+            mark_dirty(t, t->cy, t->cx, t->cols - 1);
         }
     }
 
     tsm_cell_t *c = cell_at(t, t->cx, t->cy);
-    c->cp    = glyph;
-    c->fg    = t->fg;
-    c->bg    = t->bg;
-    c->attrs = t->attrs;
-    c->attrs2= t->attrs2;
+    c->cp     = glyph;
+    c->fg     = t->fg;
+    c->bg     = t->bg;
+    c->attrs  = t->attrs;
+    c->attrs2 = t->attrs2;
     mark_dirty(t, t->cy, t->cx, t->cx);
     cursor_advance(t);
 }
@@ -617,15 +601,15 @@ static void vt_dispatch(const vt_event_t *ev, void *user)
 
 /* ── Public API ───────────────────────────────────────────────────────────── */
 
-tsm_t *tsm_new(uint8_t cols, uint8_t rows)
+tsm_t *tsm_new(int cols, int rows)
 {
-    if (cols == 0 || rows == 0) return NULL;
+    if (cols <= 0 || rows <= 0) return NULL;
 
     tsm_t *t = (tsm_t *)calloc(1, sizeof(tsm_t));
     if (!t) return NULL;
 
-    t->cells     = (tsm_cell_t *)calloc((size_t)cols * rows, sizeof(tsm_cell_t));
-    t->alt_cells = (tsm_cell_t *)calloc((size_t)cols * rows, sizeof(tsm_cell_t));
+    t->cells     = (tsm_cell_t *)calloc((size_t)cols * (size_t)rows, sizeof(tsm_cell_t));
+    t->alt_cells = (tsm_cell_t *)calloc((size_t)cols * (size_t)rows, sizeof(tsm_cell_t));
     t->dirty     = (tsm_row_dirty_t *)malloc((size_t)rows * sizeof(tsm_row_dirty_t));
 
     if (!t->cells || !t->alt_cells || !t->dirty) { tsm_free(t); return NULL; }
@@ -633,30 +617,22 @@ tsm_t *tsm_new(uint8_t cols, uint8_t rows)
     t->cols = cols;
     t->rows = rows;
 
-    /* Initial SGR */
     t->fg = COLOR_DEFAULT_FG;
     t->bg = COLOR_DEFAULT_BG;
 
-    /* Mode defaults */
     t->mode.decawm  = true;
     t->mode.dectcem = true;
 
-    /* Scroll region = full screen */
     t->scroll_top = 0;
-    t->scroll_bot = (uint8_t)(rows - 1);
+    t->scroll_bot = rows - 1;
 
-    /* Charsets */
     t->g[0] = CHARSET_ASCII;
     t->g[1] = CHARSET_ASCII;
     t->gl   = 0;
 
-    /* Fill screen with blanks */
     erase_screen(t);
-
-    /* Clear dirty (erase_screen marks everything dirty; start clean) */
     tsm_clear_dirty(t);
 
-    /* Init VT parser */
     vtparse_init(&t->vtp, vt_dispatch, t);
 
     return t;
@@ -681,7 +657,7 @@ const tsm_cell_t *tsm_screen(const tsm_t *t)
     return t->cells;
 }
 
-void tsm_cursor(const tsm_t *t, uint8_t *col, uint8_t *row, bool *visible)
+void tsm_cursor(const tsm_t *t, int *col, int *row, bool *visible)
 {
     if (col)     *col     = t->cx;
     if (row)     *row     = t->cy;
@@ -695,11 +671,11 @@ const tsm_row_dirty_t *tsm_dirty(const tsm_t *t)
 
 void tsm_clear_dirty(tsm_t *t)
 {
-    for (uint8_t r = 0; r < t->rows; r++) {
+    for (int r = 0; r < t->rows; r++) {
         t->dirty[r].l = TSM_DIRTY_L_CLEAN;
         t->dirty[r].r = TSM_DIRTY_R_CLEAN;
     }
 }
 
-uint8_t tsm_cols(const tsm_t *t) { return t->cols; }
-uint8_t tsm_rows(const tsm_t *t) { return t->rows; }
+int tsm_cols(const tsm_t *t) { return t->cols; }
+int tsm_rows(const tsm_t *t) { return t->rows; }

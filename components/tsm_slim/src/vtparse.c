@@ -32,7 +32,7 @@ static void do_param(vtparse_t *p, uint8_t b)
         if (p->param_cur < VTP_PARAMS_MAX - 1)
             p->param_cur++;
         /* Update nparams to include the new slot. */
-        if ((uint8_t)(p->param_cur + 1) > p->nparams)
+        if (p->param_cur + 1 > p->nparams)
             p->nparams = p->param_cur + 1;
         return;
     }
@@ -43,7 +43,7 @@ static void do_param(vtparse_t *p, uint8_t b)
         p->params[p->param_cur] = b - '0';
     else
         p->params[p->param_cur] = p->params[p->param_cur] * 10 + (b - '0');
-    if ((uint8_t)(p->param_cur + 1) > p->nparams)
+    if (p->param_cur + 1 > p->nparams)
         p->nparams = p->param_cur + 1;
 }
 

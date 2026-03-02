@@ -30,10 +30,10 @@ static const uint16_t s_named[16] = {
 
 /* ── 6×6×6 colour cube helper ────────────────────────────────────────────── */
 
-static inline uint8_t cube_to_8(uint8_t v)
+static inline uint8_t cube_to_8(int v)
 {
     /* xterm cube: 0→0, 1→95, 2→135, 3→175, 4→215, 5→255 */
-    return v ? (uint8_t)(55u + v * 40u) : 0u;
+    return v ? (uint8_t)(55 + v * 40) : 0u;
 }
 
 /* ── Public API ──────────────────────────────────────────────────────────── */
@@ -45,13 +45,13 @@ uint16_t color_ansi(uint8_t idx)
     }
     if (idx < 232) {
         /* 6×6×6 cube: index 16–231 */
-        uint8_t i = idx - 16;
-        uint8_t b = i % 6;  i /= 6;
-        uint8_t g = i % 6;  i /= 6;
-        uint8_t r = i % 6;
+        int i = idx - 16;
+        int b = i % 6;  i /= 6;
+        int g = i % 6;  i /= 6;
+        int r = i % 6;
         return color_rgb(cube_to_8(r), cube_to_8(g), cube_to_8(b));
     }
     /* Grayscale: indices 232–255 → 8, 18, 28 … 238 */
-    uint8_t v = (uint8_t)(8u + (uint8_t)((idx - 232u) * 10u));
+    uint8_t v = (uint8_t)(8 + (idx - 232) * 10);
     return color_rgb(v, v, v);
 }

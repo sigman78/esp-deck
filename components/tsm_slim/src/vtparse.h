@@ -58,11 +58,11 @@ typedef struct {
     uint8_t        prefix;          /* private-use marker: '<' '=' '>' '?'
                                      * or 0 if absent                        */
     int32_t        params[VTP_PARAMS_MAX]; /* -1 = omitted / use default     */
-    uint8_t        nparams;         /* number of param slots populated       */
+    int            nparams;         /* number of param slots populated       */
 
     /* VT_EV_OSC */
     const uint8_t *osc;             /* points into parser's internal buffer; */
-    uint16_t       osc_len;         /* valid only during the callback        */
+    int            osc_len;         /* valid only during the callback        */
 } vt_event_t;
 
 /* Dispatch callback: called once per completed sequence. */
@@ -101,18 +101,18 @@ typedef struct {
 
     /* UTF-8 decoder */
     uint32_t       utf8_cp;         /* accumulator                           */
-    uint8_t        utf8_remain;     /* continuation bytes still expected     */
+    int            utf8_remain;     /* continuation bytes still expected     */
 
     /* Sequence parameters */
     uint8_t        intermediate;    /* first collected intermediate byte     */
     uint8_t        prefix;          /* first private-use parameter marker    */
     int32_t        params[VTP_PARAMS_MAX];
-    uint8_t        nparams;         /* slots used so far                     */
-    uint8_t        param_cur;       /* index of the currently open slot      */
+    int            nparams;         /* slots used so far                     */
+    int            param_cur;       /* index of the currently open slot      */
 
     /* OSC string buffer (+1 for a null terminator written on emit) */
     uint8_t        osc_buf[VTP_OSC_MAX + 1];
-    uint16_t       osc_len;
+    int            osc_len;
 
     /* Dispatch */
     vt_dispatch_fn dispatch;

@@ -23,13 +23,13 @@ static void feed(tsm_t *t, const char *s)
 }
 
 /* Get cell at (col, row). */
-static tsm_cell_t cell(tsm_t *t, uint8_t col, uint8_t row)
+static tsm_cell_t cell(tsm_t *t, int col, int row)
 {
     return tsm_screen(t)[row * tsm_cols(t) + col];
 }
 
 /* Get codepoint at (col, row). */
-static uint16_t cp_at(tsm_t *t, uint8_t col, uint8_t row)
+static uint16_t cp_at(tsm_t *t, int col, int row)
 {
     return cell(t, col, row).cp;
 }
@@ -171,15 +171,15 @@ void test_tsm_new_basic(void)
 {
     tsm_t *t = tsm_new(80, 24);
     TEST_ASSERT_NOT_NULL(t);
-    TEST_ASSERT_EQUAL_UINT8(80, tsm_cols(t));
-    TEST_ASSERT_EQUAL_UINT8(24, tsm_rows(t));
+    TEST_ASSERT_EQUAL_INT(80, tsm_cols(t));
+    TEST_ASSERT_EQUAL_INT(24, tsm_rows(t));
     tsm_free(t);
 }
 
 void test_tsm_new_initial_cursor(void)
 {
     tsm_t *t = tsm_new(80, 24);
-    uint8_t col, row; bool vis;
+    int col, row; bool vis;
     tsm_cursor(t, &col, &row, &vis);
     TEST_ASSERT_EQUAL_UINT8(0, col);
     TEST_ASSERT_EQUAL_UINT8(0, row);
@@ -225,7 +225,7 @@ void test_print_advances_cursor(void)
 {
     tsm_t *t = tsm_new(80, 24);
     feed(t, "AB");
-    uint8_t col, row; bool vis;
+    int col, row; bool vis;
     tsm_cursor(t, &col, &row, &vis);
     TEST_ASSERT_EQUAL_UINT8(2, col);
     TEST_ASSERT_EQUAL_UINT8(0, row);
@@ -271,7 +271,7 @@ void test_c0_cr(void)
 {
     tsm_t *t = tsm_new(80, 24);
     feed(t, "ABC\r");
-    uint8_t col, row; bool vis;
+    int col, row; bool vis;
     tsm_cursor(t, &col, &row, &vis);
     TEST_ASSERT_EQUAL_UINT8(0, col);
     TEST_ASSERT_EQUAL_UINT8(0, row);
@@ -282,7 +282,7 @@ void test_c0_lf_moves_down(void)
 {
     tsm_t *t = tsm_new(80, 24);
     feed(t, "\n");
-    uint8_t col, row; bool vis;
+    int col, row; bool vis;
     tsm_cursor(t, &col, &row, &vis);
     TEST_ASSERT_EQUAL_UINT8(1, row);
     tsm_free(t);
@@ -292,7 +292,7 @@ void test_c0_bs_moves_left(void)
 {
     tsm_t *t = tsm_new(80, 24);
     feed(t, "AB\x08");
-    uint8_t col, row; bool vis;
+    int col, row; bool vis;
     tsm_cursor(t, &col, &row, &vis);
     TEST_ASSERT_EQUAL_UINT8(1, col);
     tsm_free(t);
@@ -302,7 +302,7 @@ void test_c0_ht_tab_stop(void)
 {
     tsm_t *t = tsm_new(80, 24);
     feed(t, "\t");
-    uint8_t col, row; bool vis;
+    int col, row; bool vis;
     tsm_cursor(t, &col, &row, &vis);
     TEST_ASSERT_EQUAL_UINT8(8, col);
     tsm_free(t);
@@ -327,7 +327,7 @@ void test_csi_cup_moves_cursor(void)
 {
     tsm_t *t = tsm_new(80, 24);
     feed(t, "\x1b[5;10H");
-    uint8_t col, row; bool vis;
+    int col, row; bool vis;
     tsm_cursor(t, &col, &row, &vis);
     TEST_ASSERT_EQUAL_UINT8(9, col);   /* 1-based → 0-based */
     TEST_ASSERT_EQUAL_UINT8(4, row);
@@ -339,7 +339,7 @@ void test_csi_cup_default_params(void)
     tsm_t *t = tsm_new(80, 24);
     feed(t, "ABCDE");
     feed(t, "\x1b[H");  /* home */
-    uint8_t col, row; bool vis;
+    int col, row; bool vis;
     tsm_cursor(t, &col, &row, &vis);
     TEST_ASSERT_EQUAL_UINT8(0, col);
     TEST_ASSERT_EQUAL_UINT8(0, row);
@@ -350,7 +350,7 @@ void test_csi_cursor_up(void)
 {
     tsm_t *t = tsm_new(80, 24);
     feed(t, "\x1b[5;1H\x1b[2A");
-    uint8_t col, row; bool vis;
+    int col, row; bool vis;
     tsm_cursor(t, &col, &row, &vis);
     TEST_ASSERT_EQUAL_UINT8(2, row);
     tsm_free(t);
@@ -360,7 +360,7 @@ void test_csi_cursor_down(void)
 {
     tsm_t *t = tsm_new(80, 24);
     feed(t, "\x1b[3B");
-    uint8_t col, row; bool vis;
+    int col, row; bool vis;
     tsm_cursor(t, &col, &row, &vis);
     TEST_ASSERT_EQUAL_UINT8(3, row);
     tsm_free(t);
@@ -370,7 +370,7 @@ void test_csi_cursor_forward(void)
 {
     tsm_t *t = tsm_new(80, 24);
     feed(t, "\x1b[5C");
-    uint8_t col, row; bool vis;
+    int col, row; bool vis;
     tsm_cursor(t, &col, &row, &vis);
     TEST_ASSERT_EQUAL_UINT8(5, col);
     tsm_free(t);
@@ -380,7 +380,7 @@ void test_csi_cursor_backward(void)
 {
     tsm_t *t = tsm_new(80, 24);
     feed(t, "\x1b[1;10H\x1b[3D");   /* row 1 col 10 (1-based), then back 3 */
-    uint8_t col, row; bool vis;
+    int col, row; bool vis;
     tsm_cursor(t, &col, &row, &vis);
     TEST_ASSERT_EQUAL_UINT8(6, col);  /* col 9 (0-based) - 3 = 6 */
     tsm_free(t);
@@ -390,7 +390,7 @@ void test_csi_cha(void)
 {
     tsm_t *t = tsm_new(80, 24);
     feed(t, "ABCDE\x1b[3G");  /* CHA: move to col 3 (1-based) */
-    uint8_t col, row; bool vis;
+    int col, row; bool vis;
     tsm_cursor(t, &col, &row, &vis);
     TEST_ASSERT_EQUAL_UINT8(2, col);  /* 0-based */
     tsm_free(t);
@@ -613,7 +613,7 @@ void test_decsc_decrc(void)
     feed(t, "\x1b[5;10H\x1b""7");   /* move to (10,5) then DECSC */
     feed(t, "\x1b[1;1H");           /* move away */
     feed(t, "\x1b""8");             /* DECRC */
-    uint8_t col, row; bool vis;
+    int col, row; bool vis;
     tsm_cursor(t, &col, &row, &vis);
     TEST_ASSERT_EQUAL_UINT8(9, col);
     TEST_ASSERT_EQUAL_UINT8(4, row);
@@ -646,7 +646,7 @@ void test_alt_screen_switch(void)
 void test_dectcem_hide_show(void)
 {
     tsm_t *t = tsm_new(80, 24);
-    bool vis; uint8_t c, r;
+    bool vis; int c, r;
     feed(t, "\x1b[?25l");   /* hide cursor */
     tsm_cursor(t, &c, &r, &vis);
     TEST_ASSERT_FALSE(vis);
@@ -665,7 +665,7 @@ void test_esc_ri_reverse_index(void)
     tsm_t *t = tsm_new(10, 5);
     feed(t, "\x1b[3;1H");  /* row 3 */
     feed(t, "\x1bM");       /* RI — reverse index */
-    uint8_t col, row; bool vis;
+    int col, row; bool vis;
     tsm_cursor(t, &col, &row, &vis);
     TEST_ASSERT_EQUAL_UINT8(1, row);  /* row 3 (1-based) - 1 = row 2 (1-based) = row 1 (0-based) */
     tsm_free(t);
@@ -687,7 +687,7 @@ void test_esc_nel(void)
     tsm_t *t = tsm_new(10, 5);
     feed(t, "\x1b[1;5H");   /* col 5, row 1 */
     feed(t, "\x1b" "E");     /* NEL — next line */
-    uint8_t col, row; bool vis;
+    int col, row; bool vis;
     tsm_cursor(t, &col, &row, &vis);
     TEST_ASSERT_EQUAL_UINT8(0, col);
     TEST_ASSERT_EQUAL_UINT8(1, row);
@@ -747,7 +747,7 @@ void test_esc_ris_full_reset(void)
     tsm_t *t = tsm_new(10, 3);
     feed(t, "\x1b[1mABCDE");
     feed(t, "\x1b" "c");  /* RIS */
-    uint8_t col, row; bool vis;
+    int col, row; bool vis;
     tsm_cursor(t, &col, &row, &vis);
     TEST_ASSERT_EQUAL_UINT8(0, col);
     TEST_ASSERT_EQUAL_UINT8(0, row);

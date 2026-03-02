@@ -19,15 +19,15 @@
 /* ── Cursor save/restore slot ────────────────────────────────────────────── */
 
 typedef struct {
-    uint8_t     col;
-    uint8_t     row;
-    uint8_t     attrs;
-    uint8_t     attrs2;
-    uint16_t    fg;
-    uint16_t    bg;
+    int          col;
+    int          row;
+    uint8_t      attrs;
+    uint8_t      attrs2;
+    uint16_t     fg;
+    uint16_t     bg;
     charset_id_t g0;
     charset_id_t g1;
-    uint8_t     gl;   /* active GL index: 0=G0, 1=G1 */
+    int          gl;   /* active GL index: 0=G0, 1=G1 */
 } tsm_cursor_save_t;
 
 /* ── Mode flags ──────────────────────────────────────────────────────────── */
@@ -47,8 +47,8 @@ typedef struct {
 /* ── Terminal struct ─────────────────────────────────────────────────────── */
 
 struct tsm_s {
-    uint8_t cols;
-    uint8_t rows;
+    int cols;
+    int rows;
 
     /* Primary and alternate screen cell grids (heap-allocated) */
     tsm_cell_t *cells;      /* active screen — cols*rows */
@@ -58,9 +58,9 @@ struct tsm_s {
     tsm_row_dirty_t *dirty;  /* rows entries */
 
     /* Cursor */
-    uint8_t  cx;     /* cursor column (0-based) */
-    uint8_t  cy;     /* cursor row    (0-based) */
-    bool     pending_wrap;  /* next print triggers newline (auto-wrap pending) */
+    int  cx;            /* cursor column (0-based) */
+    int  cy;            /* cursor row    (0-based) */
+    bool pending_wrap;  /* next print triggers newline (auto-wrap pending) */
 
     /* Current SGR state */
     uint8_t  attrs;
@@ -70,11 +70,11 @@ struct tsm_s {
 
     /* Character sets */
     charset_id_t g[2];   /* G0, G1 */
-    uint8_t      gl;     /* active: 0=G0, 1=G1 */
+    int          gl;     /* active: 0=G0, 1=G1 */
 
     /* Scroll region (row indices, inclusive, 0-based) */
-    uint8_t scroll_top;
-    uint8_t scroll_bot;
+    int scroll_top;
+    int scroll_bot;
 
     /* Saved cursor (DECSC/DECRC and DEC alt-screen auto-save) */
     tsm_cursor_save_t saved;
@@ -92,10 +92,10 @@ struct tsm_s {
 
 /* ── Internal helpers (used only within termstate.c) ─────────────────────── */
 
-/* Clamp value to [lo, hi] */
-static inline uint8_t clamp8(int v, uint8_t lo, uint8_t hi)
+/* Clamp integer value to [lo, hi]. */
+static inline int clampi(int v, int lo, int hi)
 {
-    if (v < (int)lo) return lo;
-    if (v > (int)hi) return hi;
-    return (uint8_t)v;
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
 }

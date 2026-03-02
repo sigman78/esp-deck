@@ -53,6 +53,9 @@ typedef struct {
  *
  * Tracks the leftmost and rightmost columns written since the last
  * tsm_clear_dirty() call.  l > r means the row is clean.
+ *
+ * Kept as uint8_t — compact array-of-structs; sentinel encoding uses the
+ * full byte range (0xFF / 0x00).
  */
 typedef struct {
     uint8_t l;   /* leftmost dirty column (inclusive) */
@@ -72,15 +75,11 @@ typedef struct {
 
 typedef struct tsm_s tsm_t;
 
-/* Callback: called once per completed frame with updated dirty map.
- * rows_dirty[r].l > rows_dirty[r].r  →  row r is clean. */
-typedef void (*tsm_dirty_fn)(tsm_t *tsm, void *user);
-
 /* ── Terminal API ────────────────────────────────────────────────────────── */
 
 /* Allocate and initialise a new terminal of cols×rows.
  * Returns NULL on allocation failure. */
-tsm_t *tsm_new(uint8_t cols, uint8_t rows);
+tsm_t *tsm_new(int cols, int rows);
 
 /* Free all resources. */
 void tsm_free(tsm_t *tsm);
@@ -94,7 +93,7 @@ void tsm_feed(tsm_t *tsm, const uint8_t *data, size_t len);
 const tsm_cell_t *tsm_screen(const tsm_t *tsm);
 
 /* Current cursor position and visibility. */
-void tsm_cursor(const tsm_t *tsm, uint8_t *col, uint8_t *row, bool *visible);
+void tsm_cursor(const tsm_t *tsm, int *col, int *row, bool *visible);
 
 /* Dirty row segments since last tsm_clear_dirty().
  * Returns pointer to array of rows tsm_row_dirty_t entries. */
@@ -104,5 +103,5 @@ const tsm_row_dirty_t *tsm_dirty(const tsm_t *tsm);
 void tsm_clear_dirty(tsm_t *tsm);
 
 /* Dimensions. */
-uint8_t tsm_cols(const tsm_t *tsm);
-uint8_t tsm_rows(const tsm_t *tsm);
+int tsm_cols(const tsm_t *tsm);
+int tsm_rows(const tsm_t *tsm);
