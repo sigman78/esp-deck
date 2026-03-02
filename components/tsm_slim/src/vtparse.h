@@ -27,10 +27,13 @@
 /* Maximum bytes collected into the OSC string buffer (truncated beyond). */
 #define VTP_OSC_MAX     256
 
+/* Maximum codepoints buffered before a VT_EV_PRINT span is flushed. */
+#define VTP_PRINT_BUF   64
+
 /* ── Event types ──────────────────────────────────────────────────────────── */
 
 typedef enum {
-    VT_EV_PRINT,  /* printable character — .cp holds the codepoint           */
+    VT_EV_PRINT,  /* printable span — .cps[0..ncp-1] hold codepoints         */
     VT_EV_C0,     /* C0 control byte    — .byte holds the raw byte           */
     VT_EV_ESC,    /* ESC sequence       — .intermediate, .final              */
     VT_EV_CSI,    /* CSI sequence       — .prefix, .params[], .nparams,
@@ -43,8 +46,9 @@ typedef enum {
 typedef struct {
     vt_ev_type_t   type;
 
-    /* VT_EV_PRINT */
-    uint32_t       cp;              /* Unicode codepoint (≤ U+FFFF)          */
+    /* VT_EV_PRINT (span) */
+    const uint32_t *cps;            /* codepoints; valid during callback only */
+    int             ncp;            /* codepoint count (≥ 1)                 */
 
     /* VT_EV_C0 */
     uint8_t        byte;            /* raw control byte                      */
@@ -113,6 +117,10 @@ typedef struct {
     /* OSC string buffer (+1 for a null terminator written on emit) */
     uint8_t        osc_buf[VTP_OSC_MAX + 1];
     int            osc_len;
+
+    /* Print span buffer */
+    uint32_t       print_buf[VTP_PRINT_BUF];
+    int            print_len;
 
     /* Dispatch */
     vt_dispatch_fn dispatch;

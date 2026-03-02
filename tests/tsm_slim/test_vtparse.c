@@ -34,6 +34,10 @@ static int            g_event_count;
 static uint8_t        g_osc_store[MAX_EVENTS][VTP_OSC_MAX + 1];
 static int            g_osc_idx;
 
+/* Separate storage for PRINT span data (the parser's print_buf is reused). */
+static uint32_t       g_print_store[MAX_EVENTS][VTP_PRINT_BUF];
+static int            g_print_idx;
+
 static void record(const vt_event_t *ev, void *user)
 {
     (void)user;
@@ -43,6 +47,10 @@ static void record(const vt_event_t *ev, void *user)
     if (ev->type == VT_EV_OSC && ev->osc_len > 0) {
         memcpy(g_osc_store[g_osc_idx], ev->osc, ev->osc_len + 1);
         copy.osc = g_osc_store[g_osc_idx++];
+    }
+    if (ev->type == VT_EV_PRINT && ev->ncp > 0) {
+        memcpy(g_print_store[g_print_idx], ev->cps, (size_t)ev->ncp * sizeof(uint32_t));
+        copy.cps = g_print_store[g_print_idx++];
     }
     g_events[g_event_count++] = copy;
 }
@@ -62,10 +70,12 @@ static void feed_bytes(const uint8_t *b, size_t n)
 void setUp(void)
 {
     vtparse_init(&g_parser, record, NULL);
-    memset(g_events,    0, sizeof(g_events));
-    memset(g_osc_store, 0, sizeof(g_osc_store));
+    memset(g_events,      0, sizeof(g_events));
+    memset(g_osc_store,   0, sizeof(g_osc_store));
+    memset(g_print_store, 0, sizeof(g_print_store));
     g_event_count = 0;
     g_osc_idx     = 0;
+    g_print_idx   = 0;
 }
 
 void tearDown(void) {}
@@ -127,10 +137,11 @@ void test_del_ignored(void)
 void test_printable_ascii(void)
 {
     feed_str("Hi");
-    TEST_ASSERT_EQUAL_INT(2, g_event_count);
+    TEST_ASSERT_EQUAL_INT(1, g_event_count);
     TEST_ASSERT_EQUAL_INT(VT_EV_PRINT, g_events[0].type);
-    TEST_ASSERT_EQUAL_UINT32('H', g_events[0].cp);
-    TEST_ASSERT_EQUAL_UINT32('i', g_events[1].cp);
+    TEST_ASSERT_EQUAL_INT(2, g_events[0].ncp);
+    TEST_ASSERT_EQUAL_UINT32('H', g_events[0].cps[0]);
+    TEST_ASSERT_EQUAL_UINT32('i', g_events[0].cps[1]);
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -436,7 +447,8 @@ void test_dcs_no_crash_on_data(void)
     feed_str("A");
     TEST_ASSERT_EQUAL_INT(1, g_event_count);
     TEST_ASSERT_EQUAL_INT(VT_EV_PRINT, g_events[0].type);
-    TEST_ASSERT_EQUAL_UINT32('A', g_events[0].cp);
+    TEST_ASSERT_EQUAL_INT(1, g_events[0].ncp);
+    TEST_ASSERT_EQUAL_UINT32('A', g_events[0].cps[0]);
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -450,7 +462,8 @@ void test_utf8_2byte(void)
     feed_bytes(bs, 2);
     TEST_ASSERT_EQUAL_INT(1, g_event_count);
     TEST_ASSERT_EQUAL_INT(VT_EV_PRINT, g_events[0].type);
-    TEST_ASSERT_EQUAL_UINT32(0x00E9u, g_events[0].cp);
+    TEST_ASSERT_EQUAL_INT(1, g_events[0].ncp);
+    TEST_ASSERT_EQUAL_UINT32(0x00E9u, g_events[0].cps[0]);
 }
 
 void test_utf8_3byte(void)
@@ -459,7 +472,8 @@ void test_utf8_3byte(void)
     uint8_t bs[] = { 0xE2, 0x95, 0x94 };
     feed_bytes(bs, 3);
     TEST_ASSERT_EQUAL_INT(1, g_event_count);
-    TEST_ASSERT_EQUAL_UINT32(0x2554u, g_events[0].cp);
+    TEST_ASSERT_EQUAL_INT(1, g_events[0].ncp);
+    TEST_ASSERT_EQUAL_UINT32(0x2554u, g_events[0].cps[0]);
 }
 
 void test_utf8_4byte_replaced_with_fffd(void)
@@ -468,7 +482,8 @@ void test_utf8_4byte_replaced_with_fffd(void)
     uint8_t bs[] = { 0xF0, 0x9F, 0x98, 0x80 };
     feed_bytes(bs, 4);
     TEST_ASSERT_EQUAL_INT(1, g_event_count);
-    TEST_ASSERT_EQUAL_UINT32(0xFFFDu, g_events[0].cp);
+    TEST_ASSERT_EQUAL_INT(1, g_events[0].ncp);
+    TEST_ASSERT_EQUAL_UINT32(0xFFFDu, g_events[0].cps[0]);
 }
 
 void test_utf8_split_across_feeds(void)
@@ -480,7 +495,8 @@ void test_utf8_split_across_feeds(void)
     TEST_ASSERT_EQUAL_INT(0, g_event_count);  /* incomplete */
     feed_bytes(b2, 1);
     TEST_ASSERT_EQUAL_INT(1, g_event_count);
-    TEST_ASSERT_EQUAL_UINT32(0x00E9u, g_events[0].cp);
+    TEST_ASSERT_EQUAL_INT(1, g_events[0].ncp);
+    TEST_ASSERT_EQUAL_UINT32(0x00E9u, g_events[0].cps[0]);
 }
 
 void test_utf8_3byte_split_three_feeds(void)
@@ -493,7 +509,8 @@ void test_utf8_3byte_split_three_feeds(void)
     TEST_ASSERT_EQUAL_INT(0, g_event_count);
     vtparse_feed(&g_parser, &bs[2], 1);
     TEST_ASSERT_EQUAL_INT(1, g_event_count);
-    TEST_ASSERT_EQUAL_UINT32(0x2554u, g_events[0].cp);
+    TEST_ASSERT_EQUAL_INT(1, g_events[0].ncp);
+    TEST_ASSERT_EQUAL_UINT32(0x2554u, g_events[0].cps[0]);
 }
 
 void test_utf8_stray_continuation(void)
@@ -502,7 +519,8 @@ void test_utf8_stray_continuation(void)
     uint8_t b = 0x80;
     feed_bytes(&b, 1);
     TEST_ASSERT_EQUAL_INT(1, g_event_count);
-    TEST_ASSERT_EQUAL_UINT32(0xFFFDu, g_events[0].cp);
+    TEST_ASSERT_EQUAL_INT(1, g_events[0].ncp);
+    TEST_ASSERT_EQUAL_UINT32(0xFFFDu, g_events[0].cps[0]);
 }
 
 void test_utf8_invalid_overlong_c0(void)
@@ -510,11 +528,12 @@ void test_utf8_invalid_overlong_c0(void)
     /* 0xC0 0x80 would encode U+0000 as overlong → both bytes → U+FFFD */
     uint8_t bs[] = { 0xC0, 0x80 };
     feed_bytes(bs, 2);
-    /* 0xC0 itself is invalid lead → U+FFFD
-     * 0x80 is a stray continuation → U+FFFD */
-    TEST_ASSERT_EQUAL_INT(2, g_event_count);
-    TEST_ASSERT_EQUAL_UINT32(0xFFFDu, g_events[0].cp);
-    TEST_ASSERT_EQUAL_UINT32(0xFFFDu, g_events[1].cp);
+    /* 0xC0 invalid lead → U+FFFD; 0x80 stray continuation → U+FFFD
+     * Both buffered then flushed as a single 2-codepoint span. */
+    TEST_ASSERT_EQUAL_INT(1, g_event_count);
+    TEST_ASSERT_EQUAL_INT(2, g_events[0].ncp);
+    TEST_ASSERT_EQUAL_UINT32(0xFFFDu, g_events[0].cps[0]);
+    TEST_ASSERT_EQUAL_UINT32(0xFFFDu, g_events[0].cps[1]);
 }
 
 void test_utf8_interrupted_by_esc(void)
@@ -525,23 +544,25 @@ void test_utf8_interrupted_by_esc(void)
     feed_bytes(lead, 1);
     TEST_ASSERT_EQUAL_INT(0, g_event_count);
     feed_bytes(csi, 3);
-    /* The incomplete UTF-8 emits U+FFFD, then the CSI is dispatched. */
+    /* The incomplete UTF-8 emits U+FFFD (flushed before ESC), then CSI. */
     TEST_ASSERT_EQUAL_INT(2, g_event_count);
     TEST_ASSERT_EQUAL_INT(VT_EV_PRINT, g_events[0].type);
-    TEST_ASSERT_EQUAL_UINT32(0xFFFDu, g_events[0].cp);
+    TEST_ASSERT_EQUAL_INT(1, g_events[0].ncp);
+    TEST_ASSERT_EQUAL_UINT32(0xFFFDu, g_events[0].cps[0]);
     TEST_ASSERT_EQUAL_INT(VT_EV_CSI, g_events[1].type);
     TEST_ASSERT_EQUAL_UINT8('A', g_events[1].final);
 }
 
 void test_utf8_mixed_ascii_and_multibyte(void)
 {
-    /* "A" é "B" — three events */
+    /* "A" é "B" — all buffered into one span */
     uint8_t bs[] = { 'A', 0xC3, 0xA9, 'B' };
     feed_bytes(bs, 4);
-    TEST_ASSERT_EQUAL_INT(3, g_event_count);
-    TEST_ASSERT_EQUAL_UINT32('A',     g_events[0].cp);
-    TEST_ASSERT_EQUAL_UINT32(0x00E9u, g_events[1].cp);
-    TEST_ASSERT_EQUAL_UINT32('B',     g_events[2].cp);
+    TEST_ASSERT_EQUAL_INT(1, g_event_count);
+    TEST_ASSERT_EQUAL_INT(3, g_events[0].ncp);
+    TEST_ASSERT_EQUAL_UINT32('A',     g_events[0].cps[0]);
+    TEST_ASSERT_EQUAL_UINT32(0x00E9u, g_events[0].cps[1]);
+    TEST_ASSERT_EQUAL_UINT32('B',     g_events[0].cps[2]);
 }
 
 void test_utf8_state_persists_across_writes(void)
@@ -554,7 +575,8 @@ void test_utf8_state_persists_across_writes(void)
     TEST_ASSERT_EQUAL_INT(0, g_event_count);
     vtparse_feed(&g_parser, b1, 1);
     TEST_ASSERT_EQUAL_INT(1, g_event_count);
-    TEST_ASSERT_EQUAL_UINT32(0x042Fu, g_events[0].cp);
+    TEST_ASSERT_EQUAL_INT(1, g_events[0].ncp);
+    TEST_ASSERT_EQUAL_UINT32(0x042Fu, g_events[0].cps[0]);
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
@@ -584,7 +606,8 @@ void test_0x18_resets_to_ground(void)
     TEST_ASSERT_EQUAL_INT(VT_EV_C0,    g_events[0].type);
     TEST_ASSERT_EQUAL_UINT8(0x18,      g_events[0].byte);
     TEST_ASSERT_EQUAL_INT(VT_EV_PRINT, g_events[1].type);
-    TEST_ASSERT_EQUAL_UINT32('A',      g_events[1].cp);
+    TEST_ASSERT_EQUAL_INT(1, g_events[1].ncp);
+    TEST_ASSERT_EQUAL_UINT32('A',      g_events[1].cps[0]);
 }
 
 void test_0x1a_resets_to_ground(void)
@@ -594,7 +617,8 @@ void test_0x1a_resets_to_ground(void)
     feed_bytes(bs, 4);
     TEST_ASSERT_EQUAL_INT(2, g_event_count);
     TEST_ASSERT_EQUAL_UINT8(0x1A, g_events[0].byte);
-    TEST_ASSERT_EQUAL_UINT32('B', g_events[1].cp);
+    TEST_ASSERT_EQUAL_INT(1, g_events[1].ncp);
+    TEST_ASSERT_EQUAL_UINT32('B', g_events[1].cps[0]);
 }
 
 void test_csi_ignore_returns_to_ground(void)
@@ -618,7 +642,8 @@ void test_sos_pm_apc_ignored_until_st(void)
     feed_bytes(bs, sizeof(bs));
     TEST_ASSERT_EQUAL_INT(1, g_event_count);
     TEST_ASSERT_EQUAL_INT(VT_EV_PRINT, g_events[0].type);
-    TEST_ASSERT_EQUAL_UINT32('Z', g_events[0].cp);
+    TEST_ASSERT_EQUAL_INT(1, g_events[0].ncp);
+    TEST_ASSERT_EQUAL_UINT32('Z', g_events[0].cps[0]);
 }
 
 /* ════════════════════════════════════════════════════════════════════════════

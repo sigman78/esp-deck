@@ -554,34 +554,37 @@ static void do_c0(tsm_t *t, uint8_t byte)
 
 /* ── Print (GROUND printable) ────────────────────────────────────────────── */
 
-static void do_print(tsm_t *t, uint32_t cp)
+static void do_print_span(tsm_t *t, const uint32_t *cps, int count)
 {
-    uint16_t glyph;
-    if (cp < 0x80u) {
-        glyph = charset_xlat(t->g[t->gl], (uint8_t)cp);
-    } else {
-        glyph = (cp <= 0xFFFFu) ? (uint16_t)cp : '?';
-    }
-
-    if (t->pending_wrap) do_wrap(t);
-
-    if (t->mode.irm) {
-        if (t->cx + 1 < t->cols) {
-            memmove(cell_at(t, t->cx + 1, t->cy),
-                    cell_at(t, t->cx,     t->cy),
-                    (size_t)(t->cols - t->cx - 1) * sizeof(tsm_cell_t));
-            mark_dirty(t, t->cy, t->cx, t->cols - 1);
+    for (int i = 0; i < count; i++) {
+        uint32_t cp = cps[i];
+        uint16_t glyph;
+        if (cp < 0x80u) {
+            glyph = charset_xlat(t->g[t->gl], (uint8_t)cp);
+        } else {
+            glyph = (cp <= 0xFFFFu) ? (uint16_t)cp : '?';
         }
-    }
 
-    tsm_cell_t *c = cell_at(t, t->cx, t->cy);
-    c->cp     = glyph;
-    c->fg     = t->fg;
-    c->bg     = t->bg;
-    c->attrs  = t->attrs;
-    c->attrs2 = t->attrs2;
-    mark_dirty(t, t->cy, t->cx, t->cx);
-    cursor_advance(t);
+        if (t->pending_wrap) do_wrap(t);
+
+        if (t->mode.irm) {
+            if (t->cx + 1 < t->cols) {
+                memmove(cell_at(t, t->cx + 1, t->cy),
+                        cell_at(t, t->cx,     t->cy),
+                        (size_t)(t->cols - t->cx - 1) * sizeof(tsm_cell_t));
+                mark_dirty(t, t->cy, t->cx, t->cols - 1);
+            }
+        }
+
+        tsm_cell_t *c = cell_at(t, t->cx, t->cy);
+        c->cp     = glyph;
+        c->fg     = t->fg;
+        c->bg     = t->bg;
+        c->attrs  = t->attrs;
+        c->attrs2 = t->attrs2;
+        mark_dirty(t, t->cy, t->cx, t->cx);
+        cursor_advance(t);
+    }
 }
 
 /* ── VT parser callback ───────────────────────────────────────────────────── */
@@ -590,7 +593,7 @@ static void vt_dispatch(const vt_event_t *ev, void *user)
 {
     tsm_t *t = (tsm_t *)user;
     switch (ev->type) {
-    case VT_EV_PRINT: do_print(t, ev->cp);                 break;
+    case VT_EV_PRINT: do_print_span(t, ev->cps, ev->ncp);  break;
     case VT_EV_C0:    do_c0(t, ev->byte);                  break;
     case VT_EV_ESC:   do_esc(t, ev);                       break;
     case VT_EV_CSI:   do_csi(t, ev);                       break;

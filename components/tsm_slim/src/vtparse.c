@@ -63,13 +63,23 @@ static void do_prefix(vtparse_t *p, uint8_t b)
 
 /* ── Event emitters ───────────────────────────────────────────────────────── */
 
-static void emit_print(vtparse_t *p, uint32_t cp)
+static void flush_print(vtparse_t *p)
 {
+    if (p->print_len == 0) return;
     vt_event_t ev;
     memset(&ev, 0, sizeof(ev));
     ev.type = VT_EV_PRINT;
-    ev.cp   = cp;
+    ev.cps  = p->print_buf;
+    ev.ncp  = p->print_len;
+    p->print_len = 0;
     p->dispatch(&ev, p->user);
+}
+
+static void append_print(vtparse_t *p, uint32_t cp)
+{
+    if (p->print_len >= VTP_PRINT_BUF)
+        flush_print(p);
+    p->print_buf[p->print_len++] = cp;
 }
 
 static void emit_c0(vtparse_t *p, uint8_t b)
@@ -176,9 +186,10 @@ static void enter_esc(vtparse_t *p)
 static void st_ground(vtparse_t *p, uint8_t b)
 {
     if (b <= 0x1F) {
+        flush_print(p);
         emit_c0(p, b);          /* C0 controls; ESC handled by "anywhere" */
     } else if (b <= 0x7E) {
-        emit_print(p, b);       /* printable ASCII */
+        append_print(p, b);     /* printable ASCII */
     }
     /* 0x7F (DEL) → ignore */
 }
@@ -437,13 +448,13 @@ void vtparse_feed(vtparse_t *p, const uint8_t *data, size_t len)
                         cp = 0xFFFDu;
                     }
                     if (p->state == VTP_ST_GROUND)
-                        emit_print(p, cp);
+                        append_print(p, cp);
                 }
                 continue;
             }
             /* Not a continuation byte: cancel the sequence → U+FFFD. */
             if (p->state == VTP_ST_GROUND)
-                emit_print(p, 0xFFFDu);
+                append_print(p, 0xFFFDu);
             p->utf8_remain = 0;
             p->utf8_cp     = 0;
             /* Fall through to process the current byte normally. */
@@ -451,11 +462,13 @@ void vtparse_feed(vtparse_t *p, const uint8_t *data, size_t len)
 
         /* ── "Anywhere" transitions (ASCII control only, UTF-8 mode) ────── */
         if (b == 0x18 || b == 0x1A) {
+            flush_print(p);
             emit_c0(p, b);
             enter_ground(p);
             continue;
         }
         if (b == 0x1B) {
+            flush_print(p);
             enter_esc(p);
             continue;
         }
@@ -464,6 +477,7 @@ void vtparse_feed(vtparse_t *p, const uint8_t *data, size_t len)
         if (b >= 0x80u) {
             /* 0x9C: 8-bit String Terminator — terminates OSC/DCS. */
             if (b == 0x9Cu) {
+                flush_print(p);
                 if (p->state == VTP_ST_OSC_STRING)
                     emit_osc(p);
                 else if (p->state == VTP_ST_DCS_PASS ||
@@ -479,7 +493,7 @@ void vtparse_feed(vtparse_t *p, const uint8_t *data, size_t len)
                         continue;
                 }
                 /* Invalid lead or out-of-range → replacement character. */
-                emit_print(p, 0xFFFDu);
+                append_print(p, 0xFFFDu);
             }
             /* In non-GROUND states, unexpected high bytes are discarded. */
             continue;
@@ -504,4 +518,5 @@ void vtparse_feed(vtparse_t *p, const uint8_t *data, size_t len)
             default:                  break;
         }
     }
+    flush_print(p);
 }
