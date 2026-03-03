@@ -205,6 +205,7 @@ static void switch_to_primary(tsm_t *t)
     t->alt_cells = tmp;
     t->mode.decalt = false;
     restore_cursor(t, &t->saved);
+    for (int r = 0; r < t->rows; r++) mark_row_dirty(t, r);
 }
 
 /* ── SGR (Select Graphic Rendition) ──────────────────────────────────────── */
@@ -298,6 +299,15 @@ static void do_csi(tsm_t *t, uint8_t prefix, uint8_t intermediate, uint8_t final
         case   25: t->mode.dectcem  = set;                        break;
         case 1000: t->mode.mouse_btn = set; /* TODO: MOUSE */     break;
         case 1006: /* SGR mouse encoding — stub */                break;
+        case   47:  /* alt screen — no cursor save (original xterm) */
+        case 1047:  /* alt screen — no cursor save (xterm variant)  */
+            if (set)   switch_to_alt(t);
+            else       switch_to_primary(t);
+            break;
+        case 1048:  /* cursor save/restore only — no screen switch  */
+            if (set)   save_cursor(t, &t->saved);
+            else       restore_cursor(t, &t->saved);
+            break;
         case 1049:
             if (set)   switch_to_alt(t);
             else       switch_to_primary(t);
@@ -487,6 +497,11 @@ static void do_csi(tsm_t *t, uint8_t prefix, uint8_t intermediate, uint8_t final
 
 static void do_hard_reset(tsm_t *t)
 {
+    if (t->mode.decalt) {          /* return to primary first */
+        tsm_cell_t *tmp = t->cells;
+        t->cells        = t->alt_cells;
+        t->alt_cells    = tmp;
+    }
     erase_screen(t);
     t->cx = 0; t->cy = 0;
     t->attrs = 0; t->attrs2 = 0;

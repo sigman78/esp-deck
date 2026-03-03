@@ -837,6 +837,65 @@ void test_no_response_when_cb_null(void)
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
+ * Alt screen — dirty tracking + variant escapes
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+/* switch_to_primary marks rows dirty → display updates */
+void test_alt_screen_exit_marks_dirty(void)
+{
+    tsm_t *t = tsm_new(10, 3);
+    feed(t, "HELLO");
+    tsm_clear_dirty(t);          /* simulate post-flush state */
+    feed(t, "\x1b[?1049h");     /* enter alt screen */
+    tsm_clear_dirty(t);          /* simulate flush */
+    feed(t, "\x1b[?1049l");     /* exit alt screen */
+    /* All rows must be dirty so renderer re-copies primary */
+    const tsm_row_dirty_t *d = tsm_dirty(t);
+    for (int r = 0; r < tsm_rows(t); r++)
+        TEST_ASSERT_TRUE(d[r].l <= d[r].r);
+    tsm_free(t);
+}
+
+/* ?47l exits alt screen */
+void test_alt_screen_47_exit(void)
+{
+    tsm_t *t = tsm_new(10, 3);
+    feed(t, "HELLO");
+    feed(t, "\x1b[?47h");   /* enter alt screen */
+    TEST_ASSERT_EQUAL_HEX16(' ', cp_at(t, 0, 0));
+    feed(t, "\x1b[?47l");   /* exit alt screen */
+    TEST_ASSERT_EQUAL_HEX16('H', cp_at(t, 0, 0));
+    tsm_free(t);
+}
+
+/* ?1047l exits alt screen */
+void test_alt_screen_1047_exit(void)
+{
+    tsm_t *t = tsm_new(10, 3);
+    feed(t, "HELLO");
+    feed(t, "\x1b[?1047h");
+    feed(t, "\x1b[?1047l");
+    TEST_ASSERT_EQUAL_HEX16('H', cp_at(t, 0, 0));
+    tsm_free(t);
+}
+
+/* Hard reset from alt screen: t->cells is primary, display is blank */
+void test_reset_from_alt_screen(void)
+{
+    tsm_t *t = tsm_new(10, 3);
+    feed(t, "\x1b[?1049h");   /* enter alt */
+    feed(t, "ALT");
+    tsm_reset(t);
+    int col, row; bool vis;
+    tsm_cursor(t, &col, &row, &vis);
+    TEST_ASSERT_EQUAL_INT(0, col);
+    TEST_ASSERT_EQUAL_INT(0, row);
+    /* Active screen is blank (primary erased by reset) */
+    TEST_ASSERT_EQUAL_HEX16(' ', cp_at(t, 0, 0));
+    tsm_free(t);
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
  * main
  * ════════════════════════════════════════════════════════════════════════════ */
 
@@ -928,6 +987,10 @@ int main(void)
 
     /* alt screen */
     RUN_TEST(test_alt_screen_switch);
+    RUN_TEST(test_alt_screen_exit_marks_dirty);
+    RUN_TEST(test_alt_screen_47_exit);
+    RUN_TEST(test_alt_screen_1047_exit);
+    RUN_TEST(test_reset_from_alt_screen);
 
     /* cursor visibility */
     RUN_TEST(test_dectcem_hide_show);
