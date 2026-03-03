@@ -112,3 +112,12 @@ void tsm_reset(tsm_t *tsm);
 
 /* Returns true when DECCKM (application cursor key mode) is active. */
 bool tsm_app_cursor_keys(const tsm_t *tsm);
+
+/* ── Response callback ───────────────────────────────────────────────────── */
+
+/* Called by tsm_slim when a terminal response must be sent to the host
+ * (DA1 reply, DSR reply, CPR).  data/len are NOT NUL-terminated. */
+typedef void (*tsm_response_fn_t)(const char *data, size_t len, void *user);
+
+/* Register (or clear, if cb==NULL) the response callback. */
+void tsm_set_response_cb(tsm_t *tsm, tsm_response_fn_t cb, void *user);

@@ -45,3 +45,7 @@ add_subdirectory(${ROOT}/components/ssh            ssh)
 add_executable(cyberdeck_sim main.c)
 # SDL2main provides WinMain on Windows (SDL.h renames main -> SDL_main)
 target_link_libraries(cyberdeck_sim PRIVATE SDL2::SDL2main ssh wifi storage)
+
+set_target_properties(cyberdeck_sim PROPERTIES
+    VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_PROJECT_DIR}/"
+)

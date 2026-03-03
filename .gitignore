@@ -54,3 +54,4 @@ secrets/
 /build-sim
 
 /sim_storage
+.vs

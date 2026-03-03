@@ -89,6 +89,10 @@ struct tsm_s {
 
     /* VT parser */
     vtparse_t vtp;
+
+    /* Response callback (DA1, DSR, CPR) */
+    tsm_response_fn_t response_cb;
+    void             *response_user;
 };
 
 /* ── Internal helpers (used only within termstate.c) ─────────────────────── */

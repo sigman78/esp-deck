@@ -20,7 +20,22 @@
  */
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include "termstate.h"
+
+/* ── Response helper ─────────────────────────────────────────────────────── */
+
+static void send_response(tsm_t *t, const char *s, int len)
+{
+    if (t->response_cb)
+        t->response_cb(s, (size_t)len, t->response_user);
+}
+
+void tsm_set_response_cb(tsm_t *t, tsm_response_fn_t cb, void *user)
+{
+    t->response_cb   = cb;
+    t->response_user = user;
+}
 
 /* ── Utilities ────────────────────────────────────────────────────────────── */
 
@@ -449,8 +464,21 @@ static void do_csi(tsm_t *t, uint8_t prefix, uint8_t intermediate, uint8_t final
         if (p1 == 4)  t->mode.irm = false;
         if (p1 == 20) t->mode.lnm = false;
         break;
-    case 'n': /* DSR — device status report (stub) */ break;
-    case 'c': /* DA  — device attributes (stub)    */ break;
+    case 'n': /* DSR — device status report */
+        if (p1 == 5) {
+            send_response(t, "\x1b[0n", 4);
+        } else if (p1 == 6) {
+            char buf[16];
+            int  n = snprintf(buf, sizeof(buf), "\x1b[%d;%dR",
+                              t->cy + 1, t->cx + 1);
+            if (n > 0 && n < (int)sizeof(buf))
+                send_response(t, buf, n);
+        }
+        break;
+    case 'c': /* DA1 — device attributes */
+        if (prefix == 0 && p1 <= 0)
+            send_response(t, "\x1b[?1;2c", 7);
+        break;
     default:  break;
     }
 }

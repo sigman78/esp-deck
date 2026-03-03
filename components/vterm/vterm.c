@@ -63,6 +63,13 @@ static size_t              s_wbuf_len;
 #ifdef CONFIG_VTERM_TSM_SLIM
 static tsm_t              *s_tsm;
 static terminal_cell_t    *s_buffer;
+
+static void tsm_response_forward(const char *data, size_t len, void *user)
+{
+    (void)user;
+    if (s_response_cb)
+        s_response_cb(data, len, s_response_user);
+}
 #else
 static struct tsm_screen  *s_screen;
 static struct tsm_vte     *s_vte;
@@ -264,6 +271,7 @@ esp_err_t vterm_init(int cols, int rows)
         free(s_buffer);
         return ESP_ERR_NO_MEM;
     }
+    tsm_set_response_cb(s_tsm, tsm_response_forward, NULL);
 
     display_set_text_buffer(s_buffer, cols, rows);
     display_set_cursor(0, 0, CURSOR_BLOCK);

@@ -6,4 +6,8 @@ cyberdeck_component_register(
     REQUIRES     display libtsm tsm_slim
 )
 
+if(DEFINED ENV{IDF_PATH} AND NOT BUILD_SIMULATOR)
+target_compile_definitions("${COMPONENT_TARGET}" PUBLIC "CONFIG_VTERM_TSM_SLIM")
+else()
 target_compile_definitions(vterm PUBLIC "CONFIG_VTERM_TSM_SLIM")
+endif()

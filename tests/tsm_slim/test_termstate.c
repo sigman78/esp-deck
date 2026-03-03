@@ -759,6 +759,84 @@ void test_esc_ris_full_reset(void)
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
+ * DA1 / DSR / CPR response callback
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+static char   s_resp_buf[64];
+static size_t s_resp_len;
+
+static void capture_response(const char *data, size_t len, void *user)
+{
+    (void)user;
+    if (len < sizeof(s_resp_buf)) {
+        memcpy(s_resp_buf, data, len);
+        s_resp_len = len;
+    }
+}
+
+static void clear_response(void)
+{
+    memset(s_resp_buf, 0, sizeof(s_resp_buf));
+    s_resp_len = 0;
+}
+
+void test_da1_response(void)
+{
+    tsm_t *t = tsm_new(80, 24);
+    clear_response();
+    tsm_set_response_cb(t, capture_response, NULL);
+    feed(t, "\x1b[c");   /* DA1 — no param */
+    TEST_ASSERT_EQUAL_size_t(7, s_resp_len);
+    TEST_ASSERT_EQUAL_MEMORY("\x1b[?1;2c", s_resp_buf, 7);
+    tsm_free(t);
+}
+
+void test_da1_param0(void)
+{
+    tsm_t *t = tsm_new(80, 24);
+    clear_response();
+    tsm_set_response_cb(t, capture_response, NULL);
+    feed(t, "\x1b[0c");  /* DA1 — param 0, same reply */
+    TEST_ASSERT_EQUAL_size_t(7, s_resp_len);
+    TEST_ASSERT_EQUAL_MEMORY("\x1b[?1;2c", s_resp_buf, 7);
+    tsm_free(t);
+}
+
+void test_dsr_status(void)
+{
+    tsm_t *t = tsm_new(80, 24);
+    clear_response();
+    tsm_set_response_cb(t, capture_response, NULL);
+    feed(t, "\x1b[5n");  /* DSR — status report */
+    TEST_ASSERT_EQUAL_size_t(4, s_resp_len);
+    TEST_ASSERT_EQUAL_MEMORY("\x1b[0n", s_resp_buf, 4);
+    tsm_free(t);
+}
+
+void test_dsr_cpr(void)
+{
+    tsm_t *t = tsm_new(80, 24);
+    clear_response();
+    tsm_set_response_cb(t, capture_response, NULL);
+    feed(t, "\x1b[3;6H");  /* move to row=3, col=6 (1-based) */
+    feed(t, "\x1b[6n");    /* CPR */
+    /* expect ESC [ 3 ; 6 R */
+    TEST_ASSERT_EQUAL_size_t(6, s_resp_len);
+    TEST_ASSERT_EQUAL_MEMORY("\x1b[3;6R", s_resp_buf, 6);
+    tsm_free(t);
+}
+
+void test_no_response_when_cb_null(void)
+{
+    tsm_t *t = tsm_new(80, 24);
+    /* No callback set — must not crash */
+    feed(t, "\x1b[c");
+    feed(t, "\x1b[5n");
+    feed(t, "\x1b[6n");
+    tsm_free(t);
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
  * main
  * ════════════════════════════════════════════════════════════════════════════ */
 
@@ -868,6 +946,13 @@ int main(void)
 
     /* reset */
     RUN_TEST(test_esc_ris_full_reset);
+
+    /* DA1 / DSR / CPR */
+    RUN_TEST(test_da1_response);
+    RUN_TEST(test_da1_param0);
+    RUN_TEST(test_dsr_status);
+    RUN_TEST(test_dsr_cpr);
+    RUN_TEST(test_no_response_when_cb_null);
 
     return UNITY_END();
 }
