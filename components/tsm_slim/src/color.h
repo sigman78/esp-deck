@@ -8,7 +8,7 @@
 #include <stdint.h>
 
 /* Default terminal colors (RGB565). */
-#define COLOR_DEFAULT_FG  0xFFFFu   /* white */
+#define COLOR_DEFAULT_FG  0xBDF7u   /* ANSI 7 — light gray */
 #define COLOR_DEFAULT_BG  0x0000u   /* black */
 
 /* Convert RGB components (0–255 each) to RGB565. */

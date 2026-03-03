@@ -39,6 +39,7 @@ typedef struct {
     bool decawm;     /* DECAWM — auto-wrap mode (default on)     */
     bool dectcem;    /* DECTCEM — cursor visible (default on)    */
     bool decalt;     /* DECALT — alt screen active               */
+    bool decckm;     /* DECCKM — application cursor key mode     */
     bool bracketed;  /* bracketed paste mode (stub)              */
     bool mouse_x10;  /* mouse X10 reporting (stub)               */
     bool mouse_btn;  /* mouse button reporting (stub)            */

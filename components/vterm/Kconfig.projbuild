@@ -1,5 +1,15 @@
 menu "vterm"
 
+    config VTERM_TSM_SLIM
+        bool "Use tsm_slim backend (Phase 3+)"
+        default n
+        help
+            Replace the libtsm (tsm_screen + tsm_vte) backend with the
+            lightweight tsm_slim terminal engine.  tsm_slim owns its own
+            cell grid which is registered directly with the display ISR —
+            no intermediate copy buffer is required.
+            When disabled the legacy libtsm backend is used.
+
     config VTERM_BUF_SIZE
         int "Write buffer size (bytes)"
         default 256
@@ -9,10 +19,12 @@ menu "vterm"
     config VTERM_BENCH
         bool "Enable performance instrumentation"
         default n
+        depends on !VTERM_TSM_SLIM
         help
             Accumulates cycle counts and cell statistics across flush_buf()
             calls. Call vterm_bench_report() to log a summary and
             vterm_bench_reset() to clear accumulators.
             Zero overhead when disabled.
+            Not available with the tsm_slim backend.
 
 endmenu

@@ -274,7 +274,7 @@ static void do_csi(tsm_t *t, uint8_t prefix, uint8_t intermediate, uint8_t final
         bool reset = (final == 'l');
         if (!set && !reset) return;
         switch (mode_n) {
-        case    1: /* DECCKM cursor keys — ignored */             break;
+        case    1: t->mode.decckm   = set;                        break; /* DECCKM */
         case    3: /* DECCOLM 80/132 — ignored */                 break;
         case    5: /* DECSCNM reverse screen — ignored */         break;
         case    6: t->mode.decom    = set;                        break;
@@ -455,6 +455,21 @@ static void do_csi(tsm_t *t, uint8_t prefix, uint8_t intermediate, uint8_t final
     }
 }
 
+/* ── Hard reset ───────────────────────────────────────────────────────────── */
+
+static void do_hard_reset(tsm_t *t)
+{
+    erase_screen(t);
+    t->cx = 0; t->cy = 0;
+    t->attrs = 0; t->attrs2 = 0;
+    t->fg = COLOR_DEFAULT_FG; t->bg = COLOR_DEFAULT_BG;
+    t->g[0] = CHARSET_ASCII; t->g[1] = CHARSET_ASCII; t->gl = 0;
+    t->scroll_top = 0; t->scroll_bot = t->rows - 1;
+    memset(&t->mode, 0, sizeof(t->mode));
+    t->mode.decawm = true; t->mode.dectcem = true;
+    t->pending_wrap = false;
+}
+
 /* ── ESC dispatch ─────────────────────────────────────────────────────────── */
 
 static void do_esc(tsm_t *t, uint8_t intermediate, uint8_t final)
@@ -481,15 +496,7 @@ static void do_esc(tsm_t *t, uint8_t intermediate, uint8_t final)
             else if (t->cy > 0) t->cy--;
             break;
         case 'c': /* RIS — full reset */
-            erase_screen(t);
-            t->cx = 0; t->cy = 0;
-            t->attrs = 0; t->attrs2 = 0;
-            t->fg = COLOR_DEFAULT_FG; t->bg = COLOR_DEFAULT_BG;
-            t->g[0] = CHARSET_ASCII; t->g[1] = CHARSET_ASCII; t->gl = 0;
-            t->scroll_top = 0; t->scroll_bot = t->rows - 1;
-            memset(&t->mode, 0, sizeof(t->mode));
-            t->mode.decawm = true; t->mode.dectcem = true;
-            t->pending_wrap = false;
+            do_hard_reset(t);
             break;
         default: break;
         }
@@ -693,3 +700,11 @@ void tsm_clear_dirty(tsm_t *t)
 
 int tsm_cols(const tsm_t *t) { return t->cols; }
 int tsm_rows(const tsm_t *t) { return t->rows; }
+
+void tsm_reset(tsm_t *t)
+{
+    vtparse_init(&t->vtp, &s_tsm_cb, t);
+    do_hard_reset(t);
+}
+
+bool tsm_app_cursor_keys(const tsm_t *t) { return t->mode.decckm; }

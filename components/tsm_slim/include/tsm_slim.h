@@ -105,3 +105,10 @@ void tsm_clear_dirty(tsm_t *tsm);
 /* Dimensions. */
 int tsm_cols(const tsm_t *tsm);
 int tsm_rows(const tsm_t *tsm);
+
+/* Full terminal reset: reinitialises the VT parser state machine and resets
+ * all terminal display state to power-on defaults. */
+void tsm_reset(tsm_t *tsm);
+
+/* Returns true when DECCKM (application cursor key mode) is active. */
+bool tsm_app_cursor_keys(const tsm_t *tsm);

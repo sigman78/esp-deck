@@ -1,18 +1,29 @@
 /*
- * vterm — VT/ANSI terminal emulator, libtsm backend.
+ * vterm — VT/ANSI terminal emulator.
  *
- * tsm_vte parses the byte stream; tsm_screen manages the cell grid.
- * draw_cb() copies each cell into the flat terminal_cell_t buffer
- * that the display ISR reads directly.
+ * Backend selected at build time:
+ *   CONFIG_VTERM_TSM_SLIM=n (default)  legacy libtsm backend
+ *   CONFIG_VTERM_TSM_SLIM=y            tsm_slim backend (Phase 3+)
+ *
+ * tsm_slim path:
+ *   tsm_feed() parses the byte stream into tsm_slim's own cell grid.
+ *   After each feed, dirty rows are copied from tsm_slim's cell grid into
+ *   s_buffer (terminal_cell_t[]) which is registered with display_set_text_buffer().
+ *   The display ISR reads s_buffer on every frame.
  */
 
 #include "vterm.h"
-#include "libtsm.h"
 #include "display.h"
 #include "esp_log.h"
 #include <string.h>
 #include <stdlib.h>
 #include <inttypes.h>
+
+#ifdef CONFIG_VTERM_TSM_SLIM
+#  include "tsm_slim.h"
+#else
+#  include "libtsm.h"
+#endif
 
 #ifdef CONFIG_VTERM_BUF_SIZE
 #define VTERM_BUF_SIZE CONFIG_VTERM_BUF_SIZE
@@ -20,41 +31,50 @@
 #define VTERM_BUF_SIZE 256
 #endif
 
-#ifdef CONFIG_VTERM_BENCH
+/* ── Bench instrumentation (libtsm path only) ─────────────────────────────── */
+
+#if defined(CONFIG_VTERM_BENCH) && !defined(CONFIG_VTERM_TSM_SLIM)
 #include "esp_cpu.h"
 typedef struct {
-    uint32_t flush_count;       /* flush_buf() calls */
-    uint32_t bytes_fed;         /* total bytes into tsm_vte_input */
-    uint64_t vte_cycles;        /* cycles inside tsm_vte_input */
-    uint64_t draw_cycles;       /* cycles inside tsm_screen_draw */
-    uint32_t draw_cb_total;     /* draw_cb() invocations (inc. skipped) */
-    uint32_t draw_cb_updated;   /* draw_cb() invocations that wrote a cell */
+    uint32_t flush_count;
+    uint32_t bytes_fed;
+    uint64_t vte_cycles;
+    uint64_t draw_cycles;
+    uint32_t draw_cb_total;
+    uint32_t draw_cb_updated;
 } vterm_bench_t;
-
 static vterm_bench_t s_bench;
 #endif
 
 static const char *TAG = "vterm";
 
-static struct tsm_screen  *s_screen;
-static struct tsm_vte     *s_vte;
+/* ── Common state ─────────────────────────────────────────────────────────── */
 
-static terminal_cell_t    *s_buffer;
 static int                 s_cols;
 static int                 s_rows;
-
 static vterm_response_cb_t s_response_cb;
 static void               *s_response_user;
-
 static bool                s_initialized;
-static tsm_age_t           s_last_age;    /* 0 = force full redraw */
-
 static char                s_wbuf[VTERM_BUF_SIZE];
 static size_t              s_wbuf_len;
 
+/* ── Backend-specific state ───────────────────────────────────────────────── */
+
+#ifdef CONFIG_VTERM_TSM_SLIM
+static tsm_t              *s_tsm;
+static terminal_cell_t    *s_buffer;
+#else
+static struct tsm_screen  *s_screen;
+static struct tsm_vte     *s_vte;
+static terminal_cell_t    *s_buffer;
+static tsm_age_t           s_last_age;
+#endif
+
 /* -------------------------------------------------------------------------
- * libtsm callbacks
+ * libtsm callbacks (libtsm path only)
  * ---------------------------------------------------------------------- */
+
+#ifndef CONFIG_VTERM_TSM_SLIM
 
 static void vte_write_cb(struct tsm_vte *vte,
                          const char *u8, size_t len,
@@ -100,15 +120,6 @@ static int draw_cb(struct tsm_screen *screen,
                      ? (uint16_t)ch[0]
                      : 0x0020u;
 
-    /* fccode/bccode 0-15 are ANSI indices.
-     * TSM_COLOR_FOREGROUND (16) → 7 (white), TSM_COLOR_BACKGROUND (17) → 0.
-     * Negative means use fr/fg/fb RGB; fall back to white/black.           */
-    /* libtsm colour path:
-     *   fccode/bccode 0-15   → named ANSI colour (palette index)
-     *   fccode/bccode == TSM_COLOR_FOREGROUND/BACKGROUND → terminal default
-     *   fccode/bccode == -1  → RGB stored in fr/fg/fb or br/bg/bb
-     *     (set for all 256-colour indices ≥16 after lookup_color() and for
-     *      true-colour SGR 38;2 / 48;2)                                    */
     if (attr->fccode < 0)
         s_buffer[idx].fg_color = RGB565(attr->fr, attr->fg, attr->fb);
     else if (attr->fccode == TSM_COLOR_FOREGROUND)
@@ -137,6 +148,38 @@ static int draw_cb(struct tsm_screen *screen,
     return 0;
 }
 
+#endif /* !CONFIG_VTERM_TSM_SLIM */
+
+/* -------------------------------------------------------------------------
+ * Display refresh helpers
+ * ---------------------------------------------------------------------- */
+
+#ifdef CONFIG_VTERM_TSM_SLIM
+
+static inline void refresh_display(void)
+{
+    const tsm_row_dirty_t *dirty = tsm_dirty(s_tsm);
+    for (int row = 0; row < s_rows; row++) {
+        int l = (int)dirty[row].l;
+        int r = (int)dirty[row].r;
+        if (l > r) continue;                          /* row clean */
+        const tsm_cell_t *src = tsm_screen(s_tsm) + row * s_cols + l;
+        terminal_cell_t  *dst = s_buffer            + row * s_cols + l;
+        for (int col = l; col <= r; col++, src++, dst++) {
+            dst->cp       = src->cp;
+            dst->fg_color = src->fg;
+            dst->bg_color = src->bg;
+            dst->attrs    = src->attrs;
+        }
+    }
+    int cx, cy; bool vis;
+    tsm_cursor(s_tsm, &cx, &cy, &vis);
+    display_set_cursor(cx, cy, vis ? CURSOR_BLOCK : CURSOR_NONE);
+    tsm_clear_dirty(s_tsm);
+}
+
+#else /* libtsm */
+
 static inline void refresh_display(void)
 {
 #ifdef CONFIG_VTERM_BENCH
@@ -154,9 +197,21 @@ static inline void refresh_display(void)
                        cmode);
 }
 
+#endif /* CONFIG_VTERM_TSM_SLIM */
+
+/* -------------------------------------------------------------------------
+ * Internal: flush write buffer to the active parser
+ * ---------------------------------------------------------------------- */
+
 static inline void flush_buf(void)
 {
     if (s_wbuf_len == 0) return;
+
+#ifdef CONFIG_VTERM_TSM_SLIM
+    tsm_feed(s_tsm, (const uint8_t *)s_wbuf, s_wbuf_len);
+    s_wbuf_len = 0;
+    refresh_display();
+#else
 #ifdef CONFIG_VTERM_BENCH
     uint32_t t0 = esp_cpu_get_cycle_count();
 #endif
@@ -171,6 +226,7 @@ static inline void flush_buf(void)
 #ifdef CONFIG_VTERM_BENCH
     s_bench.flush_count++;
 #endif
+#endif /* CONFIG_VTERM_TSM_SLIM */
 }
 
 /* -------------------------------------------------------------------------
@@ -184,6 +240,38 @@ esp_err_t vterm_init(int cols, int rows)
     s_cols        = cols;
     s_rows        = rows;
     s_initialized = false;
+
+#ifdef CONFIG_VTERM_TSM_SLIM
+
+    s_buffer = malloc((size_t)cols * (size_t)rows * sizeof(terminal_cell_t));
+    if (!s_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate cell buffer");
+        return ESP_ERR_NO_MEM;
+    }
+
+    color_t def_fg = display_ansi_to_rgb565(7);
+    color_t def_bg = display_ansi_to_rgb565(0);
+    for (int i = 0; i < cols * rows; i++) {
+        s_buffer[i].cp       = 0x0020;
+        s_buffer[i].fg_color = def_fg;
+        s_buffer[i].bg_color = def_bg;
+        s_buffer[i].attrs    = 0;
+    }
+
+    s_tsm = tsm_new(cols, rows);
+    if (!s_tsm) {
+        ESP_LOGE(TAG, "tsm_new failed");
+        free(s_buffer);
+        return ESP_ERR_NO_MEM;
+    }
+
+    display_set_text_buffer(s_buffer, cols, rows);
+    display_set_cursor(0, 0, CURSOR_BLOCK);
+    s_initialized = true;
+    ESP_LOGI(TAG, "vterm ready (tsm_slim): %dx%d", cols, rows);
+    return ESP_OK;
+
+#else /* libtsm */
 
     s_buffer = malloc((size_t)cols * (size_t)rows * sizeof(terminal_cell_t));
     if (!s_buffer) {
@@ -222,6 +310,8 @@ esp_err_t vterm_init(int cols, int rows)
     ESP_LOGI(TAG, "vterm ready: %dx%d, %zu bytes",
              cols, rows, (size_t)cols * (size_t)rows * sizeof(terminal_cell_t));
     return ESP_OK;
+
+#endif /* CONFIG_VTERM_TSM_SLIM */
 }
 
 void vterm_write(const char *data, size_t len)
@@ -245,7 +335,11 @@ void vterm_write_dir(const char *data, size_t len)
 {
     if (!s_initialized) return;
     flush_buf();
+#ifdef CONFIG_VTERM_TSM_SLIM
+    tsm_feed(s_tsm, (const uint8_t *)data, len);
+#else
     tsm_vte_input(s_vte, data, len);
+#endif
     refresh_display();
 }
 
@@ -265,20 +359,29 @@ void vterm_reset(void)
 {
     if (!s_initialized) return;
     flush_buf();
-    s_last_age = 0;          /* force full redraw after reset */
+#ifdef CONFIG_VTERM_TSM_SLIM
+    tsm_reset(s_tsm);
+    refresh_display();
+#else
+    s_last_age = 0;    /* force full redraw after reset */
     tsm_vte_reset(s_vte);
     refresh_display();
+#endif
 }
 
 bool vterm_app_cursor_keys(void)
 {
     if (!s_initialized) return false;
+#ifdef CONFIG_VTERM_TSM_SLIM
+    return tsm_app_cursor_keys(s_tsm);
+#else
     return (tsm_vte_get_flags(s_vte) & TSM_VTE_FLAG_CURSOR_KEY_MODE) != 0;
+#endif
 }
 
 void vterm_bench_report(void)
 {
-#ifdef CONFIG_VTERM_BENCH
+#if defined(CONFIG_VTERM_BENCH) && !defined(CONFIG_VTERM_TSM_SLIM)
     uint32_t skip     = s_bench.draw_cb_total - s_bench.draw_cb_updated;
     uint32_t vte_us   = (uint32_t)(s_bench.vte_cycles  / 240);
     uint32_t draw_us  = (uint32_t)(s_bench.draw_cycles / 240);
@@ -297,7 +400,7 @@ void vterm_bench_report(void)
 
 void vterm_bench_reset(void)
 {
-#ifdef CONFIG_VTERM_BENCH
+#if defined(CONFIG_VTERM_BENCH) && !defined(CONFIG_VTERM_TSM_SLIM)
     memset(&s_bench, 0, sizeof(s_bench));
 #endif
 }
