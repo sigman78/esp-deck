@@ -1,5 +1,5 @@
 /*
- * test_termstate.c — Unity tests for tsm_slim Phase 2
+ * test_termstate.c -- Unity tests for tsm termstate
  *
  * Covers: color conversion, charset translation, terminal model
  * (cursor movement, SGR, erase, scroll, alt-screen, charsets, wrap).
@@ -10,7 +10,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include "unity.h"
-#include "tsm_slim.h"
+#include "tsm.h"
 #include "color.h"
 #include "charsets.h"
 

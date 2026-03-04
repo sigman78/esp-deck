@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(tsm_slim_unit_tests C)
+project(tsm_unit_tests C)
 set(CMAKE_C_STANDARD 11)
 
 # CPM.cmake bootstrap — shared with sim/ and tests/terminal
@@ -12,8 +12,9 @@ CPMAddPackage(
     GIT_SHALLOW TRUE
 )
 
-set(TSM_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../../components/tsm_slim/src)
-set(TSM_INC ${CMAKE_CURRENT_SOURCE_DIR}/../../components/tsm_slim/include)
+set(TSM_SRC  ${CMAKE_CURRENT_SOURCE_DIR}/../../components/tsm/src)
+set(TSM_INC  ${CMAKE_CURRENT_SOURCE_DIR}/../../components/tsm/include)
+set(IDFSIM   ${CMAKE_CURRENT_SOURCE_DIR}/../../idfsim)
 
 # vtparse tests — no ESP-IDF dependency; pure C
 add_executable(test_vtparse
@@ -41,6 +42,7 @@ add_executable(test_termstate
 target_include_directories(test_termstate PRIVATE
     ${TSM_INC}
     ${TSM_SRC}
+    ${IDFSIM}
     ${unity_SOURCE_DIR}/src
 )
 

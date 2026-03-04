@@ -1,7 +1,7 @@
 /*
- * vterm — VT/ANSI terminal emulator (libtsm backend).
+ * vterm -- VT/ANSI terminal emulator.
  *
- * Parses VT100…xterm byte streams and drives the display cell buffer
+ * Parses VT100...xterm byte streams and drives the display cell buffer
  * directly.  Use vterm_write() to feed raw SSH/PTY data.
  * For plain text without escape sequences use the terminal component.
  */
@@ -51,7 +51,7 @@ void vterm_flush(void);
 
 /**
  * Register a callback for bytes the terminal state machine needs to
- * send back to the remote (cursor-position reports, DA1 responses, …).
+ * send back to the remote (cursor-position reports, DA1 responses, ...).
  * Pass NULL to disable.
  *
  * @param cb    Callback function pointer.
@@ -73,8 +73,8 @@ void vterm_reset(void);
 bool vterm_app_cursor_keys(void);
 
 /**
- * Log a performance summary (flushes, bytes, VTE cycles, draw cycles,
- * cell update/skip counts).  No-op when CONFIG_VTERM_BENCH is disabled.
+ * Log a performance summary (flushes, bytes, tsm cycles, draw cycles).
+ * No-op when CONFIG_VTERM_BENCH is disabled.
  */
 void vterm_bench_report(void);
 

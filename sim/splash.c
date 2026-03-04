@@ -275,7 +275,7 @@ static void scene_monitor(void)
         "  Auth:  publickey   ",
     };
     static const char *term[4] = {
-        "  Backend:    libtsm 4.3.0",
+        "  Backend:    tsm",
         "  Emulation:  VT220 / xterm-256color",
         "  Size:       100×30   UTF-8",
         "  SSH:        cyberdeck@dev.example.com:22",

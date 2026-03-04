@@ -1,7 +1,7 @@
 /*
  * splash.c — Colour-capability showcase splash screen and status helpers.
  *
- * Uses full ANSI escape sequences via vterm; the same libtsm/display
+ * Uses full ANSI escape sequences via vterm; the same tsm/display
  * pipeline used for SSH session output.
  *
  * Layout (100 × 30 terminal):

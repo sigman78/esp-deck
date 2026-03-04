@@ -2,7 +2,7 @@
  * Unit tests for vtparse — VT byte-stream parser.
  *
  * Build & run:
- *   cd tests/tsm_slim
+ *   cd tests/tsm
  *   cmake -B build && cmake --build build
  *   ./build/test_vtparse
  *

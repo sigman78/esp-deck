@@ -7,10 +7,12 @@
  */
 #pragma once
 
-#include "tsm_slim.h"
+#include "tsm.h"
 #include "vtparse.h"
 #include "charsets.h"
 #include "color.h"
+
+#include "esp_heap_caps.h"
 
 /* ── Scrollback ──────────────────────────────────────────────────────────── */
 

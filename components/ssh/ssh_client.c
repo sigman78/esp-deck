@@ -111,7 +111,7 @@ static void ssh_cleanup(void)
 
 /* -------------------------------------------------------------------------
  * vterm response callback — sends terminal responses (e.g. DA1, cursor
- * position reports) from libtsm back to the remote over SSH.
+ * position reports) from tsm back to the remote over SSH.
  * ---------------------------------------------------------------------- */
 static void ssh_vterm_response_cb(const char *data, size_t len, void *user)
 {

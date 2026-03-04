@@ -1,9 +1,7 @@
 /*
- * tsm_slim — lightweight VT terminal for ESP32-S3
+ * tsm -- lightweight VT terminal for ESP32-S3
  *
- * Public header.  Grows with each phase:
- *   Phase 1 — cell type, forward declarations
- *   Phase 2 — termstate API (tsm_t, tsm_new, tsm_feed …)
+ * Public header.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -13,16 +11,15 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-/* ── Cell ────────────────────────────────────────────────────────────────────
- *
- * 8 bytes.  Binary-compatible with terminal_cell_t in display.h so a direct
- * cast (or memcpy-free pointer pass) to display_set_text_buffer() is safe.
+/*
+ * Cell -- 8 bytes.  Binary-compatible with terminal_cell_t in display.h so a
+ * direct cast (or memcpy-free pointer pass) to display_set_text_buffer() is safe.
  *
  * Layout matches terminal_cell_t exactly:
- *   offset 0  cp       uint16_t  Unicode codepoint (BMP, U+0000–U+FFFF)
+ *   offset 0  cp       uint16_t  Unicode codepoint (BMP, U+0000-U+FFFF)
  *   offset 2  fg       uint16_t  foreground RGB565
  *   offset 4  bg       uint16_t  background RGB565
- *   offset 6  attrs    uint8_t   primary attribute flags (BOLD/UNDERLINE/…)
+ *   offset 6  attrs    uint8_t   primary attribute flags (BOLD/UNDERLINE/...)
  *   offset 7  attrs2   uint8_t   extended attribute flags + cell flags
  */
 typedef struct {
@@ -33,7 +30,7 @@ typedef struct {
     uint8_t  attrs2;  /* extended attrs + cell flags (see CELL_ATTR2_* below) */
 } tsm_cell_t;
 
-/* Primary attributes — attrs byte (offset 6).
+/* Primary attributes -- attrs byte (offset 6).
  * Lower nibble matches display.h ATTR_* bits for ISR compatibility. */
 #define CELL_ATTR_BOLD        (1u << 0)   /* SGR 1  */
 #define CELL_ATTR_UNDERLINE   (1u << 1)   /* SGR 4  */
@@ -44,40 +41,38 @@ typedef struct {
 #define CELL_ATTR_INVISIBLE   (1u << 6)   /* SGR 8  */
 #define CELL_ATTR_STRIKE      (1u << 7)   /* SGR 9  */
 
-/* Extended attributes + cell flags — attrs2 byte (offset 7) */
+/* Extended attributes + cell flags -- attrs2 byte (offset 7) */
 #define CELL_ATTR2_OVERLINE   (1u << 0)   /* SGR 53 */
-#define CELL_ATTR2_PROTECTED  (1u << 1)   /* DECSCA — protected from erase  */
+#define CELL_ATTR2_PROTECTED  (1u << 1)   /* DECSCA -- protected from erase  */
 #define CELL_ATTR2_WIDE_RIGHT (1u << 2)   /* right-half placeholder of wide glyph */
 
-/* ── Dirty row segment ───────────────────────────────────────────────────────
- *
+/*
+ * Dirty row segment.
  * Tracks the leftmost and rightmost columns written since the last
  * tsm_clear_dirty() call.  l > r means the row is clean.
  *
- * Kept as uint8_t — compact array-of-structs; sentinel encoding uses the
+ * Kept as uint8_t -- compact array-of-structs; sentinel encoding uses the
  * full byte range (0xFF / 0x00).
  */
 typedef struct {
     uint8_t l;   /* leftmost dirty column (inclusive) */
-    uint8_t r;   /* rightmost dirty column (inclusive); l > r → clean */
+    uint8_t r;   /* rightmost dirty column (inclusive); l > r means clean */
 } tsm_row_dirty_t;
 
 /* Clean sentinel values */
 #define TSM_DIRTY_L_CLEAN  0xFFu
 #define TSM_DIRTY_R_CLEAN  0x00u
 
-/* ── Terminal dimensions ─────────────────────────────────────────────────── */
+/* Terminal dimensions */
 
 #define TSM_COLS_MAX  220   /* practical max for 800px / 4px font */
 #define TSM_ROWS_MAX  60    /* practical max for 480px / 8px font */
 
-/* ── Forward declarations (Phase 2) ─────────────────────────────────────── */
-
 typedef struct tsm_s tsm_t;
 
-/* ── Terminal API ────────────────────────────────────────────────────────── */
+/* Terminal API */
 
-/* Allocate and initialise a new terminal of cols×rows.
+/* Allocate and initialise a new terminal of cols x rows.
  * Returns NULL on allocation failure. */
 tsm_t *tsm_new(int cols, int rows);
 
@@ -113,9 +108,9 @@ void tsm_reset(tsm_t *tsm);
 /* Returns true when DECCKM (application cursor key mode) is active. */
 bool tsm_app_cursor_keys(const tsm_t *tsm);
 
-/* ── Response callback ───────────────────────────────────────────────────── */
+/* Response callback */
 
-/* Called by tsm_slim when a terminal response must be sent to the host
+/* Called by tsm when a terminal response must be sent to the host
  * (DA1 reply, DSR reply, CPR).  data/len are NOT NUL-terminated. */
 typedef void (*tsm_response_fn_t)(const char *data, size_t len, void *user);
 
