@@ -90,7 +90,7 @@ static void main_task(void *pvParameters)
 
         /* ── BOOT: show splash, then wait for WiFi ─────────────────── */
         case STATE_BOOT:
-            splash_show();
+            //splash_show();
             vTaskDelay(pdMS_TO_TICKS(2000));
             vterm_bench_report();
             state = STATE_WIFI_WAIT;
@@ -147,11 +147,11 @@ static void main_task(void *pvParameters)
 
             splash_status_info("Connecting to SSH server...");
             if (ssh_client_connect(&ssh_cfg) == ESP_OK) {
-                splash_status_ok("SSH connected");
+//                splash_status_ok("SSH connected");
                 vTaskDelay(pdMS_TO_TICKS(500));
                 /* Clear screen and hand off to SSH session */
-                vterm_write("\e[2J\e[H", 7);
-                vterm_flush();
+//                vterm_write("\e[2J\e[H", 7);
+//                vterm_flush();
                 state = STATE_SESSION;
             } else {
                 splash_status_fail("SSH connection failed — retrying in 5 s...");
