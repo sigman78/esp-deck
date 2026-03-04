@@ -28,7 +28,7 @@
 typedef struct {
     uint32_t flush_count;
     uint32_t bytes_fed;
-    uint64_t vte_cycles;
+    uint64_t tsm_cycles;
     uint64_t draw_cycles;
 } vterm_bench_t;
 static vterm_bench_t s_bench;
@@ -99,7 +99,7 @@ static inline void flush_buf(void)
     tsm_feed(s_tsm, (const uint8_t *)s_wbuf, s_wbuf_len);
 #ifdef CONFIG_VTERM_BENCH
     uint32_t t1 = esp_cpu_get_cycle_count();
-    s_bench.vte_cycles += (t1 - t0);
+    s_bench.tsm_cycles += (t1 - t0);
     s_bench.bytes_fed  += s_wbuf_len;
 #endif
     s_wbuf_len = 0;
@@ -173,7 +173,15 @@ void vterm_write_dir(const char *data, size_t len)
 {
     if (!s_initialized) return;
     flush_buf();
+#ifdef CONFIG_VTERM_BENCH
+    uint32_t t0 = esp_cpu_get_cycle_count();
+#endif
     tsm_feed(s_tsm, (const uint8_t *)data, len);
+#ifdef CONFIG_VTERM_BENCH
+    uint32_t t1 = esp_cpu_get_cycle_count();
+    s_bench.tsm_cycles += (t1 - t0);
+    s_bench.bytes_fed  += len;
+#endif
     refresh_display();
 }
 
@@ -206,15 +214,15 @@ bool vterm_app_cursor_keys(void)
 void vterm_bench_report(void)
 {
 #ifdef CONFIG_VTERM_BENCH
-    uint32_t vte_us   = (uint32_t)(s_bench.vte_cycles  / 240);
+    uint32_t tsm_us   = (uint32_t)(s_bench.tsm_cycles  / 240);
     uint32_t draw_us  = (uint32_t)(s_bench.draw_cycles / 240);
-    uint32_t total_us = vte_us + draw_us;
+    uint32_t total_us = tsm_us + draw_us;
     ESP_LOGI("vterm_bench",
         "flushes=%" PRIu32 "  bytes=%" PRIu32 "  "
         "tsm=%" PRIu32 "us  draw=%" PRIu32 "us  total=%" PRIu32 "us",
         s_bench.flush_count,
         s_bench.bytes_fed,
-        vte_us, draw_us, total_us);
+        tsm_us, draw_us, total_us);
 #endif
 }
 

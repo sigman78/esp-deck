@@ -53,7 +53,7 @@ static inline tsm_cell_t *cell_at(tsm_t *t, int col, int row)
 }
 
 /* Mark column range [l, r] on row as dirty. */
-static void mark_dirty(tsm_t *t, int row, int l, int r)
+static inline void mark_dirty(tsm_t *t, int row, int l, int r)
 {
     if (t->dirty[row].l > (uint8_t)l) t->dirty[row].l = (uint8_t)l;
     if (t->dirty[row].r < (uint8_t)r) t->dirty[row].r = (uint8_t)r;
@@ -76,7 +76,7 @@ static inline tsm_cell_t blank_cell(tsm_t *t)
 /* ── Screen fill / erase ─────────────────────────────────────────────────── */
 
 /* Erase columns [l, r] on row with current bg color. */
-static void erase_range(tsm_t *t, int row, int l, int r)
+static inline void erase_range(tsm_t *t, int row, int l, int r)
 {
     tsm_cell_t b = blank_cell(t);
     for (int c = l; c <= r; c++)
@@ -131,7 +131,7 @@ static void scroll_down(tsm_t *t, int n)
 /* ── Cursor movement ─────────────────────────────────────────────────────── */
 
 /* Move cursor to absolute (col, row) — clamped to screen. */
-static void cursor_goto(tsm_t *t, int col, int row)
+static inline void cursor_goto(tsm_t *t, int col, int row)
 {
     int top = t->mode.decom ? t->scroll_top : 0;
     int bot = t->mode.decom ? t->scroll_bot : t->rows - 1;
@@ -141,7 +141,7 @@ static void cursor_goto(tsm_t *t, int col, int row)
 }
 
 /* Advance cursor by one cell; handle wrap/scroll. */
-static void cursor_advance(tsm_t *t)
+static inline void cursor_advance(tsm_t *t)
 {
     if (t->cx + 1 < t->cols) {
         t->cx++;
@@ -151,7 +151,7 @@ static void cursor_advance(tsm_t *t)
 }
 
 /* Perform pending wrap (newline + scroll if needed). */
-static void do_wrap(tsm_t *t)
+static inline void do_wrap(tsm_t *t)
 {
     t->pending_wrap = false;
     t->cx = 0;
@@ -605,7 +605,7 @@ static void do_c0(tsm_t *t, uint8_t byte)
 
 /* ── Print (GROUND printable) ────────────────────────────────────────────── */
 
-static void do_print_span(tsm_t *t, const uint32_t *cps, int count)
+static inline void do_print_span(tsm_t *t, const uint32_t *cps, int count)
 {
     for (int i = 0; i < count; i++) {
         uint32_t cp = cps[i];

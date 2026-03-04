@@ -26,7 +26,7 @@ static void do_clear(vtparse_t *p)
 
 /* Accumulate a parameter byte (digit, ':', ';').
  * ':' and ';' both advance the slot so sub-params share the same array. */
-static void do_param(vtparse_t *p, uint8_t b)
+static inline void do_param(vtparse_t *p, uint8_t b)
 {
     if (b == ';' || b == ':') {
         if (p->param_cur < VTP_PARAMS_MAX - 1)
@@ -48,14 +48,14 @@ static void do_param(vtparse_t *p, uint8_t b)
 }
 
 /* Store first intermediate byte; ignore subsequent ones (rare). */
-static void do_collect(vtparse_t *p, uint8_t b)
+static inline void do_collect(vtparse_t *p, uint8_t b)
 {
     if (!p->intermediate)
         p->intermediate = b;
 }
 
 /* Store first private-use parameter marker; ignore subsequent ones. */
-static void do_prefix(vtparse_t *p, uint8_t b)
+static inline void do_prefix(vtparse_t *p, uint8_t b)
 {
     if (!p->prefix)
         p->prefix = b;
@@ -63,7 +63,7 @@ static void do_prefix(vtparse_t *p, uint8_t b)
 
 /* ── Event emitters ───────────────────────────────────────────────────────── */
 
-static void flush_print(vtparse_t *p)
+static inline void flush_print(vtparse_t *p)
 {
     int n = p->print_len;
     if (n == 0) return;
@@ -71,7 +71,7 @@ static void flush_print(vtparse_t *p)
     p->cb.print(p->print_buf, n, p->user);
 }
 
-static void append_print(vtparse_t *p, uint32_t cp)
+static inline void append_print(vtparse_t *p, uint32_t cp)
 {
     if (p->print_len >= VTP_PRINT_BUF)
         flush_print(p);
@@ -93,7 +93,7 @@ static inline void emit_csi(vtparse_t *p, uint8_t final)
     p->cb.csi(p->prefix, p->intermediate, final, p->params, p->nparams, p->user);
 }
 
-static void emit_osc(vtparse_t *p)
+static inline void emit_osc(vtparse_t *p)
 {
     p->osc_buf[p->osc_len] = 0; /* null-terminate */
     p->cb.osc(p->osc_buf, p->osc_len, p->user);
@@ -106,7 +106,7 @@ static inline void emit_dcs(vtparse_t *p, uint8_t final)
 
 /* ── State transitions ────────────────────────────────────────────────────── */
 
-static void enter_ground(vtparse_t *p)
+static inline void enter_ground(vtparse_t *p)
 {
     p->state       = VTP_ST_GROUND;
     p->prev_string = VTP_STR_NONE;
@@ -117,7 +117,7 @@ static void enter_ground(vtparse_t *p)
  * Preserves prev_string when interrupting an OSC or DCS string so that
  * a subsequent '\\' (ST) can complete the string correctly.
  */
-static void enter_esc(vtparse_t *p)
+static inline void enter_esc(vtparse_t *p)
 {
     switch (p->state) {
         case VTP_ST_OSC_STRING:
@@ -147,7 +147,7 @@ static void enter_esc(vtparse_t *p)
 
 /* ── Per-state byte processors ────────────────────────────────────────────── */
 
-static void st_ground(vtparse_t *p, uint8_t b)
+static inline void st_ground(vtparse_t *p, uint8_t b)
 {
     if (b <= 0x1F) {
         flush_print(p);
@@ -158,7 +158,7 @@ static void st_ground(vtparse_t *p, uint8_t b)
     /* 0x7F (DEL) → ignore */
 }
 
-static void st_esc(vtparse_t *p, uint8_t b)
+static inline void st_esc(vtparse_t *p, uint8_t b)
 {
     if (b >= 0x20 && b <= 0x2F) {
         /* Intermediate byte (e.g. '(' for charset designation) */
@@ -200,7 +200,7 @@ static void st_esc(vtparse_t *p, uint8_t b)
     /* 0x7F → ignore */
 }
 
-static void st_esc_int(vtparse_t *p, uint8_t b)
+static inline void st_esc_int(vtparse_t *p, uint8_t b)
 {
     if (b >= 0x20 && b <= 0x2F) {
         do_collect(p, b);       /* additional intermediate (unusual) */
@@ -216,7 +216,7 @@ static void st_esc_int(vtparse_t *p, uint8_t b)
     /* 0x7F → ignore */
 }
 
-static void st_csi_entry(vtparse_t *p, uint8_t b)
+static inline  void st_csi_entry(vtparse_t *p, uint8_t b)
 {
     if (b >= 0x20 && b <= 0x2F) {
         do_collect(p, b);
@@ -237,7 +237,7 @@ static void st_csi_entry(vtparse_t *p, uint8_t b)
     /* 0x7F → ignore */
 }
 
-static void st_csi_param(vtparse_t *p, uint8_t b)
+static inline void st_csi_param(vtparse_t *p, uint8_t b)
 {
     if (b >= 0x20 && b <= 0x2F) {
         do_collect(p, b);
@@ -254,7 +254,7 @@ static void st_csi_param(vtparse_t *p, uint8_t b)
     /* 0x7F → ignore */
 }
 
-static void st_csi_int(vtparse_t *p, uint8_t b)
+static inline void st_csi_int(vtparse_t *p, uint8_t b)
 {
     if (b >= 0x20 && b <= 0x2F) {
         do_collect(p, b);
@@ -268,14 +268,14 @@ static void st_csi_int(vtparse_t *p, uint8_t b)
     /* 0x7F → ignore */
 }
 
-static void st_csi_ignore(vtparse_t *p, uint8_t b)
+static inline void st_csi_ignore(vtparse_t *p, uint8_t b)
 {
     if (b >= 0x40 && b <= 0x7E)
         enter_ground(p);    /* discard sequence, return to ground */
     /* everything else: stay and discard */
 }
 
-static void st_dcs_entry(vtparse_t *p, uint8_t b)
+static inline void st_dcs_entry(vtparse_t *p, uint8_t b)
 {
     if (b >= 0x20 && b <= 0x2F) {
         do_collect(p, b);
@@ -292,7 +292,7 @@ static void st_dcs_entry(vtparse_t *p, uint8_t b)
     }
 }
 
-static void st_dcs_param(vtparse_t *p, uint8_t b)
+static inline void st_dcs_param(vtparse_t *p, uint8_t b)
 {
     if (b >= 0x20 && b <= 0x2F) {
         do_collect(p, b);
@@ -307,7 +307,7 @@ static void st_dcs_param(vtparse_t *p, uint8_t b)
     }
 }
 
-static void st_dcs_int(vtparse_t *p, uint8_t b)
+static inline void st_dcs_int(vtparse_t *p, uint8_t b)
 {
     if (b >= 0x20 && b <= 0x2F) {
         do_collect(p, b);
@@ -320,21 +320,21 @@ static void st_dcs_int(vtparse_t *p, uint8_t b)
 }
 
 /* DCS passthrough data (Phase 1 stub: data bytes are silently consumed). */
-static void st_dcs_pass(vtparse_t *p, uint8_t b)
+static inline  void st_dcs_pass(vtparse_t *p, uint8_t b)
 {
     (void)p;
     (void)b;
     /* Terminated by 0x9C or ESC \ via the "anywhere" transitions. */
 }
 
-static void st_dcs_ignore(vtparse_t *p, uint8_t b)
+static inline void st_dcs_ignore(vtparse_t *p, uint8_t b)
 {
     (void)p;
     (void)b;
     /* Ignore everything until ST. */
 }
 
-static void st_osc(vtparse_t *p, uint8_t b)
+static inline void st_osc(vtparse_t *p, uint8_t b)
 {
     if (b == 0x07) {
         /* BEL — xterm extension for OSC termination. */
@@ -350,7 +350,7 @@ static void st_osc(vtparse_t *p, uint8_t b)
     /* Other C0 (except BEL already handled above) → ignore. */
 }
 
-static void st_sos_pm_apc(vtparse_t *p, uint8_t b)
+static inline void st_sos_pm_apc(vtparse_t *p, uint8_t b)
 {
     (void)p;
     (void)b;
@@ -361,7 +361,7 @@ static void st_sos_pm_apc(vtparse_t *p, uint8_t b)
 
 /* Begin accumulating a multi-byte UTF-8 sequence from lead byte b.
  * Returns true on a valid lead; false if b should produce U+FFFD. */
-static bool utf8_start(vtparse_t *p, uint8_t b)
+static inline bool utf8_start(vtparse_t *p, uint8_t b)
 {
     if (b >= 0xF5) {
         return false;       /* would exceed U+10FFFF */
