@@ -669,12 +669,12 @@ tsm_t *tsm_new(int cols, int rows)
 {
     if (cols <= 0 || rows <= 0) return NULL;
 
-    tsm_t *t = (tsm_t *)calloc(1, sizeof(tsm_t));
+    tsm_t *t = (tsm_t *)heap_caps_calloc(1, sizeof(tsm_t), MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
     if (!t) return NULL;
 
-    t->cells     = (tsm_cell_t *)calloc((size_t)cols * (size_t)rows, sizeof(tsm_cell_t));
-    t->alt_cells = (tsm_cell_t *)calloc((size_t)cols * (size_t)rows, sizeof(tsm_cell_t));
-    t->dirty     = (tsm_row_dirty_t *)malloc((size_t)rows * sizeof(tsm_row_dirty_t));
+    t->cells     = (tsm_cell_t *)heap_caps_calloc((size_t)cols * (size_t)rows, sizeof(tsm_cell_t), MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    t->alt_cells = (tsm_cell_t *)heap_caps_calloc((size_t)cols * (size_t)rows, sizeof(tsm_cell_t), MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
+    t->dirty     = (tsm_row_dirty_t *)heap_caps_malloc((size_t)rows * sizeof(tsm_row_dirty_t), MALLOC_CAP_8BIT | MALLOC_CAP_INTERNAL);
 
     if (!t->cells || !t->alt_cells || !t->dirty) { tsm_free(t); return NULL; }
 
@@ -705,10 +705,10 @@ tsm_t *tsm_new(int cols, int rows)
 void tsm_free(tsm_t *t)
 {
     if (!t) return;
-    free(t->cells);
-    free(t->alt_cells);
-    free(t->dirty);
-    free(t);
+    heap_caps_free(t->cells);
+    heap_caps_free(t->alt_cells);
+    heap_caps_free(t->dirty);
+    heap_caps_free(t);
 }
 
 void tsm_feed(tsm_t *t, const uint8_t *data, size_t len)
