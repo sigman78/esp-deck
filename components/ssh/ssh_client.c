@@ -155,7 +155,7 @@ static void ssh_read_task(void *arg)
         int n = libssh2_channel_read(s_channel, buf, sizeof(buf));
         if (n > 0) {
             vterm_write(buf, (size_t)n);
-            vterm_flush();
+            //vterm_flush();
         } else if (n == LIBSSH2_ERROR_EAGAIN) {
             /* No data — good time to send a keepalive if one is due. */
 #if CONFIG_SSH_KEEPALIVE_INTERVAL > 0

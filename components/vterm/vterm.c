@@ -324,6 +324,8 @@ esp_err_t vterm_init(int cols, int rows)
 
 void vterm_write(const char *data, size_t len)
 {
+    vterm_write_dir(data, len);
+/*
     if (!s_initialized || len == 0) return;
     while (len > 0) {
         size_t avail = VTERM_BUF_SIZE - s_wbuf_len;
@@ -337,6 +339,7 @@ void vterm_write(const char *data, size_t len)
         if (lf || s_wbuf_len == VTERM_BUF_SIZE)
             flush_buf();
     }
+*/
 }
 
 void vterm_write_dir(const char *data, size_t len)
