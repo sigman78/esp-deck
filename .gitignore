@@ -55,3 +55,4 @@ secrets/
 
 /sim_storage
 .vs
+.cache
