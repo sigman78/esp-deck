@@ -103,7 +103,8 @@ static inline void flush_buf(void)
     s_bench.bytes_fed  += s_wbuf_len;
 #endif
     s_wbuf_len = 0;
-    refresh_display();
+    if (!tsm_sync_update(s_tsm))
+        refresh_display();
 #ifdef CONFIG_VTERM_BENCH
     s_bench.flush_count++;
 #endif
@@ -182,7 +183,8 @@ void vterm_write_dir(const char *data, size_t len)
     s_bench.tsm_cycles += (t1 - t0);
     s_bench.bytes_fed  += len;
 #endif
-    refresh_display();
+    if (!tsm_sync_update(s_tsm))
+        refresh_display();
 }
 
 void vterm_flush(void)
