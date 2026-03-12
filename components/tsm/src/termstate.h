@@ -45,6 +45,7 @@ typedef struct {
     bool bracketed;  /* bracketed paste mode (stub)              */
     bool mouse_x10;  /* mouse X10 reporting (stub)               */
     bool mouse_btn;  /* mouse button reporting (stub)            */
+    bool sync_update;  /* ?2026 — synchronized output: freeze renderer */
 } tsm_mode_t;
 
 /* ── Terminal struct ─────────────────────────────────────────────────────── */

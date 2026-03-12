@@ -896,6 +896,78 @@ void test_reset_from_alt_screen(void)
 }
 
 /* ════════════════════════════════════════════════════════════════════════════
+ * Synchronized output — mode ?2026
+ * ════════════════════════════════════════════════════════════════════════════ */
+
+void test_sync_initial_state(void)
+{
+    tsm_t *t = tsm_new(80, 24);
+    TEST_ASSERT_FALSE(tsm_sync_update(t));
+    tsm_free(t);
+}
+
+void test_sync_mode_bsu(void)
+{
+    tsm_t *t = tsm_new(80, 24);
+    feed(t, "\x1b[?2026h");
+    TEST_ASSERT_TRUE(tsm_sync_update(t));
+    tsm_free(t);
+}
+
+void test_sync_mode_esu(void)
+{
+    tsm_t *t = tsm_new(80, 24);
+    feed(t, "\x1b[?2026l");
+    TEST_ASSERT_FALSE(tsm_sync_update(t));
+    tsm_free(t);
+}
+
+void test_sync_bsu_esu_roundtrip(void)
+{
+    tsm_t *t = tsm_new(80, 24);
+    feed(t, "\x1b[?2026h");
+    TEST_ASSERT_TRUE(tsm_sync_update(t));
+    feed(t, "\x1b[?2026l");
+    TEST_ASSERT_FALSE(tsm_sync_update(t));
+    tsm_free(t);
+}
+
+void test_sync_decrqm_inactive(void)
+{
+    tsm_t *t = tsm_new(80, 24);
+    clear_response();
+    tsm_set_response_cb(t, capture_response, NULL);
+    feed(t, "\x1b[?2026$p");
+    /* mode reset → N=2: CSI ? 2026 ; 2 $ y  (11 bytes) */
+    TEST_ASSERT_EQUAL_size_t(11, s_resp_len);
+    TEST_ASSERT_EQUAL_MEMORY("\x1b[?2026;2$y", s_resp_buf, 11);
+    tsm_free(t);
+}
+
+void test_sync_decrqm_active(void)
+{
+    tsm_t *t = tsm_new(80, 24);
+    feed(t, "\x1b[?2026h");
+    clear_response();
+    tsm_set_response_cb(t, capture_response, NULL);
+    feed(t, "\x1b[?2026$p");
+    /* mode set → N=1: CSI ? 2026 ; 1 $ y  (11 bytes) */
+    TEST_ASSERT_EQUAL_size_t(11, s_resp_len);
+    TEST_ASSERT_EQUAL_MEMORY("\x1b[?2026;1$y", s_resp_buf, 11);
+    tsm_free(t);
+}
+
+void test_sync_reset_clears_mode(void)
+{
+    tsm_t *t = tsm_new(80, 24);
+    feed(t, "\x1b[?2026h");
+    TEST_ASSERT_TRUE(tsm_sync_update(t));
+    tsm_reset(t);
+    TEST_ASSERT_FALSE(tsm_sync_update(t));
+    tsm_free(t);
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
  * main
  * ════════════════════════════════════════════════════════════════════════════ */
 
@@ -1016,6 +1088,15 @@ int main(void)
     RUN_TEST(test_dsr_status);
     RUN_TEST(test_dsr_cpr);
     RUN_TEST(test_no_response_when_cb_null);
+
+    /* Synchronized output — mode ?2026 */
+    RUN_TEST(test_sync_initial_state);
+    RUN_TEST(test_sync_mode_bsu);
+    RUN_TEST(test_sync_mode_esu);
+    RUN_TEST(test_sync_bsu_esu_roundtrip);
+    RUN_TEST(test_sync_decrqm_inactive);
+    RUN_TEST(test_sync_decrqm_active);
+    RUN_TEST(test_sync_reset_clears_mode);
 
     return UNITY_END();
 }

@@ -288,6 +288,15 @@ static void do_csi(tsm_t *t, uint8_t prefix, uint8_t intermediate, uint8_t final
         int32_t mode_n = p1 < 0 ? 0 : p1;
         bool set   = (final == 'h');
         bool reset = (final == 'l');
+        /* DECRQM — CSI ? 2026 $ p: query mode state */
+        if (intermediate == '$' && final == 'p' && mode_n == 2026) {
+            char buf[16];
+            int n = snprintf(buf, sizeof(buf), "\x1b[?2026;%d$y",
+                             t->mode.sync_update ? 1 : 2);
+            if (n > 0 && n < (int)sizeof(buf))
+                send_response(t, buf, (size_t)n);
+            return;
+        }
         if (!set && !reset) return;
         switch (mode_n) {
         case    1: t->mode.decckm   = set;                        break; /* DECCKM */
@@ -313,6 +322,7 @@ static void do_csi(tsm_t *t, uint8_t prefix, uint8_t intermediate, uint8_t final
             else       switch_to_primary(t);
             break;
         case 2004: t->mode.bracketed = set; /* TODO: BRACKETED */ break;
+        case 2026: t->mode.sync_update = set;                    break; /* BSU/ESU */
         default: break;
         }
         return;
@@ -751,3 +761,5 @@ void tsm_reset(tsm_t *t)
 }
 
 bool tsm_app_cursor_keys(const tsm_t *t) { return t->mode.decckm; }
+
+bool tsm_sync_update(const tsm_t *t) { return t->mode.sync_update; }

@@ -108,6 +108,10 @@ void tsm_reset(tsm_t *tsm);
 /* Returns true when DECCKM (application cursor key mode) is active. */
 bool tsm_app_cursor_keys(const tsm_t *tsm);
 
+/* Returns true when synchronized output mode (?2026) is active.
+ * While true, vterm must not flush dirty rows to the display buffer. */
+bool tsm_sync_update(const tsm_t *tsm);
+
 /* Response callback */
 
 /* Called by tsm when a terminal response must be sent to the host
