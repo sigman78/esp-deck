@@ -1,46 +1,60 @@
 /*
- * BLE keyboard (HID over GATT) interface
+ * BLE HID keyboard — public API
+ *
+ * Exposes the 5-state connection lifecycle and pairing primitives.
+ * The backend is driven by esp_hidh and Bluedroid GAP callbacks.
+ * Call ble_keyboard_backend_init() (via input_hal_init()) to start.
  */
 
-#ifndef BLE_KEYBOARD_H
-#define BLE_KEYBOARD_H
+#pragma once
 
 #include "esp_err.h"
+#include "storage.h"   /* ble_device_info_t */
 #include <stdint.h>
 #include <stdbool.h>
 
-// HID keyboard report
-typedef struct {
-    uint8_t modifiers;  // Ctrl, Shift, Alt, GUI
-    uint8_t reserved;
-    uint8_t keys[6];    // Up to 6 simultaneous keys
-} hid_keyboard_report_t;
+/* Connection state machine */
+typedef enum {
+    BLE_IDLE,          /* stack up, not scanning */
+    BLE_RECONNECT,     /* scanning for a known (bonded) device */
+    BLE_PAIRING_SCAN,  /* scanning for any HID device — pairing mode */
+    BLE_CONNECTING,    /* connection in progress */
+    BLE_CONNECTED,     /* keyboard active, input flowing */
+} ble_state_t;
+
+/** Current connection state (thread-safe read). */
+ble_state_t ble_keyboard_get_state(void);
 
 /**
- * Initialize BLE keyboard (HID host)
+ * Switch to BLE_PAIRING_SCAN mode.
+ * Can be called from any state. Disconnects an active connection first.
+ * Clears the scan results buffer.
  */
-esp_err_t ble_keyboard_init(void);
+void ble_keyboard_enter_pairing(void);
 
 /**
- * Start scanning for BLE keyboards
+ * Start reconnect scan for devices already in the storage registry.
+ * Called automatically by backend_init if registry is non-empty.
+ * No-op if already connected.
  */
-esp_err_t ble_keyboard_scan(void);
+void ble_keyboard_reconnect_start(void);
 
 /**
- * Pair with BLE keyboard
+ * Copy at most @p max discovered devices from the pairing scan buffer.
+ * Only valid during BLE_PAIRING_SCAN state.
  *
- * @param addr BLE device address
+ * @return Number of entries written into @p out.
  */
-esp_err_t ble_keyboard_pair(const uint8_t *addr);
+int ble_keyboard_get_scan_results(ble_device_info_t *out, int max);
 
 /**
- * Check if keyboard is connected
+ * Connect and bond with the device at @p addr.
+ * Transitions: BLE_PAIRING_SCAN → BLE_CONNECTING.
+ * On successful bond, saves the device to the storage registry.
  */
-bool ble_keyboard_is_connected(void);
+void ble_keyboard_select_device(const uint8_t addr[6], uint8_t addr_type);
 
 /**
- * Get last keyboard report
+ * Remove @p addr from the storage registry and (if connected) disconnect.
  */
-const hid_keyboard_report_t* ble_keyboard_get_report(void);
-
-#endif // BLE_KEYBOARD_H
+void ble_keyboard_forget_device(const uint8_t addr[6]);

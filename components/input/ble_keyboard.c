@@ -1,16 +1,13 @@
 /*
- * BLE HID keyboard backend
- *
- * Scans for BLE HID devices (UUID 0x1812), connects, and forwards
- * HID reports through hid_keymap_translate() → input_hal_post_event().
- *
- * Only compiled when CONFIG_INPUT_BLE or CONFIG_INPUT_AUTO is set.
+ * BLE HID keyboard backend — 5-state machine
  */
 
 #if defined(CONFIG_INPUT_BLE) || defined(CONFIG_INPUT_AUTO)
 
 #include "input_hal_internal.h"
+#include "ble_keyboard.h"
 #include "hid_keymap.h"
+#include "storage.h"
 #include "vterm.h"
 
 #include "esp_log.h"
@@ -20,42 +17,93 @@
 #include "esp_hid_gap.h"
 #include "esp_hidh.h"
 
+#include <string.h>
+
 static const char *TAG = "ble_kbd";
 
-/* Set to true while a GAP scan is active to avoid double-starts */
-static volatile bool s_scanning = false;
+/* ------------------------------------------------------------------ */
+/*  State                                                              */
+/* ------------------------------------------------------------------ */
+
+static volatile ble_state_t s_state = BLE_IDLE;
+
+/* Registry loaded at init — addresses we try to reconnect to */
+static ble_device_info_t s_registry[STORAGE_BLE_MAX];
+static int               s_registry_count = 0;
+
+/* Scan results accumulated during BLE_PAIRING_SCAN */
+static ble_device_info_t s_scan_results[STORAGE_BLE_MAX];
+static int               s_scan_count = 0;
+
+/* BDA of currently connected device (valid in BLE_CONNECTED) */
+static uint8_t s_connected_bda[6];
 
 /* ------------------------------------------------------------------ */
-/*  Forward declarations                                               */
+/*  Public API                                                         */
 /* ------------------------------------------------------------------ */
-static void gap_event_handler(esp_gap_ble_cb_event_t event,
-                              esp_ble_gap_cb_param_t *param);
-static void hidh_callback(void *handler_args, esp_event_base_t base,
-                          int32_t id, void *event_data);
+
+ble_state_t ble_keyboard_get_state(void)      { return s_state; }
+
+int ble_keyboard_get_scan_results(ble_device_info_t *out, int max)
+{
+    int n = (s_scan_count < max) ? s_scan_count : max;
+    memcpy(out, s_scan_results, n * sizeof(ble_device_info_t));
+    return n;
+}
+
+void ble_keyboard_enter_pairing(void)
+{
+    ESP_LOGI(TAG, "Entering pairing mode");
+    esp_ble_gap_stop_scanning();
+    s_scan_count = 0;
+    s_state = BLE_PAIRING_SCAN;
+    esp_ble_gap_start_scanning(CONFIG_INPUT_BLE_SCAN_DURATION);
+}
+
+void ble_keyboard_reconnect_start(void)
+{
+    if (s_state == BLE_CONNECTED) return;
+    if (s_registry_count == 0)   return;
+    ESP_LOGI(TAG, "Reconnect scan for %d known device(s)", s_registry_count);
+    s_state = BLE_RECONNECT;
+    esp_ble_gap_start_scanning(CONFIG_INPUT_BLE_SCAN_DURATION);
+}
+
+void ble_keyboard_select_device(const uint8_t addr[6], uint8_t addr_type)
+{
+    char mac[18];
+    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+             addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+    ESP_LOGI(TAG, "Connecting to selected device %s", mac);
+    esp_ble_gap_stop_scanning();
+    s_state = BLE_CONNECTING;
+    esp_hidh_dev_open((uint8_t *)addr, ESP_HID_TRANSPORT_BLE, addr_type);
+}
+
+void ble_keyboard_forget_device(const uint8_t addr[6])
+{
+    storage_ble_remove(addr);
+    /* Reload registry */
+    storage_ble_list(s_registry, STORAGE_BLE_MAX, &s_registry_count);
+    if (s_state == BLE_CONNECTED &&
+        memcmp(s_connected_bda, addr, 6) == 0) {
+        /* TODO: disconnect active connection */
+        ESP_LOGW(TAG, "forget_device: disconnect not yet implemented");
+    }
+}
 
 /* ------------------------------------------------------------------ */
 /*  GAP / scan helpers                                                 */
 /* ------------------------------------------------------------------ */
 
-static void start_scan(void)
-{
-    ESP_LOGI(TAG, "Scanning for BLE HID keyboard...");
-    s_scanning = true;
-    esp_ble_gap_start_scanning(CONFIG_INPUT_BLE_SCAN_DURATION);
-}
-
 static bool ad_has_hid_uuid(uint8_t *adv_data, uint8_t adv_data_len)
 {
-    /* Walk AD structures looking for UUID16 list containing 0x1812 (HID) */
     uint8_t *p   = adv_data;
     uint8_t *end = adv_data + adv_data_len;
-
     while (p < end) {
         uint8_t len  = p[0];
         if (len == 0 || p + 1 + len > end) break;
         uint8_t type = p[1];
-
-        /* Types 0x02 (Incomplete) and 0x03 (Complete) UUID16 lists */
         if (type == 0x02 || type == 0x03) {
             uint8_t *uuids = p + 2;
             uint8_t  count = (len - 1) / 2;
@@ -70,30 +118,85 @@ static bool ad_has_hid_uuid(uint8_t *adv_data, uint8_t adv_data_len)
     return false;
 }
 
+/* Extract advertised name from AD structures into dst[dstsz] */
+static void ad_get_name(uint8_t *adv, uint8_t adv_len,
+                        char *dst, size_t dstsz)
+{
+    uint8_t *p   = adv;
+    uint8_t *end = adv + adv_len;
+    while (p < end) {
+        uint8_t len  = p[0];
+        if (len == 0 || p + 1 + len > end) break;
+        uint8_t type = p[1];
+        if (type == 0x08 || type == 0x09) {   /* Short / Complete Local Name */
+            size_t nlen = (size_t)(len - 1);
+            if (nlen >= dstsz) nlen = dstsz - 1;
+            memcpy(dst, p + 2, nlen);
+            dst[nlen] = '\0';
+            return;
+        }
+        p += 1 + len;
+    }
+    snprintf(dst, dstsz, "Unknown");
+}
+
+static bool addr_in_registry(const uint8_t addr[6])
+{
+    for (int i = 0; i < s_registry_count; i++) {
+        if (memcmp(s_registry[i].addr, addr, 6) == 0) return true;
+    }
+    return false;
+}
+
 static void gap_event_handler(esp_gap_ble_cb_event_t event,
                               esp_ble_gap_cb_param_t *param)
 {
     switch (event) {
     case ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT:
-        start_scan();
+        /* Initial scan params set — start reconnect or wait for explicit call */
+        if (s_registry_count > 0) {
+            ble_keyboard_reconnect_start();
+        } else {
+            ESP_LOGI(TAG, "No paired devices — awaiting pairing mode trigger");
+        }
         break;
 
     case ESP_GAP_BLE_SCAN_RESULT_EVT: {
         struct ble_scan_result_evt_param *r = &param->scan_rst;
         if (r->search_evt != ESP_GAP_SEARCH_INQ_RES_EVT) break;
+        if (!ad_has_hid_uuid(r->ble_adv, r->adv_data_len)) break;
 
-        if (ad_has_hid_uuid(r->ble_adv, r->adv_data_len)) {
-            ESP_LOGI(TAG, "HID device found, connecting...");
-            esp_ble_gap_stop_scanning();
-            s_scanning = false;
-            esp_hidh_dev_open(r->bda, ESP_HID_TRANSPORT_BLE, r->ble_addr_type);
+        if (s_state == BLE_RECONNECT) {
+            if (addr_in_registry(r->bda)) {
+                ESP_LOGI(TAG, "Known device found, connecting");
+                esp_ble_gap_stop_scanning();
+                s_state = BLE_CONNECTING;
+                esp_hidh_dev_open(r->bda, ESP_HID_TRANSPORT_BLE,
+                                  r->ble_addr_type);
+            }
+        } else if (s_state == BLE_PAIRING_SCAN) {
+            /* Add to scan results if not already present */
+            bool dup = false;
+            for (int i = 0; i < s_scan_count; i++) {
+                if (memcmp(s_scan_results[i].addr, r->bda, 6) == 0) {
+                    dup = true; break;
+                }
+            }
+            if (!dup && s_scan_count < STORAGE_BLE_MAX) {
+                ble_device_info_t *d = &s_scan_results[s_scan_count++];
+                memcpy(d->addr, r->bda, 6);
+                d->addr_type = r->ble_addr_type;
+                ad_get_name(r->ble_adv, r->adv_data_len,
+                            d->name, sizeof(d->name));
+                d->last_seen = 0;
+                ESP_LOGI(TAG, "Discovered: '%s'", d->name);
+            }
         }
         break;
     }
 
     case ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT:
-        ESP_LOGI(TAG, "BLE scan stopped");
-        s_scanning = false;
+        ESP_LOGI(TAG, "Scan stopped (state=%d)", (int)s_state);
         break;
 
     default:
@@ -116,15 +219,31 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
         const uint8_t *bda = esp_hidh_dev_bda_get(data->open.dev);
         ESP_LOGI(TAG, "Connected: %02X:%02X:%02X:%02X:%02X:%02X",
                  bda[0], bda[1], bda[2], bda[3], bda[4], bda[5]);
+        memcpy(s_connected_bda, bda, 6);
+        s_state = BLE_CONNECTED;
         esp_ble_set_encryption((uint8_t *)bda, ESP_BLE_SEC_ENCRYPT_MITM);
+
+        /* Save/update device in registry */
+        ble_device_info_t dev = {0};
+        memcpy(dev.addr, bda, 6);
+        /* Find name from scan results if available */
+        for (int i = 0; i < s_scan_count; i++) {
+            if (memcmp(s_scan_results[i].addr, bda, 6) == 0) {
+                dev.addr_type = s_scan_results[i].addr_type;
+                memcpy(dev.name, s_scan_results[i].name, sizeof(dev.name));
+                break;
+            }
+        }
+        if (dev.name[0] == '\0') snprintf(dev.name, sizeof(dev.name), "Unknown HID");
+        storage_ble_save(&dev);
+        storage_ble_list(s_registry, STORAGE_BLE_MAX, &s_registry_count);
         break;
     }
 
     case ESP_HIDH_CLOSE_EVT:
-        ESP_LOGI(TAG, "Keyboard disconnected, restarting scan");
-        if (!s_scanning) {
-            start_scan();
-        }
+        ESP_LOGI(TAG, "Keyboard disconnected, restarting reconnect scan");
+        s_state = BLE_RECONNECT;
+        esp_ble_gap_start_scanning(CONFIG_INPUT_BLE_SCAN_DURATION);
         break;
 
     case ESP_HIDH_INPUT_EVT: {
@@ -133,12 +252,11 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
 
         const uint8_t *report    = data->input.data;
         uint8_t        modifiers = report[0];
-        /* report[1] is reserved; keycodes begin at report[2] */
         uint8_t n = (data->input.length < 8) ? (uint8_t)data->input.length : 8u;
 
         for (uint8_t i = 2; i < n; i++) {
             uint8_t kc = report[i];
-            if (kc == 0x00 || kc == 0x01) continue;  /* no key / rollover */
+            if (kc == 0x00 || kc == 0x01) continue;
 
             uint8_t buf[INPUT_EVENT_MAX_LEN];
             uint8_t len = hid_keymap_translate(kc, modifiers,
@@ -169,11 +287,13 @@ esp_err_t ble_keyboard_backend_init(void)
 {
     esp_err_t ret;
 
-    /* Release Classic BT memory — ESP32-S3 is BLE-only */
+    /* Load existing paired device registry */
+    storage_ble_list(s_registry, STORAGE_BLE_MAX, &s_registry_count);
+    ESP_LOGI(TAG, "Registry: %d known device(s)", s_registry_count);
+
     ret = esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE)
         ESP_LOGW(TAG, "mem_release: %s", esp_err_to_name(ret));
-    }
 
     esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     ret = esp_bt_controller_init(&bt_cfg);
@@ -202,7 +322,6 @@ esp_err_t ble_keyboard_backend_init(void)
         return ret;
     }
 
-    /* Security: Just Works bonding, no I/O capability */
     esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
     esp_ble_io_cap_t   io_cap   = ESP_IO_CAP_NONE;
     uint8_t            key_size = 16;
@@ -226,7 +345,6 @@ esp_err_t ble_keyboard_backend_init(void)
         return ret;
     }
 
-    /* HID host — creates its own event task internally */
     esp_hidh_config_t hidh_cfg = {
         .callback         = hidh_callback,
         .event_stack_size = 4096,
@@ -238,7 +356,7 @@ esp_err_t ble_keyboard_backend_init(void)
         return ret;
     }
 
-    /* Set scan params — GAP fires SCAN_PARAM_SET_COMPLETE, then start_scan() */
+    /* Scan params → triggers SCAN_PARAM_SET_COMPLETE → reconnect or wait */
     esp_ble_scan_params_t scan_params = {
         .scan_type          = BLE_SCAN_TYPE_ACTIVE,
         .own_addr_type      = BLE_ADDR_TYPE_PUBLIC,
@@ -257,9 +375,16 @@ esp_err_t ble_keyboard_backend_init(void)
     return ESP_OK;
 }
 
-#else /* CONFIG_INPUT_BLE || CONFIG_INPUT_AUTO not set */
+#else
 
 #include "input_hal_internal.h"
-esp_err_t ble_keyboard_backend_init(void) { return ESP_OK; }
+#include "ble_keyboard.h"
+esp_err_t   ble_keyboard_backend_init(void)                           { return ESP_OK; }
+ble_state_t ble_keyboard_get_state(void)                              { return BLE_IDLE; }
+void        ble_keyboard_enter_pairing(void)                          {}
+void        ble_keyboard_reconnect_start(void)                        {}
+int         ble_keyboard_get_scan_results(ble_device_info_t *o, int m){ (void)o;(void)m; return 0; }
+void        ble_keyboard_select_device(const uint8_t a[6], uint8_t t) { (void)a;(void)t; }
+void        ble_keyboard_forget_device(const uint8_t a[6])            { (void)a; }
 
-#endif /* CONFIG_INPUT_BLE || CONFIG_INPUT_AUTO */
+#endif
