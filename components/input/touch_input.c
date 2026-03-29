@@ -90,8 +90,8 @@ static void touch_poll_task(void *arg)
                 /* Read first touch point (8 bytes at GT911_POINT0_REG) */
                 uint8_t pt[8] = {0};
                 if (gt911_read_reg(s_gt911_dev, GT911_POINT0_REG, pt, 8) == ESP_OK) {
-                    touch_x     = (uint16_t)((pt[3] << 8) | pt[2]);
-                    touch_y     = (uint16_t)((pt[5] << 8) | pt[4]);
+                    touch_x     = (uint16_t)(((uint16_t)pt[3] << 8) | pt[2]);
+                    touch_y     = (uint16_t)(((uint16_t)pt[5] << 8) | pt[4]);
                     touch_start = now_ms;
                     state       = STATE_TOUCHING;
                     ESP_LOGD(TAG, "touch down x=%u y=%u", touch_x, touch_y);
@@ -186,6 +186,7 @@ esp_err_t touch_input_backend_init(void)
     ret = i2c_master_bus_add_device(bus_handle, &dev_cfg, &s_gt911_dev);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "i2c_master_bus_add_device failed: %s", esp_err_to_name(ret));
+        i2c_del_master_bus(bus_handle);
         return ret;
     }
 
@@ -200,6 +201,8 @@ esp_err_t touch_input_backend_init(void)
     );
     if (xret != pdPASS) {
         ESP_LOGE(TAG, "failed to create touch_poll_task");
+        i2c_master_bus_rm_device(s_gt911_dev);
+        i2c_del_master_bus(bus_handle);
         return ESP_ERR_NO_MEM;
     }
 
