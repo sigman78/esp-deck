@@ -279,3 +279,167 @@ esp_err_t storage_set_key(const char *key_id, const char *pem, size_t len)
     ESP_LOGI(TAG, "Wrote key '%s' (%zu bytes)", key_id, len);
     return ESP_OK;
 }
+
+/* -------------------------------------------------------------------------
+ * BLE device registry — INI persistence
+ * ---------------------------------------------------------------------- */
+
+static void ble_devices_path(char *buf, size_t bufsz)
+{
+    snprintf(buf, bufsz, "%s/ble_devices.ini",
+             storage_platform_mount_point());
+}
+
+/* Format MAC address as "AA:BB:CC:DD:EE:FF" */
+static void fmt_addr(const uint8_t addr[6], char *out)
+{
+    snprintf(out, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
+             addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+}
+
+/* Parse "AA:BB:CC:DD:EE:FF" into addr[6]. Returns 1 on success. */
+static int parse_addr(const char *s, uint8_t addr[6])
+{
+    unsigned a, b, c, d, e, f;
+    if (sscanf(s, "%02X:%02X:%02X:%02X:%02X:%02X",
+               &a, &b, &c, &d, &e, &f) != 6) return 0;
+    addr[0]=(uint8_t)a; addr[1]=(uint8_t)b; addr[2]=(uint8_t)c;
+    addr[3]=(uint8_t)d; addr[4]=(uint8_t)e; addr[5]=(uint8_t)f;
+    return 1;
+}
+
+esp_err_t storage_ble_list(ble_device_info_t *out, int max, int *count)
+{
+    if (!out || !count || max <= 0) return ESP_ERR_INVALID_ARG;
+    *count = 0;
+
+    char path[128];
+    ble_devices_path(path, sizeof(path));
+
+    FILE *f = fopen(path, "r");
+    if (!f) return ESP_OK;   /* absent = no paired devices */
+
+    char line[128];
+    int  cur = -1;
+
+    while (fgets(line, sizeof(line), f)) {
+        rtrim(line);
+        if (line[0] == '\0' || line[0] == ';') continue;
+
+        char section[24];
+        if (parse_section(line, section, sizeof(section))) {
+            if (*count >= max) { cur = -1; continue; }
+            cur = *count;
+            memset(&out[cur], 0, sizeof(ble_device_info_t));
+            if (!parse_addr(section, out[cur].addr)) { cur = -1; continue; }
+            snprintf(out[cur].name, sizeof(out[cur].name), "Unknown");
+            (*count)++;
+            continue;
+        }
+        if (cur < 0) continue;
+
+        char key[64], val[64];
+        if (!parse_kv(line, key, val)) continue;
+
+        if      (strcmp(key, "addr_type") == 0)
+            out[cur].addr_type = (uint8_t)atoi(val);
+        else if (strcmp(key, "name") == 0)
+            snprintf(out[cur].name, sizeof(out[cur].name), "%s", val);
+        else if (strcmp(key, "last_seen") == 0)
+            out[cur].last_seen = (uint32_t)strtoul(val, NULL, 10);
+    }
+
+    fclose(f);
+    ESP_LOGI(TAG, "Loaded %d BLE device(s)", *count);
+    return ESP_OK;
+}
+
+esp_err_t storage_ble_save(const ble_device_info_t *dev)
+{
+    if (!dev) return ESP_ERR_INVALID_ARG;
+
+    ble_device_info_t list[STORAGE_BLE_MAX];
+    int count = 0;
+    storage_ble_list(list, STORAGE_BLE_MAX, &count);
+
+    /* Update existing entry or append */
+    int idx = -1;
+    for (int i = 0; i < count; i++) {
+        if (memcmp(list[i].addr, dev->addr, 6) == 0) { idx = i; break; }
+    }
+    if (idx < 0) {
+        if (count >= STORAGE_BLE_MAX) {
+            ESP_LOGW(TAG, "BLE device list full, dropping oldest");
+            memmove(&list[0], &list[1],
+                    sizeof(ble_device_info_t) * (STORAGE_BLE_MAX - 1));
+            count = STORAGE_BLE_MAX - 1;
+        }
+        idx = count++;
+    }
+    list[idx] = *dev;
+
+    char path[128];
+    ble_devices_path(path, sizeof(path));
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        ESP_LOGE(TAG, "Cannot write '%s': errno=%d", path, errno);
+        return ESP_FAIL;
+    }
+
+    char mac[18];
+    for (int i = 0; i < count; i++) {
+        fmt_addr(list[i].addr, mac);
+        fprintf(f, "[%s]\n", mac);
+        fprintf(f, "addr_type=%u\n", (unsigned)list[i].addr_type);
+        fprintf(f, "name=%s\n", list[i].name);
+        fprintf(f, "last_seen=%lu\n", (unsigned long)list[i].last_seen);
+        fprintf(f, "\n");
+    }
+    fclose(f);
+    ESP_LOGI(TAG, "Saved BLE device %s ('%s')", mac, dev->name);
+    return ESP_OK;
+}
+
+esp_err_t storage_ble_remove(const uint8_t addr[6])
+{
+    ble_device_info_t list[STORAGE_BLE_MAX];
+    int count = 0;
+    storage_ble_list(list, STORAGE_BLE_MAX, &count);
+
+    int found = -1;
+    for (int i = 0; i < count; i++) {
+        if (memcmp(list[i].addr, addr, 6) == 0) { found = i; break; }
+    }
+    if (found < 0) return ESP_OK;   /* not present, not an error */
+
+    memmove(&list[found], &list[found + 1],
+            sizeof(ble_device_info_t) * (count - found - 1));
+    count--;
+
+    char path[128];
+    ble_devices_path(path, sizeof(path));
+    if (count == 0) { remove(path); return ESP_OK; }
+
+    FILE *f = fopen(path, "w");
+    if (!f) return ESP_FAIL;
+    char mac[18];
+    for (int i = 0; i < count; i++) {
+        fmt_addr(list[i].addr, mac);
+        fprintf(f, "[%s]\n", mac);
+        fprintf(f, "addr_type=%u\n", (unsigned)list[i].addr_type);
+        fprintf(f, "name=%s\n", list[i].name);
+        fprintf(f, "last_seen=%lu\n", (unsigned long)list[i].last_seen);
+        fprintf(f, "\n");
+    }
+    fclose(f);
+    return ESP_OK;
+}
+
+esp_err_t storage_ble_clear(void)
+{
+    char path[128];
+    ble_devices_path(path, sizeof(path));
+    remove(path);
+    ESP_LOGI(TAG, "BLE device list cleared");
+    return ESP_OK;
+}
