@@ -12,11 +12,19 @@
 #include <stdbool.h>
 #include "esp_err.h"
 
+/* Event type identifiers */
+#define INPUT_EVENT_KEY        0   /* keyboard byte sequence: buf[0..len-1] */
+#define INPUT_EVENT_TAP        1   /* touch tap: x and y are valid */
+#define INPUT_EVENT_LONG_PRESS 2   /* touch long-press: x and y are valid */
+
 #define INPUT_EVENT_MAX_LEN  8
 
 typedef struct {
-    uint8_t buf[INPUT_EVENT_MAX_LEN];
-    uint8_t len;   /* 0 = empty / timeout */
+    uint8_t  type;                  /* INPUT_EVENT_KEY / TAP / LONG_PRESS   */
+    uint8_t  len;                   /* byte count in buf (KEY events only)  */
+    uint8_t  buf[INPUT_EVENT_MAX_LEN];
+    uint16_t x;                     /* touch X coordinate (touch events)    */
+    uint16_t y;                     /* touch Y coordinate (touch events)    */
 } input_event_t;
 
 /**

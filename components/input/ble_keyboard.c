@@ -145,7 +145,7 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
                                                vterm_app_cursor_keys(), buf);
             if (len == 0) continue;
 
-            input_event_t ev = { .len = len };
+            input_event_t ev = { .type = INPUT_EVENT_KEY, .len = len };
             for (uint8_t j = 0; j < len; j++) ev.buf[j] = buf[j];
             input_hal_post_event(&ev);
         }

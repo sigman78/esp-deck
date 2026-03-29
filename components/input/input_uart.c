@@ -26,7 +26,7 @@ static void uart_input_task(void *arg)
     while (1) {
         int n = usb_serial_jtag_read_bytes(&ch, 1, pdMS_TO_TICKS(10));
         if (n <= 0) continue;
-        input_event_t ev = { .buf = { ch }, .len = 1 };
+        input_event_t ev = { .type = INPUT_EVENT_KEY, .len = 1, .buf = { ch } };
         input_hal_post_event(&ev);
     }
 }
