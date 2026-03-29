@@ -10,6 +10,9 @@
 #include "storage.h"
 #include "vterm.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "esp_log.h"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
@@ -26,6 +29,9 @@ static const char *TAG = "ble_kbd";
 /* ------------------------------------------------------------------ */
 
 static volatile ble_state_t s_state = BLE_IDLE;
+
+/* Protects s_scan_results / s_scan_count between BT task and app task */
+static portMUX_TYPE s_scan_mux = portMUX_INITIALIZER_UNLOCKED;
 
 /* Registry loaded at init — addresses we try to reconnect to */
 static ble_device_info_t s_registry[STORAGE_BLE_MAX];
@@ -46,8 +52,10 @@ ble_state_t ble_keyboard_get_state(void)      { return s_state; }
 
 int ble_keyboard_get_scan_results(ble_device_info_t *out, int max)
 {
+    taskENTER_CRITICAL(&s_scan_mux);
     int n = (s_scan_count < max) ? s_scan_count : max;
     memcpy(out, s_scan_results, n * sizeof(ble_device_info_t));
+    taskEXIT_CRITICAL(&s_scan_mux);
     return n;
 }
 
@@ -176,6 +184,8 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event,
             }
         } else if (s_state == BLE_PAIRING_SCAN) {
             /* Add to scan results if not already present */
+            char discovered_name[64] = {0};
+            taskENTER_CRITICAL(&s_scan_mux);
             bool dup = false;
             for (int i = 0; i < s_scan_count; i++) {
                 if (memcmp(s_scan_results[i].addr, r->bda, 6) == 0) {
@@ -189,8 +199,11 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event,
                 ad_get_name(r->ble_adv, r->adv_data_len,
                             d->name, sizeof(d->name));
                 d->last_seen = 0;
-                ESP_LOGI(TAG, "Discovered: '%s'", d->name);
+                memcpy(discovered_name, d->name, sizeof(discovered_name));
             }
+            taskEXIT_CRITICAL(&s_scan_mux);
+            if (discovered_name[0] != '\0')
+                ESP_LOGI(TAG, "Discovered: '%s'", discovered_name);
         }
         break;
     }
@@ -226,7 +239,20 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
 
     switch (event) {
     case ESP_HIDH_OPEN_EVT: {
+        if (data->open.status != ESP_OK) {
+            ESP_LOGW(TAG, "HIDH open failed (status=0x%x), returning to reconnect",
+                     data->open.status);
+            s_state = BLE_RECONNECT;
+            esp_ble_gap_start_scanning(CONFIG_INPUT_BLE_SCAN_DURATION);
+            break;
+        }
         const uint8_t *bda = esp_hidh_dev_bda_get(data->open.dev);
+        if (!bda) {
+            ESP_LOGE(TAG, "HIDH open: bda_get returned NULL");
+            s_state = BLE_RECONNECT;
+            esp_ble_gap_start_scanning(CONFIG_INPUT_BLE_SCAN_DURATION);
+            break;
+        }
         ESP_LOGI(TAG, "Connected: %02X:%02X:%02X:%02X:%02X:%02X",
                  bda[0], bda[1], bda[2], bda[3], bda[4], bda[5]);
         memcpy(s_connected_bda, bda, 6);
@@ -253,6 +279,7 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
     case ESP_HIDH_CLOSE_EVT:
         ESP_LOGI(TAG, "Keyboard disconnected, restarting reconnect scan");
         s_state = BLE_RECONNECT;
+        esp_ble_gap_stop_scanning();
         esp_ble_gap_start_scanning(CONFIG_INPUT_BLE_SCAN_DURATION);
         break;
 
