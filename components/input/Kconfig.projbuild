@@ -26,4 +26,23 @@ menu "Input HAL"
             How long each scan window lasts before giving up and waiting
             for the next reconnect attempt.
 
+    config INPUT_TOUCH
+        bool "Enable GT911 touch input backend"
+        default y
+
+    config INPUT_TOUCH_I2C_PORT
+        int "I2C port number for GT911"
+        default 0
+        depends on INPUT_TOUCH
+
+    config INPUT_TOUCH_SDA_PIN
+        int "SDA GPIO pin for GT911"
+        default 19
+        depends on INPUT_TOUCH
+
+    config INPUT_TOUCH_SCL_PIN
+        int "SCL GPIO pin for GT911"
+        default 20
+        depends on INPUT_TOUCH
+
 endmenu

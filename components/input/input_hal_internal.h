@@ -20,3 +20,4 @@ void input_hal_post_event(const input_event_t *ev);
  */
 esp_err_t ble_keyboard_backend_init(void);
 esp_err_t input_uart_backend_init(void);
+esp_err_t touch_input_backend_init(void);

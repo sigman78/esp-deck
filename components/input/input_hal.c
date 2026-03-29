@@ -50,6 +50,14 @@ esp_err_t input_hal_init(void)
 #endif
     }
 
+    r = touch_input_backend_init();
+    if (r != ESP_OK) {
+        ESP_LOGE(TAG, "touch input init failed: %s", esp_err_to_name(r));
+#if defined(CONFIG_INPUT_TOUCH)
+        ret = r;   /* fatal in touch-only mode */
+#endif
+    }
+
     return ret;
 }
 
