@@ -153,16 +153,12 @@ esp_err_t pairing_overlay_run(void)
 
             if (len >= 3 && b[0] == 0x1B && b[1] == '[' && b[2] == 'A') {
                 /* Up arrow */
-                if (sel > 0) {
-                    sel--;
-                    render_overlay(devs, ndevs, sel);
-                }
+                if (sel > 0) sel--;
+                render_overlay(devs, ndevs, sel);
             } else if (len >= 3 && b[0] == 0x1B && b[1] == '[' && b[2] == 'B') {
                 /* Down arrow */
-                if (ndevs > 0 && sel < ndevs - 1) {
-                    sel++;
-                    render_overlay(devs, ndevs, sel);
-                }
+                if (ndevs > 0 && sel < ndevs - 1) sel++;
+                render_overlay(devs, ndevs, sel);
             } else if (len >= 1 && (b[0] == '\r' || b[0] == '\n')) {
                 /* Enter — select device */
                 if (ndevs > 0) {
