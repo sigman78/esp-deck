@@ -5,6 +5,7 @@ idf_component_register(
         "ble_keyboard.c"
         "input_uart.c"
         "touch_input.c"
+        "pairing_overlay.c"
     INCLUDE_DIRS
         "include"
     PRIV_INCLUDE_DIRS
