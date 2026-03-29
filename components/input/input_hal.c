@@ -25,6 +25,8 @@ esp_err_t input_hal_init(void)
 {
     if (s_queue) return ESP_OK;  /* already initialised */
 
+    ESP_LOGI(TAG, "input HAL init");
+
     s_queue = xQueueCreate(INPUT_QUEUE_LEN, sizeof(input_event_t));
     if (!s_queue) {
         ESP_LOGE(TAG, "failed to create input queue");
