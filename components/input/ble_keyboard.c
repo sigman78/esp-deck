@@ -1,5 +1,5 @@
 /*
- * BLE HID keyboard backend — 5-state machine
+ * BLE HID keyboard backend — 5-state machine (NimBLE)
  */
 
 #if defined(CONFIG_INPUT_BLE) || defined(CONFIG_INPUT_AUTO)
@@ -14,11 +14,13 @@
 #include "freertos/task.h"
 
 #include "esp_log.h"
-#include "esp_bt.h"
-#include "esp_bt_main.h"
-#include "esp_gap_ble_api.h"
-#include "esp_hid_gap.h"
 #include "esp_hidh.h"
+
+#include "nimble/nimble_port.h"
+#include "nimble/nimble_port_freertos.h"
+#include "host/ble_hs.h"
+#include "host/ble_gap.h"
+#include "store/config/ble_store_config.h"
 
 #include <string.h>
 
@@ -28,12 +30,13 @@ static const char *TAG = "ble_kbd";
 /*  State                                                              */
 /* ------------------------------------------------------------------ */
 
-static volatile ble_state_t s_state = BLE_IDLE;
+static volatile ble_state_t s_state          = BLE_IDLE;
+static volatile bool        s_nimble_synced  = false;
 
-/* Protects s_scan_results / s_scan_count between BT task and app task */
+/* Protects s_scan_results / s_scan_count between NimBLE task and app task */
 static portMUX_TYPE s_scan_mux = portMUX_INITIALIZER_UNLOCKED;
 
-/* Registry loaded at init — addresses we try to reconnect to */
+/* Registry — addresses we auto-reconnect to on boot */
 static ble_device_info_t s_registry[STORAGE_BLE_MAX];
 static int               s_registry_count = 0;
 
@@ -41,80 +44,48 @@ static int               s_registry_count = 0;
 static ble_device_info_t s_scan_results[STORAGE_BLE_MAX];
 static int               s_scan_count = 0;
 
-/* BDA of currently connected device (valid in BLE_CONNECTED) */
+/* BDA of connected device (NimBLE little-endian: val[0] = LSB) */
 static uint8_t s_connected_bda[6];
 
 /* ------------------------------------------------------------------ */
-/*  Public API                                                         */
+/*  Forward declarations                                               */
 /* ------------------------------------------------------------------ */
 
-ble_state_t ble_keyboard_get_state(void)      { return s_state; }
+static int gap_event_cb(struct ble_gap_event *event, void *arg);
+static void start_scan(int32_t duration_ms);
 
-int ble_keyboard_get_scan_results(ble_device_info_t *out, int max)
+/* ------------------------------------------------------------------ */
+/*  Helpers                                                            */
+/* ------------------------------------------------------------------ */
+
+/* NimBLE stores addresses little-endian; reverse for human-readable log */
+static void log_addr(const char *prefix, const uint8_t addr[6])
 {
-    taskENTER_CRITICAL(&s_scan_mux);
-    int n = (s_scan_count < max) ? s_scan_count : max;
-    memcpy(out, s_scan_results, n * sizeof(ble_device_info_t));
-    taskEXIT_CRITICAL(&s_scan_mux);
-    return n;
+    ESP_LOGI(TAG, "%s %02X:%02X:%02X:%02X:%02X:%02X",
+             prefix,
+             addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]);
 }
 
-void ble_keyboard_enter_pairing(void)
+static bool addr_in_registry(const uint8_t addr[6])
 {
-    ESP_LOGI(TAG, "Entering pairing mode");
-    esp_ble_gap_stop_scanning();
-    s_scan_count = 0;
-    s_state = BLE_PAIRING_SCAN;
-    esp_ble_gap_start_scanning(CONFIG_INPUT_BLE_SCAN_DURATION);
-}
-
-void ble_keyboard_reconnect_start(void)
-{
-    if (s_state == BLE_CONNECTED) return;
-    if (s_registry_count == 0)   return;
-    ESP_LOGI(TAG, "Reconnect scan for %d known device(s)", s_registry_count);
-    s_state = BLE_RECONNECT;
-    esp_ble_gap_start_scanning(CONFIG_INPUT_BLE_SCAN_DURATION);
-}
-
-void ble_keyboard_select_device(const uint8_t addr[6], uint8_t addr_type)
-{
-    char mac[18];
-    snprintf(mac, sizeof(mac), "%02X:%02X:%02X:%02X:%02X:%02X",
-             addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
-    ESP_LOGI(TAG, "Connecting to selected device %s", mac);
-    esp_ble_gap_stop_scanning();
-    s_state = BLE_CONNECTING;
-    esp_hidh_dev_open((uint8_t *)addr, ESP_HID_TRANSPORT_BLE, addr_type);
-}
-
-void ble_keyboard_forget_device(const uint8_t addr[6])
-{
-    storage_ble_remove(addr);
-    /* Reload registry */
-    storage_ble_list(s_registry, STORAGE_BLE_MAX, &s_registry_count);
-    if (s_state == BLE_CONNECTED &&
-        memcmp(s_connected_bda, addr, 6) == 0) {
-        /* TODO: disconnect active connection */
-        ESP_LOGW(TAG, "forget_device: disconnect not yet implemented");
+    for (int i = 0; i < s_registry_count; i++) {
+        if (memcmp(s_registry[i].addr, addr, 6) == 0) return true;
     }
+    return false;
 }
 
-/* ------------------------------------------------------------------ */
-/*  GAP / scan helpers                                                 */
-/* ------------------------------------------------------------------ */
-
-static bool ad_has_hid_uuid(uint8_t *adv_data, uint8_t adv_data_len)
+/* AD structure parsers — raw adv data, stack-agnostic */
+static bool ad_has_hid_uuid(const uint8_t *adv_data, uint8_t adv_len)
 {
-    uint8_t *p   = adv_data;
-    uint8_t *end = adv_data + adv_data_len;
+    const uint8_t *p   = adv_data;
+    const uint8_t *end = adv_data + adv_len;
     while (p < end) {
         uint8_t len  = p[0];
         if (len == 0 || p + 1 + len > end) break;
         uint8_t type = p[1];
         if (type == 0x02 || type == 0x03) {
-            uint8_t *uuids = p + 2;
-            uint8_t  count = (len - 1) / 2;
+            const uint8_t *uuids = p + 2;
+            uint8_t count = (len - 1) / 2;
             for (uint8_t i = 0; i < count; i++) {
                 uint16_t uuid = (uint16_t)(uuids[2*i]) |
                                 ((uint16_t)(uuids[2*i+1]) << 8);
@@ -126,12 +97,11 @@ static bool ad_has_hid_uuid(uint8_t *adv_data, uint8_t adv_data_len)
     return false;
 }
 
-/* Extract advertised name from AD structures into dst[dstsz] */
-static void ad_get_name(uint8_t *adv, uint8_t adv_len,
+static void ad_get_name(const uint8_t *adv, uint8_t adv_len,
                         char *dst, size_t dstsz)
 {
-    uint8_t *p   = adv;
-    uint8_t *end = adv + adv_len;
+    const uint8_t *p   = adv;
+    const uint8_t *end = adv + adv_len;
     while (p < end) {
         uint8_t len  = p[0];
         if (len == 0 || p + 1 + len > end) break;
@@ -148,58 +118,119 @@ static void ad_get_name(uint8_t *adv, uint8_t adv_len,
     snprintf(dst, dstsz, "Unknown");
 }
 
-static bool addr_in_registry(const uint8_t addr[6])
+/* ------------------------------------------------------------------ */
+/*  Public API                                                         */
+/* ------------------------------------------------------------------ */
+
+ble_state_t ble_keyboard_get_state(void) { return s_state; }
+
+int ble_keyboard_get_scan_results(ble_device_info_t *out, int max)
 {
-    for (int i = 0; i < s_registry_count; i++) {
-        if (memcmp(s_registry[i].addr, addr, 6) == 0) return true;
-    }
-    return false;
+    taskENTER_CRITICAL(&s_scan_mux);
+    int n = (s_scan_count < max) ? s_scan_count : max;
+    memcpy(out, s_scan_results, n * sizeof(ble_device_info_t));
+    taskEXIT_CRITICAL(&s_scan_mux);
+    return n;
 }
 
-static void gap_event_handler(esp_gap_ble_cb_event_t event,
-                              esp_ble_gap_cb_param_t *param)
+void ble_keyboard_enter_pairing(void)
 {
-    switch (event) {
-    case ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT:
-        /* Initial scan params set — start reconnect or wait for explicit call */
-        if (s_registry_count > 0) {
-            ble_keyboard_reconnect_start();
-        } else {
-            ESP_LOGI(TAG, "No paired devices — awaiting pairing mode trigger");
-        }
-        break;
+    ESP_LOGI(TAG, "Entering pairing mode");
+    ble_gap_disc_cancel();
+    taskENTER_CRITICAL(&s_scan_mux);
+    s_scan_count = 0;
+    taskEXIT_CRITICAL(&s_scan_mux);
+    s_state = BLE_PAIRING_SCAN;
+    start_scan(CONFIG_INPUT_BLE_SCAN_DURATION * 1000);
+}
 
-    case ESP_GAP_BLE_SCAN_RESULT_EVT: {
-        struct ble_scan_result_evt_param *r = &param->scan_rst;
-        if (r->search_evt != ESP_GAP_SEARCH_INQ_RES_EVT) break;
-        if (!ad_has_hid_uuid(r->ble_adv, r->adv_data_len)) break;
+void ble_keyboard_reconnect_start(void)
+{
+    if (s_state == BLE_CONNECTED) return;
+    if (s_registry_count == 0)   return;
+    if (!s_nimble_synced)        return;   /* on_sync will start scan */
+    ESP_LOGI(TAG, "Reconnect scan for %d known device(s)", s_registry_count);
+    s_state = BLE_RECONNECT;
+    start_scan(CONFIG_INPUT_BLE_SCAN_DURATION * 1000);
+}
+
+void ble_keyboard_select_device(const uint8_t addr[6], uint8_t addr_type)
+{
+    log_addr("Connecting to", addr);
+    ble_gap_disc_cancel();
+    s_state = BLE_CONNECTING;
+    esp_hidh_dev_open((uint8_t *)addr, ESP_HID_TRANSPORT_BLE, addr_type);
+}
+
+void ble_keyboard_forget_device(const uint8_t addr[6])
+{
+    storage_ble_remove(addr);
+    storage_ble_list(s_registry, STORAGE_BLE_MAX, &s_registry_count);
+    if (s_state == BLE_CONNECTED && memcmp(s_connected_bda, addr, 6) == 0) {
+        /* TODO: disconnect active connection */
+        ESP_LOGW(TAG, "forget_device: disconnect not yet implemented");
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Scan helper                                                        */
+/* ------------------------------------------------------------------ */
+
+static void start_scan(int32_t duration_ms)
+{
+    struct ble_gap_disc_params p = {
+        .itvl              = 0x50,
+        .window            = 0x30,
+        .filter_policy     = BLE_HCI_SCAN_FILT_NO_WL,
+        .limited           = 0,
+        .passive           = 0,   /* active scan — fetch device names */
+        .filter_duplicates = 0,
+    };
+    int rc = ble_gap_disc(BLE_OWN_ADDR_PUBLIC, duration_ms, &p,
+                          gap_event_cb, NULL);
+    if (rc != 0 && rc != BLE_HS_EALREADY) {
+        ESP_LOGW(TAG, "ble_gap_disc failed: %d", rc);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/*  NimBLE GAP event callback                                         */
+/* ------------------------------------------------------------------ */
+
+static int gap_event_cb(struct ble_gap_event *event, void *arg)
+{
+    (void)arg;
+
+    switch (event->type) {
+    case BLE_GAP_EVENT_DISC: {
+        struct ble_gap_disc_desc *d = &event->disc;
+        if (!ad_has_hid_uuid(d->data, d->length_data)) break;
 
         if (s_state == BLE_RECONNECT) {
-            if (addr_in_registry(r->bda)) {
-                ESP_LOGI(TAG, "Known device found, connecting");
-                esp_ble_gap_stop_scanning();
+            if (addr_in_registry(d->addr.val)) {
+                log_addr("Known device found, connecting", d->addr.val);
+                ble_gap_disc_cancel();
                 s_state = BLE_CONNECTING;
-                esp_hidh_dev_open(r->bda, ESP_HID_TRANSPORT_BLE,
-                                  r->ble_addr_type);
+                esp_hidh_dev_open((uint8_t *)d->addr.val,
+                                  ESP_HID_TRANSPORT_BLE, d->addr.type);
             }
         } else if (s_state == BLE_PAIRING_SCAN) {
-            /* Add to scan results if not already present */
             char discovered_name[64] = {0};
             taskENTER_CRITICAL(&s_scan_mux);
             bool dup = false;
             for (int i = 0; i < s_scan_count; i++) {
-                if (memcmp(s_scan_results[i].addr, r->bda, 6) == 0) {
+                if (memcmp(s_scan_results[i].addr, d->addr.val, 6) == 0) {
                     dup = true; break;
                 }
             }
             if (!dup && s_scan_count < STORAGE_BLE_MAX) {
-                ble_device_info_t *d = &s_scan_results[s_scan_count++];
-                memcpy(d->addr, r->bda, 6);
-                d->addr_type = r->ble_addr_type;
-                ad_get_name(r->ble_adv, r->adv_data_len,
-                            d->name, sizeof(d->name));
-                d->last_seen = 0;
-                memcpy(discovered_name, d->name, sizeof(discovered_name));
+                ble_device_info_t *dev = &s_scan_results[s_scan_count++];
+                memcpy(dev->addr, d->addr.val, 6);
+                dev->addr_type = d->addr.type;
+                ad_get_name(d->data, d->length_data,
+                            dev->name, sizeof(dev->name));
+                dev->last_seen = 0;
+                memcpy(discovered_name, dev->name, sizeof(discovered_name));
             }
             taskEXIT_CRITICAL(&s_scan_mux);
             if (discovered_name[0] != '\0')
@@ -208,16 +239,20 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event,
         break;
     }
 
-    case ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT:
-        ESP_LOGI(TAG, "Scan stopped (state=%d)", (int)s_state);
+    case BLE_GAP_EVENT_DISC_COMPLETE:
+        ESP_LOGI(TAG, "Scan complete (state=%d)", (int)s_state);
+        /* Reconnect scan expired without finding device — restart */
+        if (s_state == BLE_RECONNECT) {
+            start_scan(CONFIG_INPUT_BLE_SCAN_DURATION * 1000);
+        }
         break;
 
-    case ESP_GAP_BLE_AUTH_CMPL_EVT:
-        if (param->ble_security.auth_cmpl.success) {
-            ESP_LOGI(TAG, "Auth complete: success");
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        if (event->enc_change.status == 0) {
+            ESP_LOGI(TAG, "Encryption established");
         } else {
-            ESP_LOGW(TAG, "Auth complete: failed (reason=0x%02x)",
-                     param->ble_security.auth_cmpl.fail_reason);
+            ESP_LOGW(TAG, "Encryption failed (status=%d)",
+                     event->enc_change.status);
             s_state = BLE_RECONNECT;
         }
         break;
@@ -225,15 +260,18 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event,
     default:
         break;
     }
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */
-/*  HID host callback                                                  */
+/*  HIDH callback (stack-agnostic)                                    */
 /* ------------------------------------------------------------------ */
 
 static void hidh_callback(void *handler_args, esp_event_base_t base,
                           int32_t id, void *event_data)
 {
+    (void)handler_args;
+    (void)base;
     esp_hidh_event_t       event = (esp_hidh_event_t)id;
     esp_hidh_event_data_t *data  = (esp_hidh_event_data_t *)event_data;
 
@@ -243,26 +281,23 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
             ESP_LOGW(TAG, "HIDH open failed (status=0x%x), returning to reconnect",
                      data->open.status);
             s_state = BLE_RECONNECT;
-            esp_ble_gap_start_scanning(CONFIG_INPUT_BLE_SCAN_DURATION);
+            start_scan(CONFIG_INPUT_BLE_SCAN_DURATION * 1000);
             break;
         }
         const uint8_t *bda = esp_hidh_dev_bda_get(data->open.dev);
         if (!bda) {
             ESP_LOGE(TAG, "HIDH open: bda_get returned NULL");
             s_state = BLE_RECONNECT;
-            esp_ble_gap_start_scanning(CONFIG_INPUT_BLE_SCAN_DURATION);
+            start_scan(CONFIG_INPUT_BLE_SCAN_DURATION * 1000);
             break;
         }
-        ESP_LOGI(TAG, "Connected: %02X:%02X:%02X:%02X:%02X:%02X",
-                 bda[0], bda[1], bda[2], bda[3], bda[4], bda[5]);
+        log_addr("Connected:", bda);
         memcpy(s_connected_bda, bda, 6);
         s_state = BLE_CONNECTED;
-        esp_ble_set_encryption((uint8_t *)bda, ESP_BLE_SEC_ENCRYPT_MITM);
 
         /* Save/update device in registry */
         ble_device_info_t dev = {0};
         memcpy(dev.addr, bda, 6);
-        /* Find name from scan results if available */
         for (int i = 0; i < s_scan_count; i++) {
             if (memcmp(s_scan_results[i].addr, bda, 6) == 0) {
                 dev.addr_type = s_scan_results[i].addr_type;
@@ -270,7 +305,8 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
                 break;
             }
         }
-        if (dev.name[0] == '\0') snprintf(dev.name, sizeof(dev.name), "Unknown HID");
+        if (dev.name[0] == '\0')
+            snprintf(dev.name, sizeof(dev.name), "Unknown HID");
         storage_ble_save(&dev);
         storage_ble_list(s_registry, STORAGE_BLE_MAX, &s_registry_count);
         break;
@@ -279,8 +315,8 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
     case ESP_HIDH_CLOSE_EVT:
         ESP_LOGI(TAG, "Keyboard disconnected, restarting reconnect scan");
         s_state = BLE_RECONNECT;
-        esp_ble_gap_stop_scanning();
-        esp_ble_gap_start_scanning(CONFIG_INPUT_BLE_SCAN_DURATION);
+        ble_gap_disc_cancel();
+        start_scan(CONFIG_INPUT_BLE_SCAN_DURATION * 1000);
         break;
 
     case ESP_HIDH_INPUT_EVT: {
@@ -293,7 +329,7 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
 
         for (uint8_t i = 2; i < n; i++) {
             uint8_t kc = report[i];
-            if (kc == 0x00 || kc == 0x01) continue;
+            if (kc == 0x00 || kc == 0x01) continue;   /* 0x01 = ErrorRollOver */
 
             uint8_t buf[INPUT_EVENT_MAX_LEN];
             uint8_t len = hid_keymap_translate(kc, modifiers,
@@ -317,6 +353,39 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
 }
 
 /* ------------------------------------------------------------------ */
+/*  NimBLE host task + sync/reset callbacks                           */
+/* ------------------------------------------------------------------ */
+
+static void on_sync(void)
+{
+    ble_hs_util_ensure_addr(0);
+    s_nimble_synced = true;
+    ESP_LOGI(TAG, "NimBLE synced");
+    if (s_registry_count > 0) {
+        ESP_LOGI(TAG, "Auto-reconnect: %d device(s) in registry",
+                 s_registry_count);
+        s_state = BLE_RECONNECT;
+        start_scan(CONFIG_INPUT_BLE_SCAN_DURATION * 1000);
+    } else {
+        ESP_LOGI(TAG, "No paired devices — awaiting pairing trigger");
+    }
+}
+
+static void on_reset(int reason)
+{
+    ESP_LOGW(TAG, "NimBLE reset (reason=%d)", reason);
+    s_state        = BLE_IDLE;
+    s_nimble_synced = false;
+}
+
+static void nimble_host_task(void *param)
+{
+    (void)param;
+    nimble_port_run();   /* blocks until nimble_port_stop() */
+    nimble_port_freertos_deinit();
+}
+
+/* ------------------------------------------------------------------ */
 /*  Backend init                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -324,63 +393,27 @@ esp_err_t ble_keyboard_backend_init(void)
 {
     esp_err_t ret;
 
-    /* Load existing paired device registry */
     storage_ble_list(s_registry, STORAGE_BLE_MAX, &s_registry_count);
     ESP_LOGI(TAG, "Registry: %d known device(s)", s_registry_count);
 
-    ret = esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE)
-        ESP_LOGW(TAG, "mem_release: %s", esp_err_to_name(ret));
-
-    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-    ret = esp_bt_controller_init(&bt_cfg);
-    if (ret == ESP_ERR_INVALID_STATE) {
-        ESP_LOGW(TAG, "BT controller already initialised");
-    } else if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "bt_controller_init: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    ret = esp_bt_controller_enable(ESP_BT_MODE_BLE);
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "bt_controller_enable: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    ret = esp_bluedroid_init();
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "bluedroid_init: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    ret = esp_bluedroid_enable();
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        ESP_LOGE(TAG, "bluedroid_enable: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    esp_ble_auth_req_t auth_req = ESP_LE_AUTH_REQ_SC_MITM_BOND;
-    esp_ble_io_cap_t   io_cap   = ESP_IO_CAP_NONE;
-    uint8_t            key_size = 16;
-    uint8_t            init_key = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
-    uint8_t            rsp_key  = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
-
-    esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE,
-                                   &auth_req, sizeof(auth_req));
-    esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE,
-                                   &io_cap,   sizeof(io_cap));
-    esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE,
-                                   &key_size, sizeof(key_size));
-    esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY,
-                                   &init_key, sizeof(init_key));
-    esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY,
-                                   &rsp_key,  sizeof(rsp_key));
-
-    ret = esp_ble_gap_register_callback(gap_event_handler);
+    ret = nimble_port_init();
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "gap_register_callback: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "nimble_port_init: %s", esp_err_to_name(ret));
         return ret;
     }
+
+    /* Security manager: bonding + MITM + Secure Connections, no display/keyboard */
+    ble_hs_cfg.sm_bonding       = 1;
+    ble_hs_cfg.sm_mitm          = 1;
+    ble_hs_cfg.sm_sc            = 1;
+    ble_hs_cfg.sm_io_cap        = BLE_SM_IO_CAP_NO_IO;
+    ble_hs_cfg.sm_our_key_dist   = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+    ble_hs_cfg.sync_cb           = on_sync;
+    ble_hs_cfg.reset_cb          = on_reset;
+
+    /* Persist bonding keys in NVS */
+    ble_store_config_init();
 
     esp_hidh_config_t hidh_cfg = {
         .callback         = hidh_callback,
@@ -393,22 +426,9 @@ esp_err_t ble_keyboard_backend_init(void)
         return ret;
     }
 
-    /* Scan params → triggers SCAN_PARAM_SET_COMPLETE → reconnect or wait */
-    esp_ble_scan_params_t scan_params = {
-        .scan_type          = BLE_SCAN_TYPE_ACTIVE,
-        .own_addr_type      = BLE_ADDR_TYPE_PUBLIC,
-        .scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL,
-        .scan_interval      = 0x50,
-        .scan_window        = 0x30,
-        .scan_duplicate     = BLE_SCAN_DUPLICATE_DISABLE,
-    };
-    ret = esp_ble_gap_set_scan_params(&scan_params);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "set_scan_params: %s", esp_err_to_name(ret));
-        return ret;
-    }
+    nimble_port_freertos_init(nimble_host_task);
 
-    ESP_LOGI(TAG, "BLE keyboard backend initialised");
+    ESP_LOGI(TAG, "BLE keyboard backend initialised (NimBLE)");
     return ESP_OK;
 }
 
@@ -416,12 +436,12 @@ esp_err_t ble_keyboard_backend_init(void)
 
 #include "input_hal_internal.h"
 #include "ble_keyboard.h"
-esp_err_t   ble_keyboard_backend_init(void)                           { return ESP_OK; }
-ble_state_t ble_keyboard_get_state(void)                              { return BLE_IDLE; }
-void        ble_keyboard_enter_pairing(void)                          {}
-void        ble_keyboard_reconnect_start(void)                        {}
-int         ble_keyboard_get_scan_results(ble_device_info_t *o, int m){ (void)o;(void)m; return 0; }
-void        ble_keyboard_select_device(const uint8_t a[6], uint8_t t) { (void)a;(void)t; }
-void        ble_keyboard_forget_device(const uint8_t a[6])            { (void)a; }
+esp_err_t   ble_keyboard_backend_init(void)                            { return ESP_OK; }
+ble_state_t ble_keyboard_get_state(void)                               { return BLE_IDLE; }
+void        ble_keyboard_enter_pairing(void)                           {}
+void        ble_keyboard_reconnect_start(void)                         {}
+int         ble_keyboard_get_scan_results(ble_device_info_t *o, int m) { (void)o; (void)m; return 0; }
+void        ble_keyboard_select_device(const uint8_t a[6], uint8_t t)  { (void)a; (void)t; }
+void        ble_keyboard_forget_device(const uint8_t a[6])             { (void)a; }
 
 #endif
