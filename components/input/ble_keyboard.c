@@ -199,6 +199,16 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event,
         ESP_LOGI(TAG, "Scan stopped (state=%d)", (int)s_state);
         break;
 
+    case ESP_GAP_BLE_AUTH_CMPL_EVT:
+        if (param->ble_security.auth_cmpl.success) {
+            ESP_LOGI(TAG, "Auth complete: success");
+        } else {
+            ESP_LOGW(TAG, "Auth complete: failed (reason=0x%02x)",
+                     param->ble_security.auth_cmpl.fail_reason);
+            s_state = BLE_RECONNECT;
+        }
+        break;
+
     default:
         break;
     }
