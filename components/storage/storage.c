@@ -387,9 +387,11 @@ esp_err_t storage_ble_save(const ble_device_info_t *dev)
     }
 
     char mac[18];
+    fmt_addr(dev->addr, mac);   /* capture saved device's MAC before write loop */
     for (int i = 0; i < count; i++) {
-        fmt_addr(list[i].addr, mac);
-        fprintf(f, "[%s]\n", mac);
+        char entry_mac[18];
+        fmt_addr(list[i].addr, entry_mac);
+        fprintf(f, "[%s]\n", entry_mac);
         fprintf(f, "addr_type=%u\n", (unsigned)list[i].addr_type);
         fprintf(f, "name=%s\n", list[i].name);
         fprintf(f, "last_seen=%lu\n", (unsigned long)list[i].last_seen);
@@ -421,7 +423,10 @@ esp_err_t storage_ble_remove(const uint8_t addr[6])
     if (count == 0) { remove(path); return ESP_OK; }
 
     FILE *f = fopen(path, "w");
-    if (!f) return ESP_FAIL;
+    if (!f) {
+        ESP_LOGE(TAG, "Cannot write '%s': errno=%d", path, errno);
+        return ESP_FAIL;
+    }
     char mac[18];
     for (int i = 0; i < count; i++) {
         fmt_addr(list[i].addr, mac);
