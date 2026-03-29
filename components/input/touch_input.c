@@ -11,6 +11,8 @@
 #include "input_hal_internal.h"
 #include "esp_log.h"
 #include "driver/i2c_master.h"
+#include "driver/gpio.h"
+#include "esp_rom_sys.h"
 #include <string.h>
 
 static const char *TAG = "touch_input";
@@ -28,6 +30,16 @@ static const char *TAG = "touch_input";
 
 /* Poll interval (ms) */
 #define POLL_INTERVAL_MS    50
+
+/* Waveshare Touch-LCD-7 IO expander addresses and reset values */
+#define IOEXP_ADDR_24       0x24
+#define IOEXP_ADDR_38       0x38
+#define IOEXP_24_INIT       0x01
+#define IOEXP_38_ASSERT     0x2C   /* RST asserted */
+#define IOEXP_38_DEASSERT   0x2E   /* RST released */
+#define RESET_ASSERT_US     (100 * 1000)
+#define RESET_GPIO_LOW_US   (100 * 1000)
+#define RESET_HOLD_US       (200 * 1000)
 
 /* Touch state machine states */
 typedef enum {
@@ -156,6 +168,90 @@ static void touch_poll_task(void *arg)
 }
 
 /* ------------------------------------------------------------------ */
+/* Waveshare hardware reset sequence                                    */
+/* ------------------------------------------------------------------ */
+
+#ifdef CONFIG_INPUT_TOUCH_WAVESHARE_RESET
+static esp_err_t gt911_waveshare_reset(i2c_master_bus_handle_t bus)
+{
+    esp_err_t ret;
+
+    /* Configure GPIO as output, drive HIGH before sequence */
+    gpio_config_t io_cfg = {
+        .pin_bit_mask = 1ULL << CONFIG_INPUT_TOUCH_RESET_GPIO,
+        .mode         = GPIO_MODE_OUTPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    ret = gpio_config(&io_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "gpio_config failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    gpio_set_level(CONFIG_INPUT_TOUCH_RESET_GPIO, 1);
+
+    /* IO expander 0x24 — write 0x01 */
+    i2c_master_dev_handle_t iox24 = NULL;
+    i2c_device_config_t cfg24 = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address  = IOEXP_ADDR_24,
+        .scl_speed_hz    = 400000,
+    };
+    ret = i2c_master_bus_add_device(bus, &cfg24, &iox24);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "add ioexp 0x24 failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    uint8_t cmd = IOEXP_24_INIT;
+    ret = i2c_master_transmit(iox24, &cmd, 1, 100);
+    i2c_master_bus_rm_device(iox24);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ioexp 0x24 write failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    /* IO expander 0x38 — assert reset (0x2C) */
+    i2c_master_dev_handle_t iox38 = NULL;
+    i2c_device_config_t cfg38 = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address  = IOEXP_ADDR_38,
+        .scl_speed_hz    = 400000,
+    };
+    ret = i2c_master_bus_add_device(bus, &cfg38, &iox38);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "add ioexp 0x38 failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    cmd = IOEXP_38_ASSERT;
+    ret = i2c_master_transmit(iox38, &cmd, 1, 100);
+    if (ret != ESP_OK) {
+        i2c_master_bus_rm_device(iox38);
+        ESP_LOGE(TAG, "ioexp 0x38 assert failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    esp_rom_delay_us(RESET_ASSERT_US);
+
+    /* GPIO LOW */
+    gpio_set_level(CONFIG_INPUT_TOUCH_RESET_GPIO, 0);
+    esp_rom_delay_us(RESET_GPIO_LOW_US);
+
+    /* IO expander 0x38 — deassert reset (0x2E) */
+    cmd = IOEXP_38_DEASSERT;
+    ret = i2c_master_transmit(iox38, &cmd, 1, 100);
+    i2c_master_bus_rm_device(iox38);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ioexp 0x38 deassert failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    esp_rom_delay_us(RESET_HOLD_US);
+
+    ESP_LOGI(TAG, "GT911 hardware reset complete");
+    return ESP_OK;
+}
+#endif /* CONFIG_INPUT_TOUCH_WAVESHARE_RESET */
+
+/* ------------------------------------------------------------------ */
 /* Init                                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -176,6 +272,15 @@ esp_err_t touch_input_backend_init(void)
         ESP_LOGE(TAG, "i2c_new_master_bus failed: %s", esp_err_to_name(ret));
         return ret;
     }
+
+#ifdef CONFIG_INPUT_TOUCH_WAVESHARE_RESET
+    ret = gt911_waveshare_reset(bus_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "GT911 reset failed: %s", esp_err_to_name(ret));
+        i2c_del_master_bus(bus_handle);
+        return ret;
+    }
+#endif
 
     i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
@@ -220,5 +325,6 @@ esp_err_t touch_input_backend_init(void)
 /* ------------------------------------------------------------------ */
 
 #if !defined(CONFIG_INPUT_TOUCH) && !defined(CONFIG_INPUT_AUTO)
+#include "esp_err.h"
 esp_err_t touch_input_backend_init(void) { return ESP_OK; }
 #endif

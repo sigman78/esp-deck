@@ -37,12 +37,28 @@ menu "Input HAL"
 
     config INPUT_TOUCH_SDA_PIN
         int "SDA GPIO pin for GT911"
-        default 19
+        default 8
         depends on INPUT_TOUCH
 
     config INPUT_TOUCH_SCL_PIN
         int "SCL GPIO pin for GT911"
-        default 20
+        default 9
         depends on INPUT_TOUCH
+
+    config INPUT_TOUCH_WAVESHARE_RESET
+        bool "Enable Waveshare Touch-LCD-7 hardware reset sequence"
+        depends on INPUT_TOUCH
+        default y
+        help
+            The Waveshare ESP32-S3-Touch-LCD-7 routes GT911 RST and INT
+            through I2C IO expanders (0x24 and 0x38).  Enable to run the
+            required reset sequence at startup.  Disable only when using
+            a bare GT911 with direct GPIO wiring.
+
+    config INPUT_TOUCH_RESET_GPIO
+        int "Board enable GPIO pin for GT911 reset"
+        depends on INPUT_TOUCH && INPUT_TOUCH_WAVESHARE_RESET
+        default 4
+        range 0 48
 
 endmenu
