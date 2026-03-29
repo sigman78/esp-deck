@@ -56,3 +56,6 @@ secrets/
 /sim_storage
 .vs
 .cache
+
+# Git worktrees
+.worktrees/
