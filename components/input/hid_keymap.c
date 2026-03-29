@@ -8,7 +8,6 @@
  */
 
 #include "hid_keymap.h"
-#include <stdbool.h>
 #include <string.h>
 
 /* Modifier bit masks (HID modifier byte) */
