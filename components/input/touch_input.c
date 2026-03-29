@@ -80,9 +80,7 @@ static void touch_poll_task(void *arg)
         int  npoints      = (int)(status & 0x0F);
 
         /* Always clear status after reading so GT911 prepares next sample */
-        if (buffer_ready) {
-            gt911_write_reg(s_gt911_dev, GT911_STATUS_REG, 0x00);
-        }
+        gt911_write_reg(s_gt911_dev, GT911_STATUS_REG, 0x00);
 
         int64_t now_ms = (int64_t)(esp_timer_get_time() / 1000);
 
@@ -115,8 +113,8 @@ static void touch_poll_task(void *arg)
                 ESP_LOGD(TAG, "long-press x=%u y=%u", touch_x, touch_y);
                 input_hal_post_event(&ev);
                 state = STATE_WAITING_LIFT;
-            } else if (buffer_ready && npoints == 0) {
-                /* Finger lifted within tap window */
+            } else if (buffer_ready && npoints == 0 && elapsed < TAP_MAX_MS) {
+                /* Finger lifted within tap window (< 300ms) */
                 input_event_t ev = {
                     .type = INPUT_EVENT_TAP,
                     .len  = 0,
@@ -125,6 +123,10 @@ static void touch_poll_task(void *arg)
                 };
                 ESP_LOGD(TAG, "tap x=%u y=%u elapsed=%lldms", touch_x, touch_y, elapsed);
                 input_hal_post_event(&ev);
+                state = STATE_IDLE;
+            } else if (buffer_ready && npoints == 0) {
+                /* Lift between 300ms and 500ms — no event, return to idle */
+                ESP_LOGD(TAG, "lift in dead zone (%lldms), no event", elapsed);
                 state = STATE_IDLE;
             } else if (!buffer_ready) {
                 /*
