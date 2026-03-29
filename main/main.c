@@ -20,6 +20,8 @@
 #include "font.h"
 #include "vterm.h"
 #include "input_hal.h"
+#include "ble_keyboard.h"
+#include "pairing_overlay.h"
 #include "wifi_manager.h"
 #include "ssh_client.h"
 #include "storage.h"
@@ -165,8 +167,14 @@ static void main_task(void *pvParameters)
         case STATE_SESSION: {
             input_event_t ev;
             while (ssh_client_is_connected()) {
-                if (input_hal_read(&ev, 100))
+                if (!input_hal_read(&ev, 100))
+                    continue;
+                if (ev.type == INPUT_EVENT_KEY) {
                     ssh_client_send(ev.buf, ev.len);
+                } else if (ev.type == INPUT_EVENT_LONG_PRESS) {
+                    pairing_overlay_run();
+                }
+                /* INPUT_EVENT_TAP is intentionally ignored */
             }
             vterm_bench_report();
 #if CONFIG_SSH_AUTO_RECONNECT
@@ -227,6 +235,10 @@ void app_main(void)
     if (input_hal_init() != ESP_OK)
         ESP_LOGW(TAG, "Input HAL init failed (non-fatal)");
     log_heap("after input_hal_init");
+
+    ESP_LOGI(TAG, "Starting BLE keyboard reconnect scan...");
+    ble_keyboard_reconnect_start();
+    log_heap("after ble_keyboard_reconnect_start");
 
     /* Try to allocate task stack from SPIRAM; fall back to internal DRAM. */
 #define MAIN_TASK_STACK  16384
