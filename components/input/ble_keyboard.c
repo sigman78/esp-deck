@@ -11,6 +11,7 @@
 
 #include "input_hal_internal.h"
 #include "hid_keymap.h"
+#include "vterm.h"
 
 #include "esp_log.h"
 #include "esp_bt.h"
@@ -140,7 +141,8 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
             if (kc == 0x00 || kc == 0x01) continue;  /* no key / rollover */
 
             uint8_t buf[INPUT_EVENT_MAX_LEN];
-            uint8_t len = hid_keymap_translate(kc, modifiers, buf);
+            uint8_t len = hid_keymap_translate(kc, modifiers,
+                                               vterm_app_cursor_keys(), buf);
             if (len == 0) continue;
 
             input_event_t ev = { .len = len };

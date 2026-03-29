@@ -8,6 +8,7 @@
  */
 
 #include "hid_keymap.h"
+#include <stdbool.h>
 #include <string.h>
 
 /* Modifier bit masks (HID modifier byte) */
@@ -73,11 +74,6 @@ typedef struct {
 } hid_special_t;
 
 static const hid_special_t s_specials[] = {
-    /* Arrow keys */
-    { 0x52, 3, { 0x1B, '[', 'A'           } },  /* Up    */
-    { 0x51, 3, { 0x1B, '[', 'B'           } },  /* Down  */
-    { 0x4F, 3, { 0x1B, '[', 'C'           } },  /* Right */
-    { 0x50, 3, { 0x1B, '[', 'D'           } },  /* Left  */
     /* F1–F4 (SS3 sequences) */
     { 0x3A, 3, { 0x1B, 'O', 'P'           } },
     { 0x3B, 3, { 0x1B, 'O', 'Q'           } },
@@ -105,7 +101,13 @@ static const hid_special_t s_specials[] = {
 
 #define SPECIALS_CNT  (sizeof(s_specials) / sizeof(s_specials[0]))
 
-uint8_t hid_keymap_translate(uint8_t keycode, uint8_t modifiers, uint8_t *buf)
+/* Arrow key HID codes and their ANSI suffix characters */
+static const uint8_t s_arrow_hid[]  = { 0x52, 0x51, 0x4F, 0x50 };
+static const char    s_arrow_char[] = { 'A',  'B',  'C',  'D'  };
+#define ARROW_CNT  4
+
+uint8_t hid_keymap_translate(uint8_t keycode, uint8_t modifiers,
+                             bool app_cursor, uint8_t *buf)
 {
     /* --- printable range --- */
     if (keycode >= PRINTABLE_MIN && keycode <= PRINTABLE_MAX) {
@@ -137,6 +139,16 @@ uint8_t hid_keymap_translate(uint8_t keycode, uint8_t modifiers, uint8_t *buf)
 
         buf[0] = ch;
         return 1;
+    }
+
+    /* --- arrow keys — mode-aware --- */
+    for (uint8_t i = 0; i < ARROW_CNT; i++) {
+        if (keycode == s_arrow_hid[i]) {
+            buf[0] = 0x1B;
+            buf[1] = app_cursor ? 'O' : '[';
+            buf[2] = s_arrow_char[i];
+            return 3;
+        }
     }
 
     /* --- special keys --- */
