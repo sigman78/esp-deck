@@ -25,7 +25,7 @@ esp_err_t input_hal_init(void)
 {
     if (s_queue) return ESP_OK;  /* already initialised */
 
-    ESP_LOGI(TAG, "input HAL init");
+    ESP_LOGI(TAG, "input HAL init ---");
 
     s_queue = xQueueCreate(INPUT_QUEUE_LEN, sizeof(input_event_t));
     if (!s_queue) {
@@ -36,6 +36,7 @@ esp_err_t input_hal_init(void)
     esp_err_t ret = ESP_OK;
     esp_err_t r;
 
+    ESP_LOGI(TAG, "input HAL BLE init");
     r = ble_keyboard_backend_init();
     if (r != ESP_OK) {
         ESP_LOGE(TAG, "BLE keyboard init failed: %s", esp_err_to_name(r));
@@ -44,6 +45,7 @@ esp_err_t input_hal_init(void)
 #endif
     }
 
+    ESP_LOGI(TAG, "input HAL UART init");
     r = input_uart_backend_init();
     if (r != ESP_OK) {
         ESP_LOGE(TAG, "UART input init failed: %s", esp_err_to_name(r));
@@ -52,6 +54,7 @@ esp_err_t input_hal_init(void)
 #endif
     }
 
+    ESP_LOGI(TAG, "input HAL Touch init");
     r = touch_input_backend_init();
     if (r != ESP_OK) {
         ESP_LOGE(TAG, "touch input init failed: %s", esp_err_to_name(r));
@@ -59,6 +62,8 @@ esp_err_t input_hal_init(void)
         ret = r;   /* fatal in touch-only mode */
 #endif
     }
+
+    ESP_LOGI(TAG, "input HAL init done ---");
 
     return ret;
 }

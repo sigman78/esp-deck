@@ -15,6 +15,8 @@ idf_component_register(
         esp_hid
         nvs_flash
         driver
+        esp_lcd
+        esp_timer
         freertos
         esp_event
         vterm
