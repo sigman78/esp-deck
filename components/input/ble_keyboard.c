@@ -135,6 +135,10 @@ int ble_keyboard_get_scan_results(ble_device_info_t *out, int max)
 
 void ble_keyboard_enter_pairing(void)
 {
+    if (!s_nimble_synced) {
+        ESP_LOGW(TAG, "enter_pairing: NimBLE not yet synced");
+        return;
+    }
     ESP_LOGI(TAG, "Entering pairing mode");
     ble_gap_disc_cancel();
     taskENTER_CRITICAL(&s_scan_mux);
@@ -241,8 +245,7 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_DISC_COMPLETE:
         ESP_LOGI(TAG, "Scan complete (state=%d)", (int)s_state);
-        /* Reconnect scan expired without finding device — restart */
-        if (s_state == BLE_RECONNECT) {
+        if (s_state == BLE_RECONNECT || s_state == BLE_PAIRING_SCAN) {
             start_scan(CONFIG_INPUT_BLE_SCAN_DURATION * 1000);
         }
         break;
@@ -404,7 +407,7 @@ esp_err_t ble_keyboard_backend_init(void)
 
     /* Security manager: bonding + MITM + Secure Connections, no display/keyboard */
     ble_hs_cfg.sm_bonding       = 1;
-    ble_hs_cfg.sm_mitm          = 1;
+    ble_hs_cfg.sm_mitm          = 0;   /* Just Works — compatible with NO_IO capability */
     ble_hs_cfg.sm_sc            = 1;
     ble_hs_cfg.sm_io_cap        = BLE_SM_IO_CAP_NO_IO;
     ble_hs_cfg.sm_our_key_dist   = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;

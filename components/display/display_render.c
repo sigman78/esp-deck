@@ -20,6 +20,17 @@ static DRAM_ATTR int                    s_cell_cols = 0;
 static DRAM_ATTR int                    s_cell_rows = 0;
 
 /* -------------------------------------------------------------------------
+ * Overlay buffer — optional second compositing layer.
+ * Written by the main task; read by the ISR.  Pointer written last so the ISR
+ * never sees a non-NULL pointer with stale cols/rows.
+ * ---------------------------------------------------------------------- */
+static DRAM_ATTR display_overlay_cell_t *s_overlay_buf  = NULL;
+static DRAM_ATTR int                     s_overlay_cols = 0;
+static DRAM_ATTR int                     s_overlay_rows = 0;
+static DRAM_ATTR color_t                 s_overlay_fg   = COLOR_BLACK;
+static DRAM_ATTR color_t                 s_overlay_bg   = COLOR_CYAN;
+
+/* -------------------------------------------------------------------------
  * Cursor state — updated by terminal via display_set_cursor().
  * Blink is driven internally by a frame counter; ~2 Hz at 60 fps.
  * ---------------------------------------------------------------------- */
@@ -125,6 +136,25 @@ void display_set_cursor(int x, int y, cursor_mode_t mode)
     s_cursor_mode = mode;
 }
 
+void display_set_overlay_buffer(display_overlay_cell_t *buf, int cols, int rows)
+{
+    s_overlay_cols = cols;
+    s_overlay_rows = rows;
+    s_overlay_buf  = buf;   /* written last — atomic 32-bit store; ISR reads after */
+}
+
+void display_set_overlay_colors(color_t fg, color_t bg)
+{
+    s_overlay_fg = fg;
+    s_overlay_bg = bg;
+}
+
+void display_get_text_size(int *cols, int *rows)
+{
+    if (cols) *cols = s_cell_cols;
+    if (rows) *rows = s_cell_rows;
+}
+
 /**
  * Render one horizontal band (one character-row height) into dst.
  *
@@ -173,12 +203,31 @@ void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
     const terminal_cell_t *row_cells = s_cell_buf + char_row * s_cell_cols;
     const int ncols = s_cell_cols;
 
+    /* Overlay row pointer — NULL when overlay is inactive or row is out of range. */
+    const display_overlay_cell_t *ov_row =
+        (s_overlay_buf && char_row < s_overlay_rows)
+        ? (s_overlay_buf + char_row * s_overlay_cols)
+        : NULL;
+
     for (int c = 0; c < ncols; c++) {
-        const terminal_cell_t *cell = &row_cells[c];
-        color_t fg = cell->fg_color;   /* already RGB565 */
-        color_t bg = cell->bg_color;
-        if (cell->attrs & ATTR_REVERSE) { color_t t = fg; fg = bg; bg = t; }
-        s_col_cache[c].glyph = font_get_glyph(cell->cp);
+        color_t fg, bg;
+        const uint8_t *glyph;
+
+        if (ov_row && c < s_overlay_cols && ov_row[c].cp != 0) {
+            /* Overlay cell — global overlay colors, overlay codepoint */
+            fg    = s_overlay_fg;
+            bg    = s_overlay_bg;
+            glyph = font_get_glyph(ov_row[c].cp);
+        } else {
+            /* Primary terminal cell */
+            const terminal_cell_t *cell = &row_cells[c];
+            fg = cell->fg_color;
+            bg = cell->bg_color;
+            if (cell->attrs & ATTR_REVERSE) { color_t t = fg; fg = bg; bg = t; }
+            glyph = font_get_glyph(cell->cp);
+        }
+
+        s_col_cache[c].glyph = glyph;
         s_col_cache[c].bg    = bg;
         s_col_cache[c].xorfg = (uint16_t)(fg ^ bg);
     }

@@ -83,6 +83,26 @@ esp_lcd_panel_handle_t display_get_panel(void);
 #endif /* BUILD_SIMULATOR */
 
 /**
+ * Overlay cell — a second compositing layer rendered on top of the primary
+ * terminal buffer.  cp == 0 means "transparent" (primary cell shows through).
+ * All overlay cells share the same fg/bg colors set via display_set_overlay_colors().
+ */
+typedef struct {
+    uint16_t cp;  /* BMP codepoint; 0 = transparent */
+} display_overlay_cell_t;
+
+/** Register (or clear) the overlay buffer.  Pass NULL to disable the overlay.
+ *  buf must reside in DRAM (DRAM_ATTR / static DRAM).
+ *  cols/rows must match the registered terminal buffer dimensions. */
+void display_set_overlay_buffer(display_overlay_cell_t *buf, int cols, int rows);
+
+/** Set the fg/bg RGB565 colors used for all non-transparent overlay cells. */
+void display_set_overlay_colors(color_t fg, color_t bg);
+
+/** Query the currently registered terminal buffer dimensions (0,0 if not set). */
+void display_get_text_size(int *cols, int *rows);
+
+/**
  * Register the terminal cell buffer so the display ISR can render from it.
  *
  * Call once after terminal_init(). The pointer must remain valid for the
