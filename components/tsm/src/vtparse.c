@@ -11,7 +11,7 @@
 #include "vtparse.h"
 #include <string.h>
 
-#ifdef CONFIG_IDF_TARGET_ESP32
+#ifdef ESP_PLATFORM
 #include "esp_attr.h"
 #define likely(x)   __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)

@@ -12,7 +12,7 @@
 #include <string.h>
 
 /* -------------------------------------------------------------------------
- * Cell buffer — registered once by terminal_init via display_set_text_buffer.
+ * Cell buffer — registered once by vterm_init via display_set_text_buffer.
  * Plain statics (DRAM on ESP32, regular BSS on host) so the ISR can reach them.
  * ---------------------------------------------------------------------- */
 static DRAM_ATTR const terminal_cell_t *s_cell_buf  = NULL;
@@ -53,6 +53,7 @@ static DRAM_ATTR struct {
     const uint8_t *glyph;   /* 16-byte bitmap in DRAM (terminus8x16)     */
     uint16_t       bg;      /* background colour RGB565                   */
     uint16_t       xorfg;   /* bg ^ fg — XOR in to flip bg→fg per bit    */
+    uint8_t        underline; /* draw fg bar on the last two scanlines    */
 } s_col_cache[RENDER_MAX_COLS];
 
 /* -------------------------------------------------------------------------
@@ -212,11 +213,15 @@ void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
     for (int c = 0; c < ncols; c++) {
         color_t fg, bg;
         const uint8_t *glyph;
+        uint8_t underline = 0;
 
         if (ov_row && c < s_overlay_cols && ov_row[c].cp != 0) {
             /* Overlay cell — global overlay colors, overlay codepoint */
             fg    = s_overlay_fg;
             bg    = s_overlay_bg;
+            if (ov_row[c].attrs & OVERLAY_ATTR_INVERSE) {
+                color_t t = fg; fg = bg; bg = t;
+            }
             glyph = font_get_glyph(ov_row[c].cp);
         } else {
             /* Primary terminal cell */
@@ -224,12 +229,14 @@ void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
             fg = cell->fg_color;
             bg = cell->bg_color;
             if (cell->attrs & ATTR_REVERSE) { color_t t = fg; fg = bg; bg = t; }
+            underline = cell->attrs & ATTR_UNDERLINE;
             glyph = font_get_glyph(cell->cp);
         }
 
-        s_col_cache[c].glyph = glyph;
-        s_col_cache[c].bg    = bg;
-        s_col_cache[c].xorfg = (uint16_t)(fg ^ bg);
+        s_col_cache[c].glyph     = glyph;
+        s_col_cache[c].bg        = bg;
+        s_col_cache[c].xorfg     = (uint16_t)(fg ^ bg);
+        s_col_cache[c].underline = underline;
     }
 
     /* ------------------------------------------------------------------
@@ -274,6 +281,24 @@ void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
             d[1] = GPAIR(b0, 2, 3, bg0, xf0);
             d[2] = GPAIR(b0, 4, 5, bg0, xf0);
             d[3] = GPAIR(b0, 6, 7, bg0, xf0);
+        }
+    }
+
+    /* ------------------------------------------------------------------
+     * Underline post-pass — force fg on the last two scanlines of any
+     * underlined column. Touches only flagged columns, off the hot loop.
+     * ------------------------------------------------------------------ */
+    if (num_scans >= 2) {
+        const int ul_first = num_scans - 2;
+        for (int c = 0; c < ncols; c++) {
+            if (!s_col_cache[c].underline) continue;
+            const uint16_t fg = (uint16_t)(s_col_cache[c].bg ^ s_col_cache[c].xorfg);
+            const uint32_t fg2 = (uint32_t)fg | ((uint32_t)fg << 16);
+            for (int n = ul_first; n < num_scans; n++) {
+                uint32_t *p = (uint32_t *)(dst_base + (unsigned)n * DISPLAY_WIDTH
+                                           + c * FONT_WIDTH);
+                p[0] = fg2; p[1] = fg2; p[2] = fg2; p[3] = fg2;
+            }
         }
     }
 

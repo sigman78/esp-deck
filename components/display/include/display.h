@@ -50,6 +50,10 @@ typedef struct {
     uint8_t  attrs;     // Attribute flags (see ATTR_* below)
 } terminal_cell_t;
 
+/* tsm_cell_t is cast to terminal_cell_t by the vterm bridge; the layouts
+ * must stay byte-compatible (tsm uses the padding byte at offset 7). */
+_Static_assert(sizeof(terminal_cell_t) == 8, "terminal_cell_t must be 8 bytes");
+
 /**
  * Convert an ANSI-256 palette index to an RGB565 value.
  * Covers the full range: 0-15 named, 16-231 6×6×6 cube, 232-255 grayscale.
@@ -85,10 +89,16 @@ esp_lcd_panel_handle_t display_get_panel(void);
 /**
  * Overlay cell — a second compositing layer rendered on top of the primary
  * terminal buffer.  cp == 0 means "transparent" (primary cell shows through).
- * All overlay cells share the same fg/bg colors set via display_set_overlay_colors().
+ * All overlay cells share the same fg/bg colors set via
+ * display_set_overlay_colors(); OVERLAY_ATTR_INVERSE swaps them per cell
+ * (menu selection highlight).
  */
+#define OVERLAY_ATTR_INVERSE  (1 << 0)
+
 typedef struct {
-    uint16_t cp;  /* BMP codepoint; 0 = transparent */
+    uint16_t cp;     /* BMP codepoint; 0 = transparent */
+    uint8_t  attrs;  /* OVERLAY_ATTR_* flags            */
+    uint8_t  _rsvd;
 } display_overlay_cell_t;
 
 /** Register (or clear) the overlay buffer.  Pass NULL to disable the overlay.
@@ -105,8 +115,8 @@ void display_get_text_size(int *cols, int *rows);
 /**
  * Register the terminal cell buffer so the display ISR can render from it.
  *
- * Call once after terminal_init(). The pointer must remain valid for the
- * lifetime of the display (never free the terminal buffer).
+ * Call once after vterm_init(). The pointer must remain valid for the
+ * lifetime of the display (never free the cell buffer).
  *
  * @param buf   Pointer to cols*rows terminal_cell_t array (must be in DRAM)
  * @param cols  Number of character columns

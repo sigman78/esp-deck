@@ -92,8 +92,8 @@ static const hid_special_t s_specials[] = {
     { 0x4C, 4, { 0x1B, '[', '3', '~'      } },  /* Delete  */
     { 0x4A, 3, { 0x1B, '[', 'H'           } },  /* Home    */
     { 0x4D, 3, { 0x1B, '[', 'F'           } },  /* End     */
-    { 0x4B, 5, { 0x1B, '[', '5', '~', 0   } },  /* Page Up */
-    { 0x4E, 5, { 0x1B, '[', '6', '~', 0   } },  /* Page Dn */
+    { 0x4B, 4, { 0x1B, '[', '5', '~'      } },  /* Page Up */
+    { 0x4E, 4, { 0x1B, '[', '6', '~'      } },  /* Page Dn */
     /* Numpad Enter */
     { 0x58, 1, { '\r'                      } },
 };

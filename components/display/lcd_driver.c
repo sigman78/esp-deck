@@ -27,7 +27,6 @@ static const char *TAG = "lcd_driver";
 #define PIN_NUM_BK_LIGHT  2
 
 static esp_lcd_panel_handle_t panel_handle  = NULL;
-static color_t               *bounce_buffer = NULL;
 
 /* -------------------------------------------------------------------------
  * Bounce-buffer fill callback — ISR context.
@@ -112,13 +111,8 @@ esp_err_t display_init(void)
     };
     ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(panel_handle, &cbs, NULL));
 
-    bounce_buffer = heap_caps_malloc(BOUNCE_BUFFER_SIZE * sizeof(color_t),
-                                     MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    if (!bounce_buffer) {
-        ESP_LOGE(TAG, "Failed to allocate bounce buffer");
-        return ESP_ERR_NO_MEM;
-    }
-
+    /* esp_lcd allocates its own DMA bounce buffers internally when
+     * bounce_buffer_size_px is set — no separate allocation needed here. */
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
 
     ESP_LOGI(TAG, "LCD initialized: %dx%d, bounce buffer %d bytes",

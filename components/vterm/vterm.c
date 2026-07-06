@@ -10,16 +10,11 @@
 #include "vterm.h"
 #include "display.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include <string.h>
 #include <stdlib.h>
 #include <inttypes.h>
 #include "tsm.h"
-
-#ifdef CONFIG_VTERM_BUF_SIZE
-#define VTERM_BUF_SIZE CONFIG_VTERM_BUF_SIZE
-#else
-#define VTERM_BUF_SIZE 256
-#endif
 
 /* Bench instrumentation */
 
@@ -43,8 +38,6 @@ static int                 s_rows;
 static vterm_response_cb_t s_response_cb;
 static void               *s_response_user;
 static bool                s_initialized;
-static char                s_wbuf[VTERM_BUF_SIZE];
-static size_t              s_wbuf_len;
 
 static tsm_t              *s_tsm;
 static terminal_cell_t    *s_buffer;
@@ -87,29 +80,6 @@ static inline void refresh_display(void)
     tsm_clear_dirty(s_tsm);
 }
 
-/* Internal: flush write buffer */
-
-static inline void flush_buf(void)
-{
-    if (s_wbuf_len == 0) return;
-
-#ifdef CONFIG_VTERM_BENCH
-    uint32_t t0 = esp_cpu_get_cycle_count();
-#endif
-    tsm_feed(s_tsm, (const uint8_t *)s_wbuf, s_wbuf_len);
-#ifdef CONFIG_VTERM_BENCH
-    uint32_t t1 = esp_cpu_get_cycle_count();
-    s_bench.tsm_cycles += (t1 - t0);
-    s_bench.bytes_fed  += s_wbuf_len;
-#endif
-    s_wbuf_len = 0;
-    if (!tsm_sync_update(s_tsm))
-        refresh_display();
-#ifdef CONFIG_VTERM_BENCH
-    s_bench.flush_count++;
-#endif
-}
-
 /* Public API */
 
 esp_err_t vterm_init(int cols, int rows)
@@ -120,7 +90,10 @@ esp_err_t vterm_init(int cols, int rows)
     s_rows        = rows;
     s_initialized = false;
 
-    s_buffer = malloc((size_t)cols * (size_t)rows * sizeof(terminal_cell_t));
+    /* The display ISR reads this buffer — it must live in internal DRAM,
+     * never behind the PSRAM cache. */
+    s_buffer = heap_caps_malloc((size_t)cols * (size_t)rows * sizeof(terminal_cell_t),
+                                MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!s_buffer) {
         ESP_LOGE(TAG, "Failed to allocate cell buffer");
         return ESP_ERR_NO_MEM;
@@ -152,28 +125,7 @@ esp_err_t vterm_init(int cols, int rows)
 
 void vterm_write(const char *data, size_t len)
 {
-    vterm_write_dir(data, len);
-/*
-    if (!s_initialized || len == 0) return;
-    while (len > 0) {
-        size_t avail = VTERM_BUF_SIZE - s_wbuf_len;
-        size_t scan  = len < avail ? len : avail;
-        const char *lf = memchr(data, '\n', scan);
-        size_t copy = lf ? (size_t)(lf - data) + 1 : scan;
-        memcpy(s_wbuf + s_wbuf_len, data, copy);
-        s_wbuf_len += copy;
-        data += copy;
-        len  -= copy;
-        if (lf || s_wbuf_len == VTERM_BUF_SIZE)
-            flush_buf();
-    }
-*/
-}
-
-void vterm_write_dir(const char *data, size_t len)
-{
     if (!s_initialized) return;
-    flush_buf();
 #ifdef CONFIG_VTERM_BENCH
     uint32_t t0 = esp_cpu_get_cycle_count();
 #endif
@@ -182,15 +134,10 @@ void vterm_write_dir(const char *data, size_t len)
     uint32_t t1 = esp_cpu_get_cycle_count();
     s_bench.tsm_cycles += (t1 - t0);
     s_bench.bytes_fed  += len;
+    s_bench.flush_count++;
 #endif
     if (!tsm_sync_update(s_tsm))
         refresh_display();
-}
-
-void vterm_flush(void)
-{
-    if (!s_initialized) return;
-    flush_buf();
 }
 
 void vterm_set_response_cb(vterm_response_cb_t cb, void *user)
@@ -202,7 +149,6 @@ void vterm_set_response_cb(vterm_response_cb_t cb, void *user)
 void vterm_reset(void)
 {
     if (!s_initialized) return;
-    flush_buf();
     tsm_reset(s_tsm);
     refresh_display();
 }
