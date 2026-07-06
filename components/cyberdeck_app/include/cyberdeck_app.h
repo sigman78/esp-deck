@@ -1,3 +1,14 @@
+/*
+ * cyberdeck_app — the shell: boot, WiFi bring-up, profile picker TUI,
+ * BLE keyboard pairing, SSH session with host-key pinning, in-session menu.
+ *
+ * Platform-neutral: no FreeRTOS/SDL includes; the composition root supplies
+ * timestamps and input events and calls tick() from its main loop.
+ *
+ * UI states own the keyboard; in SESSION every byte goes to SSH except the
+ * menu hotkey (F12) and touch long-press, which open the overlay menu.
+ */
+
 #pragma once
 
 #include <stdbool.h>
@@ -5,58 +16,64 @@
 #include <stdint.h>
 
 #include "esp_err.h"
-#include "storage.h"
+#include "storage.h"    /* conn_profile_t, wifi_profile_t, ble_device_info_t */
 
-typedef enum {
-    CYBERDECK_APP_BOOT = 0,
-    CYBERDECK_APP_WIFI_WAIT,
-    CYBERDECK_APP_SSH_CONNECT,
-    CYBERDECK_APP_SESSION,
-    CYBERDECK_APP_ERROR,
-} cyberdeck_app_state_t;
+/* ---- input events (mirrors input_hal layout; sim builds without it) ---- */
 
-typedef void (*cyberdeck_app_status_fn_t)(const char *msg, void *user);
-typedef void (*cyberdeck_app_action_fn_t)(void *user);
+#define CYBERDECK_INPUT_KEY        0
+#define CYBERDECK_INPUT_TAP        1
+#define CYBERDECK_INPUT_LONG_PRESS 2
 
 typedef struct {
-    uint64_t boot_delay_ms;
-    uint64_t wifi_timeout_ms;
-    uint64_t ssh_retry_delay_ms;
-    bool auto_reconnect;
-    bool prefer_explicit_connection;
+    uint8_t  type;
+    uint8_t  len;       /* KEY: bytes in buf */
+    uint8_t  buf[8];
+    uint16_t x, y;      /* touch pixel coords */
+} cyberdeck_input_t;
 
-    const char *default_host;
-    uint16_t    default_port;
-    const char *default_user;
-    const char *default_password;
+/* ---- BLE keyboard seam (NULL ops on platforms without BLE) ------------- */
 
-    cyberdeck_app_status_fn_t status_info;
-    cyberdeck_app_status_fn_t status_ok;
-    cyberdeck_app_status_fn_t status_fail;
-    cyberdeck_app_action_fn_t request_pairing;
-    void                     *user;
+typedef struct {
+    int  (*get_state)(void);   /* ble_state_t as int; see ble_keyboard.h */
+    void (*enter_pairing)(void);
+    void (*exit_pairing)(void);
+    int  (*get_scan_results)(ble_device_info_t *out, int max);
+    void (*select_device)(const uint8_t addr[6], uint8_t addr_type);
+} cyberdeck_ble_ops_t;
+
+/* ---- configuration ------------------------------------------------------ */
+
+typedef struct {
+    uint64_t boot_delay_ms;       /* splash hold before the shell appears  */
+    uint64_t ssh_retry_delay_ms;  /* auto-reconnect backoff                */
+    bool     auto_reconnect;      /* reconnect a dropped session           */
+
+    /* Fallbacks when storage holds no profiles (Kconfig / argv). May be
+     * NULL/empty. A non-empty fallback_host appears in the picker as
+     * profile "(default)". */
+    const char *fallback_host;
+    uint16_t    fallback_port;
+    const char *fallback_user;
+    const char *fallback_password;
+    const char *fallback_wifi_ssid;
+    const char *fallback_wifi_password;
+
+    const cyberdeck_ble_ops_t *ble;   /* NULL = keyboard handled elsewhere */
 } cyberdeck_app_config_t;
 
-typedef struct cyberdeck_app_s {
-    cyberdeck_app_config_t config;
-    cyberdeck_app_state_t  state;
-    bool                   wifi_started;
-    uint64_t               state_deadline_ms;
-    uint64_t               next_ssh_attempt_ms;
-    bool                   halted;
+/* ---- lifecycle ---------------------------------------------------------- */
 
-    conn_profile_t profiles[8];
-    int  profile_count;
-    char private_key_path[160];
-} cyberdeck_app_t;
+/**
+ * Initialize the shell. Call after display/vterm/storage/wifi/ssh init.
+ * Loads profiles, kicks the WiFi connect cycle, shows the boot status.
+ */
+esp_err_t cyberdeck_app_init(const cyberdeck_app_config_t *cfg, uint64_t now_ms);
 
-esp_err_t cyberdeck_app_init(cyberdeck_app_t *app,
-                             const cyberdeck_app_config_t *config,
-                             uint64_t now_ms);
+/** Drive the state machine; call every main-loop iteration (>=10 Hz). */
+void cyberdeck_app_tick(uint64_t now_ms);
 
-void cyberdeck_app_tick(cyberdeck_app_t *app, uint64_t now_ms);
-void cyberdeck_app_send_bytes(cyberdeck_app_t *app, const uint8_t *data, size_t len);
-void cyberdeck_app_handle_pairing_request(cyberdeck_app_t *app);
+/** Feed one input event (keyboard bytes or touch). */
+void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now_ms);
 
-cyberdeck_app_state_t cyberdeck_app_state(const cyberdeck_app_t *app);
-bool cyberdeck_app_is_running(const cyberdeck_app_t *app);
+/** True while an SSH session is active (bytes are being forwarded). */
+bool cyberdeck_app_in_session(void);

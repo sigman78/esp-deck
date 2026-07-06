@@ -5,7 +5,6 @@ idf_component_register(
         "ble_keyboard.c"
         "input_uart.c"
         "touch_input.c"
-        "pairing_overlay.c"
     INCLUDE_DIRS
         "include"
     PRIV_INCLUDE_DIRS
@@ -15,7 +14,6 @@ idf_component_register(
         esp_hid
         nvs_flash
         driver
-        display
         esp_lcd
         esp_timer
         freertos

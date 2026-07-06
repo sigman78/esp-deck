@@ -1,11 +1,12 @@
 /*
  * Cyberdeck SSH Terminal — device composition root.
  *
- * Hardware/IDF initialization stays here. Shared app orchestration lives in
- * the cyberdeck_app component.
+ * Hardware/IDF initialization lives here. Everything user-facing (profile
+ * picker, pairing UI, session flow) lives in the cyberdeck_app shell.
  */
 
 #include <stdio.h>
+#include <string.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -21,11 +22,11 @@
 #include "display.h"
 #include "font.h"
 #include "input_hal.h"
-#include "pairing_overlay.h"
 #include "splash.h"
 #include "ssh_client.h"
 #include "storage.h"
 #include "vterm.h"
+#include "wifi_manager.h"
 
 static const char *TAG = "cyberdeck";
 
@@ -54,64 +55,55 @@ static void init_nvs(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
-    ESP_LOGI(TAG, "NVS initialized");
 }
 
 static void init_network(void)
 {
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    ESP_LOGI(TAG, "Network stack initialized");
 }
 
-static void app_status_info(const char *msg, void *user)
-{
-    (void)user;
-    splash_status_info(msg);
-}
+/* -------------------------------------------------------------------------
+ * BLE keyboard ops for the shell (device backend = ble_keyboard/NimBLE)
+ * ---------------------------------------------------------------------- */
+static int ble_ops_get_state(void) { return (int)ble_keyboard_get_state(); }
 
-static void app_status_ok(const char *msg, void *user)
-{
-    (void)user;
-    splash_status_ok(msg);
-}
+static const cyberdeck_ble_ops_t s_ble_ops = {
+    .get_state        = ble_ops_get_state,
+    .enter_pairing    = ble_keyboard_enter_pairing,
+    .exit_pairing     = ble_keyboard_exit_pairing,
+    .get_scan_results = ble_keyboard_get_scan_results,
+    .select_device    = ble_keyboard_select_device,
+};
 
-static void app_status_fail(const char *msg, void *user)
+/* -------------------------------------------------------------------------
+ * Main task — pumps input into the shell
+ * ---------------------------------------------------------------------- */
+static uint64_t now_ms(void)
 {
-    (void)user;
-    splash_status_fail(msg);
-}
-
-static void app_request_pairing(void *user)
-{
-    (void)user;
-    pairing_overlay_run();
+    return (uint64_t)xTaskGetTickCount() * portTICK_PERIOD_MS;
 }
 
 static void main_task(void *pvParameters)
 {
-    cyberdeck_app_t *app = (cyberdeck_app_t *)pvParameters;
-
+    (void)pvParameters;
     ESP_LOGI(TAG, "Main task started");
-    while (cyberdeck_app_is_running(app)) {
-        cyberdeck_app_tick(app, (uint64_t)xTaskGetTickCount() * portTICK_PERIOD_MS);
+
+    for (;;) {
+        cyberdeck_app_tick(now_ms());
 
         input_event_t ev;
-        if (!input_hal_read(&ev, 100)) {
+        if (!input_hal_read(&ev, 50))
             continue;
-        }
 
-        if (ev.type == INPUT_EVENT_KEY) {
-            cyberdeck_app_send_bytes(app, ev.buf, ev.len);
-        } else if (ev.type == INPUT_EVENT_LONG_PRESS) {
-            cyberdeck_app_handle_pairing_request(app);
-        }
-    }
-
-    vterm_bench_report();
-    splash_status_fail("Fatal error — system halted");
-    for (;;) {
-        vTaskDelay(portMAX_DELAY);
+        cyberdeck_input_t app_ev = {
+            .type = ev.type,
+            .len  = ev.len,
+            .x    = ev.x,
+            .y    = ev.y,
+        };
+        memcpy(app_ev.buf, ev.buf, sizeof(app_ev.buf));
+        cyberdeck_app_handle_input(&app_ev, now_ms());
     }
 }
 
@@ -120,8 +112,6 @@ static void main_task(void *pvParameters)
  * ---------------------------------------------------------------------- */
 void app_main(void)
 {
-    static cyberdeck_app_t s_app;
-
     ESP_LOGI(TAG, "===========================================");
     ESP_LOGI(TAG, "Cyberdeck SSH Terminal");
     ESP_LOGI(TAG, "ESP32-S3 @ %d MHz", CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
@@ -129,84 +119,65 @@ void app_main(void)
 
     log_heap("boot");
     init_nvs();
-    log_heap("after nvs_init");
 
     if (storage_init() != ESP_OK) {
         ESP_LOGW(TAG, "Storage init failed — using Kconfig defaults");
     }
-    log_heap("after storage_init");
 
     init_network();
     log_heap("after netif_init");
 
-    ESP_LOGI(TAG, "Initializing display...");
     display_init();
-    log_heap("after display_init");
-
-    ESP_LOGI(TAG, "Initializing font renderer...");
     font_init();
-    log_heap("after font_init");
-
-    ESP_LOGI(TAG, "Initializing vterm...");
     vterm_init(CONFIG_TERMINAL_WIDTH, CONFIG_TERMINAL_HEIGHT);
     splash_show();
-    log_heap("after vterm_init");
+    log_heap("after display+vterm");
 
-    ESP_LOGI(TAG, "Initializing input HAL...");
+    if (wifi_manager_init() != ESP_OK) {
+        ESP_LOGW(TAG, "WiFi init failed (non-fatal)");
+    }
+
     if (input_hal_init() != ESP_OK) {
         ESP_LOGW(TAG, "Input HAL init failed (non-fatal)");
     }
-    log_heap("after input_hal_init");
+    /* Reconnect a bonded keyboard in the background from the moment we
+     * boot — pairing a new one is reachable from the shell ('b' / touch). */
+    ble_keyboard_reconnect_start();
 
-    if (ssh_client_init() != ESP_OK) {
-        ESP_LOGW(TAG, "SSH client init failed (non-fatal)");
-    }
+    ssh_client_init();
+    log_heap("after input+ssh init");
 
     cyberdeck_app_config_t app_cfg = {
-        .boot_delay_ms = 2000,
-        .wifi_timeout_ms = 30000,
+        .boot_delay_ms      = 1500,
         .ssh_retry_delay_ms = 5000,
-        .auto_reconnect = CONFIG_SSH_AUTO_RECONNECT,
-        .prefer_explicit_connection = false,
-        .default_host = CONFIG_SSH_DEFAULT_HOST,
-        .default_port = CONFIG_SSH_DEFAULT_PORT,
-        .default_user = CONFIG_SSH_DEFAULT_USER,
-        .default_password = CONFIG_SSH_DEFAULT_PASSWORD,
-        .status_info = app_status_info,
-        .status_ok = app_status_ok,
-        .status_fail = app_status_fail,
-        .request_pairing = app_request_pairing,
-        .user = NULL,
+        .auto_reconnect     = CONFIG_SSH_AUTO_RECONNECT,
+        .fallback_host      = CONFIG_SSH_DEFAULT_HOST,
+        .fallback_port      = CONFIG_SSH_DEFAULT_PORT,
+        .fallback_user      = CONFIG_SSH_DEFAULT_USER,
+        .fallback_password  = CONFIG_SSH_DEFAULT_PASSWORD,
+        .fallback_wifi_ssid     = CONFIG_WIFI_SSID,
+        .fallback_wifi_password = CONFIG_WIFI_PASSWORD,
+        .ble = &s_ble_ops,
     };
+    ESP_ERROR_CHECK(cyberdeck_app_init(&app_cfg, now_ms()));
 
-    ESP_ERROR_CHECK(cyberdeck_app_init(&s_app, &app_cfg, 0));
-
-    /* Try to allocate task stack from SPIRAM; fall back to internal DRAM. */
-#define MAIN_TASK_STACK 16384
+    /* The shell writes profiles/known-hosts to flash from this task, so its
+     * stack must be internal DRAM (flash ops forbid external-RAM stacks). */
+#define MAIN_TASK_STACK 12288
+    static StaticTask_t s_main_task_tcb;
     StackType_t *task_stack = heap_caps_malloc(MAIN_TASK_STACK,
-                                               MALLOC_CAP_SPIRAM |
+                                               MALLOC_CAP_INTERNAL |
                                                MALLOC_CAP_8BIT);
     if (!task_stack) {
-        ESP_LOGW(TAG, "No SPIRAM for task stack, falling back to internal DRAM");
-        task_stack = heap_caps_malloc(MAIN_TASK_STACK,
-                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        ESP_LOGE(TAG, "Cannot allocate main task stack — halting");
+        for (;;) vTaskDelay(portMAX_DELAY);
     }
 
-    static StaticTask_t s_main_task_tcb;
-
-    if (!task_stack) {
-        ESP_LOGE(TAG, "Cannot allocate task stack (%u B) — halting", MAIN_TASK_STACK);
-        for (;;) {
-            vTaskDelay(portMAX_DELAY);
-        }
-    }
-
-    ESP_LOGI(TAG, "Task stack @ %p (%u B)", task_stack, MAIN_TASK_STACK);
     xTaskCreateStaticPinnedToCore(
         main_task,
         "main_task",
         MAIN_TASK_STACK / sizeof(StackType_t),
-        &s_app,
+        NULL,
         5,
         task_stack,
         &s_main_task_tcb,
@@ -214,5 +185,6 @@ void app_main(void)
     );
 #undef MAIN_TASK_STACK
 
+    log_heap("after shell init");
     ESP_LOGI(TAG, "System initialized");
 }

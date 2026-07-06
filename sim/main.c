@@ -1,8 +1,13 @@
 /*
  * sim/main.c — host composition root.
  *
- * SDL event pumping and host-specific key translation stay here. Shared boot,
- * Wi-Fi, SSH, and session orchestration live in cyberdeck_app.
+ * SDL event pumping and host key translation live here; the shell
+ * (profile picker, session flow, menus) is the same cyberdeck_app code
+ * that runs on the device. BLE is not available on the host (ble = NULL);
+ * the SDL keyboard stands in for the BLE keyboard.
+ *
+ * Controls: F12 = in-session menu, Alt+Enter = window scale,
+ *           right-click = touch long-press, left-click = tap.
  */
 
 #include <SDL2/SDL.h>
@@ -19,46 +24,12 @@
 #include "vterm.h"
 #include "wifi_manager.h"
 
-#define SIM_COLS 100
-#define SIM_ROWS  30
-
-#ifndef CONFIG_SSH_DEFAULT_HOST
-#define CONFIG_SSH_DEFAULT_HOST "localhost"
+#ifndef CONFIG_TERMINAL_WIDTH
+#define CONFIG_TERMINAL_WIDTH  100
 #endif
-#ifndef CONFIG_SSH_DEFAULT_PORT
-#define CONFIG_SSH_DEFAULT_PORT 22
+#ifndef CONFIG_TERMINAL_HEIGHT
+#define CONFIG_TERMINAL_HEIGHT 30
 #endif
-#ifndef CONFIG_SSH_DEFAULT_USER
-#define CONFIG_SSH_DEFAULT_USER "user"
-#endif
-#ifndef CONFIG_SSH_DEFAULT_PASS
-#define CONFIG_SSH_DEFAULT_PASS ""
-#endif
-
-static void status_line(const char *prefix, int color, const char *msg)
-{
-    char buf[256];
-    snprintf(buf, sizeof(buf), "\x1b[38;5;%dm%s\x1b[0m %s\r\n", color, prefix, msg);
-    vterm_write(buf, strlen(buf));
-}
-
-static void app_status_info(const char *msg, void *user)
-{
-    (void)user;
-    status_line("[*]", 14, msg);
-}
-
-static void app_status_ok(const char *msg, void *user)
-{
-    (void)user;
-    status_line("[+]", 10, msg);
-}
-
-static void app_status_fail(const char *msg, void *user)
-{
-    (void)user;
-    status_line("[!]", 9, msg);
-}
 
 /*
  * Translate an SDL keydown event to a terminal escape sequence.
@@ -109,19 +80,25 @@ static const char *translate_key(SDL_Keycode sym, SDL_Keymod mod)
     }
 }
 
+static void send_key_bytes(const char *seq, size_t len, uint64_t now)
+{
+    if (!seq || len == 0 || len > 8) return;
+    cyberdeck_input_t ev = { .type = CYBERDECK_INPUT_KEY, .len = (uint8_t)len };
+    memcpy(ev.buf, seq, len);
+    cyberdeck_app_handle_input(&ev, now);
+}
+
 int main(int argc, char *argv[])
 {
-    static cyberdeck_app_t app;
-
-    const bool explicit_connection = argc > 1;
-    const char *host     = (argc > 1) ? argv[1] : CONFIG_SSH_DEFAULT_HOST;
-    int         port_i   = (argc > 2) ? atoi(argv[2]) : CONFIG_SSH_DEFAULT_PORT;
-    const char *user     = (argc > 3) ? argv[3] : CONFIG_SSH_DEFAULT_USER;
-    const char *password = (argc > 4) ? argv[4] : CONFIG_SSH_DEFAULT_PASS;
-    uint16_t    port     = (uint16_t)port_i;
+    /* Optional argv override: host [port [user [password]]] becomes the
+     * "(default)" entry in the profile picker. */
+    const char *host = (argc > 1) ? argv[1] : "";
+    int         port = (argc > 2) ? atoi(argv[2]) : 22;
+    const char *user = (argc > 3) ? argv[3] : "user";
+    const char *pass = (argc > 4) ? argv[4] : "";
 
     if (storage_init() != ESP_OK) {
-        fprintf(stderr, "storage_init() failed — using defaults\n");
+        fprintf(stderr, "storage_init() failed\n");
     }
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
@@ -131,45 +108,35 @@ int main(int argc, char *argv[])
 
     font_init();
     display_init();
-    vterm_init(SIM_COLS, SIM_ROWS);
+    vterm_init(CONFIG_TERMINAL_WIDTH, CONFIG_TERMINAL_HEIGHT);
     vterm_write("\x1b[2J\x1b[H", 7);
     display_render_frame();
 
-    if (wifi_manager_init() != ESP_OK) {
-        fprintf(stderr, "wifi_manager_init() failed\n");
-    }
-    if (ssh_client_init() != ESP_OK) {
-        fprintf(stderr, "ssh_client_init() failed\n");
-    }
+    wifi_manager_init();
+    ssh_client_init();
 
     cyberdeck_app_config_t app_cfg = {
-        .boot_delay_ms = 250,
-        .wifi_timeout_ms = 30000,
+        .boot_delay_ms      = 250,
         .ssh_retry_delay_ms = 5000,
-        .auto_reconnect = true,
-        .prefer_explicit_connection = explicit_connection,
-        .default_host = host,
-        .default_port = port,
-        .default_user = user,
-        .default_password = password,
-        .status_info = app_status_info,
-        .status_ok = app_status_ok,
-        .status_fail = app_status_fail,
-        .request_pairing = NULL,
-        .user = NULL,
+        .auto_reconnect     = true,
+        .fallback_host      = host,
+        .fallback_port      = (uint16_t)port,
+        .fallback_user      = user,
+        .fallback_password  = pass,
+        .fallback_wifi_ssid     = "SIM",
+        .fallback_wifi_password = "",
+        .ble = NULL,
     };
-
-    if (cyberdeck_app_init(&app, &app_cfg, SDL_GetTicks64()) != ESP_OK) {
+    if (cyberdeck_app_init(&app_cfg, SDL_GetTicks64()) != ESP_OK) {
         fprintf(stderr, "cyberdeck_app_init() failed\n");
         SDL_Quit();
         return 1;
     }
 
     bool running = true;
-    uint64_t shutdown_at_ms = 0;
-
     while (running) {
         bool got_input = false;
+        uint64_t now = SDL_GetTicks64();
 
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
@@ -185,37 +152,38 @@ int main(int argc, char *argv[])
                     display_toggle_scale();
                     break;
                 }
-
-                const char *seq = translate_key(ev.key.keysym.sym, ev.key.keysym.mod);
-                if (seq) {
-                    cyberdeck_app_send_bytes(&app, (const uint8_t *)seq, strlen(seq));
-                }
+                const char *seq = translate_key(ev.key.keysym.sym,
+                                                ev.key.keysym.mod);
+                if (seq) send_key_bytes(seq, strlen(seq), now);
                 got_input = true;
                 break;
             }
 
             case SDL_TEXTINPUT:
-                cyberdeck_app_send_bytes(&app,
-                                         (const uint8_t *)ev.text.text,
-                                         strlen(ev.text.text));
+                send_key_bytes(ev.text.text, strlen(ev.text.text), now);
                 got_input = true;
                 break;
+
+            case SDL_MOUSEBUTTONDOWN: {
+                cyberdeck_input_t tev = {
+                    .type = (ev.button.button == SDL_BUTTON_RIGHT)
+                            ? CYBERDECK_INPUT_LONG_PRESS
+                            : CYBERDECK_INPUT_TAP,
+                    .x = (uint16_t)ev.button.x,
+                    .y = (uint16_t)ev.button.y,
+                };
+                cyberdeck_app_handle_input(&tev, now);
+                got_input = true;
+                break;
+            }
 
             default:
                 break;
             }
         }
 
-        cyberdeck_app_tick(&app, SDL_GetTicks64());
+        cyberdeck_app_tick(SDL_GetTicks64());
         display_render_frame();
-
-        if (!cyberdeck_app_is_running(&app)) {
-            if (shutdown_at_ms == 0) {
-                shutdown_at_ms = SDL_GetTicks64() + 2000;
-            } else if (SDL_GetTicks64() >= shutdown_at_ms) {
-                running = false;
-            }
-        }
 
         SDL_Delay(got_input ? 1 : 16);
     }
