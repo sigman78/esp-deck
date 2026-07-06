@@ -774,6 +774,7 @@ static void enter_session(uint64_t now)
 static void do_connect(uint64_t now)
 {
     static char key_path[160];
+    static char pub_path[160];
     const conn_profile_t *p = &s.profiles[s.connect_idx];
 
     ssh_config_t cfg = {
@@ -788,6 +789,15 @@ static void do_connect(uint64_t now)
         snprintf(key_path, sizeof(key_path), "%s/keys/%s.pem",
                  storage_platform_mount_point(), p->key_id);
         cfg.private_key = key_path;
+        /* For a key profile the password field carries the key's passphrase
+         * (empty = unencrypted key). */
+        cfg.passphrase  = p->password[0] ? p->password : NULL;
+        /* Pass a matching public key if the user dropped one next to the
+         * private key — required for ECDSA (RSA derives its own). */
+        snprintf(pub_path, sizeof(pub_path), "%s/keys/%s.pub",
+                 storage_platform_mount_point(), p->key_id);
+        FILE *pf = fopen(pub_path, "r");
+        if (pf) { fclose(pf); cfg.public_key = pub_path; }
     } else {
         cfg.password = p->password;
     }

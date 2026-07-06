@@ -448,18 +448,32 @@ esp_err_t ssh_client_connect(const ssh_config_t *config)
     }
     ESP_LOGI(TAG, "Server auth methods: %s", authlist);
 
-    s_kb_password = config->password;  /* stash for kbd-interactive callback */
     rc = LIBSSH2_ERROR_AUTHENTICATION_FAILED;
 
-    /* Try public-key first if a key path was provided. */
-    if (config->private_key && strstr(authlist, "publickey")) {
+    if (config->private_key) {
+        /* Key profile: public-key auth ONLY. The passphrase decrypts the key
+         * (mbedTLS derives the public key from the private one), it is NOT a
+         * login password — so never fall through to password auth with it. */
+        if (!strstr(authlist, "publickey")) {
+            ESP_LOGE(TAG, "server does not offer publickey (methods: %s)", authlist);
+            set_last_error("server rejects publickey");
+            ssh_cleanup();
+            return SSH_ERR_AUTH;
+        }
+        ESP_LOGI(TAG, "Public-key auth with %s", config->private_key);
         rc = libssh2_userauth_publickey_fromfile(s_session, config->username,
-                                                 NULL, config->private_key, NULL);
+                                                 config->public_key,
+                                                 config->private_key,
+                                                 config->passphrase);
         if (rc == 0) goto auth_done;
-        ESP_LOGW(TAG, "Pubkey auth failed (%d)", rc);
+        log_last_error("publickey");
+        ssh_cleanup();
+        return SSH_ERR_AUTH;
     }
 
-    /* Try plain password. */
+    /* Password profile: password, then keyboard-interactive. */
+    s_kb_password = config->password;  /* stash for kbd-interactive callback */
+
     if (strstr(authlist, "password")) {
         rc = libssh2_userauth_password(s_session, config->username,
                                        config->password ? config->password : "");

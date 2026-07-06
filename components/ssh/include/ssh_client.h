@@ -21,8 +21,11 @@ typedef struct {
     const char *host;
     uint16_t port;
     const char *username;
-    const char *password;
-    const char *private_key;  // Optional, for pubkey auth
+    const char *password;     // Password auth (when private_key is NULL)
+    const char *private_key;  // Path to a PEM private key → public-key auth
+    const char *public_key;   // Optional .pub; needed for ECDSA (the mbedTLS
+                              // backend can only derive an RSA pubkey from priv)
+    const char *passphrase;   // Optional: decrypts an encrypted private_key
     /*
      * Pinned host-key fingerprint (lowercase hex SHA256, 64 chars) from a
      * previous session.  NULL = unknown host: the connect stops after the
