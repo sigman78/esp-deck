@@ -215,22 +215,29 @@ void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
         const uint8_t *glyph;
         uint8_t underline = 0;
 
-        if (ov_row && c < s_overlay_cols && ov_row[c].cp != 0) {
+        const uint8_t ov_attrs = (ov_row && c < s_overlay_cols) ? ov_row[c].attrs : 0;
+        const uint16_t ov_cp   = (ov_row && c < s_overlay_cols) ? ov_row[c].cp   : 0;
+
+        if (ov_cp != 0) {
             /* Overlay cell — global overlay colors, overlay codepoint */
             fg    = s_overlay_fg;
             bg    = s_overlay_bg;
-            if (ov_row[c].attrs & OVERLAY_ATTR_INVERSE) {
+            if (ov_attrs & OVERLAY_ATTR_INVERSE) {
                 color_t t = fg; fg = bg; bg = t;
             }
-            glyph = font_get_glyph(ov_row[c].cp);
+            glyph = font_get_glyph(ov_cp);
         } else {
-            /* Primary terminal cell */
+            /* Primary terminal cell (optionally dimmed by a DIM scrim). */
             const terminal_cell_t *cell = &row_cells[c];
             fg = cell->fg_color;
             bg = cell->bg_color;
             if (cell->attrs & ATTR_REVERSE) { color_t t = fg; fg = bg; bg = t; }
             underline = cell->attrs & ATTR_UNDERLINE;
             glyph = font_get_glyph(cell->cp);
+            if (ov_attrs & OVERLAY_ATTR_DIM) {   /* halve each RGB565 channel */
+                fg = (color_t)((fg >> 1) & 0x7BEFu);
+                bg = (color_t)((bg >> 1) & 0x7BEFu);
+            }
         }
 
         s_col_cache[c].glyph     = glyph;

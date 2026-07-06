@@ -88,6 +88,18 @@ void ui_clear(void)
         memset(s_draw, 0, (size_t)s_cols * s_rows * sizeof(*s_draw));
 }
 
+void ui_dim(void)
+{
+    /* Transparent scrim: every cell stays see-through (cp==0) but flagged DIM,
+     * so the renderer shows the terminal behind at ~50% brightness. Draw
+     * opaque chrome on top afterwards. */
+    if (!s_draw) return;
+    for (int i = 0; i < s_cols * s_rows; i++) {
+        s_draw[i].cp    = 0;
+        s_draw[i].attrs = OVERLAY_ATTR_DIM;
+    }
+}
+
 void ui_putch(int col, int row, uint16_t cp, uint8_t attrs)
 {
     if (s_draw && col >= 0 && col < s_cols && row >= 0 && row < s_rows) {
@@ -157,31 +169,36 @@ void ui_tile(int col, int row, int w, int h,
         for (int c = 0; c < w; c++)
             ui_putch(col + c, row + r, ' ', a);
 
-    /* Border. */
-    ui_putch(col,         row,         UI_BOX_TL, a);
-    ui_putch(col + w - 1, row,         UI_BOX_TR, a);
-    ui_putch(col,         row + h - 1, UI_BOX_BL, a);
-    ui_putch(col + w - 1, row + h - 1, UI_BOX_BR, a);
+    /* Double-line border — a chunky "mainframe panel" look. */
+    ui_putch(col,         row,         UI_DTL, a);
+    ui_putch(col + w - 1, row,         UI_DTR, a);
+    ui_putch(col,         row + h - 1, UI_DBL, a);
+    ui_putch(col + w - 1, row + h - 1, UI_DBR, a);
     for (int c = 1; c < w - 1; c++) {
-        ui_putch(col + c, row,         UI_BOX_H, a);
-        ui_putch(col + c, row + h - 1, UI_BOX_H, a);
+        ui_putch(col + c, row,         UI_DH, a);
+        ui_putch(col + c, row + h - 1, UI_DH, a);
     }
     for (int r = 1; r < h - 1; r++) {
-        ui_putch(col,         row + r, UI_BOX_V, a);
-        ui_putch(col + w - 1, row + r, UI_BOX_V, a);
+        ui_putch(col,         row + r, UI_DV, a);
+        ui_putch(col + w - 1, row + r, UI_DV, a);
     }
 
-    /* Title on the first inner row, body on the second — both truncated to
-     * the inner width so they never spill past the border. */
-    int inner = w - 2;
+    /* First inner column is a marker slot: ▶ when selected. Title/body follow.
+     * Everything is truncated to the remaining inner width. */
+    int mx    = col + 1;
+    int tx    = col + 2;
+    int inner = w - 3;
     if (inner < 1) return;
     char t[80];
-    if (title && *title && h >= 2) {
-        snprintf(t, sizeof(t), "%-.*s", inner, title);
-        ui_puts(col + 1, row + 1, t, a);
+    if (h >= 2) {
+        ui_putch(mx, row + 1, selected ? UI_PLAY : ' ', a);
+        if (title && *title) {
+            snprintf(t, sizeof(t), "%-.*s", inner, title);
+            ui_puts(tx, row + 1, t, a);
+        }
     }
     if (body && *body && h >= 3) {
         snprintf(t, sizeof(t), "%-.*s", inner, body);
-        ui_puts(col + 1, row + 2, t, a);
+        ui_puts(tx, row + 2, t, a);
     }
 }

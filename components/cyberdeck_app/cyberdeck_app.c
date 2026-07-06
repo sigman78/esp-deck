@@ -47,6 +47,7 @@ typedef enum {
 #define PAIR_TIMEOUT_MS  30000
 #define PAIR_POLL_MS     250
 #define HOME_REFRESH_MS  500
+#define ANIM_PERIOD_MS   100          /* ~10 fps subtle UI animation */
 #define TOAST_MS         3000
 
 /* Shell palette — pale green on near-black, classic terminal glow. */
@@ -101,6 +102,8 @@ static struct {
 
     uint64_t boot_until;
     uint64_t next_home_refresh;
+    uint32_t anim_frame;            /* advances ~10 fps for subtle animation */
+    uint64_t next_anim;             /* next animated re-render (PAIRING)      */
     bool     halted;
 } s;
 
@@ -280,18 +283,78 @@ static tilegrid_t picker_grid(int count)
     return g;
 }
 
+/* Full-width double rule (═══…) on a row. Special glyphs must go through
+ * ui_putch — ui_puts/ui_printf only emit Latin-1 bytes. */
+static void draw_rule(int row)
+{
+    for (int i = 0; i < ui_cols(); i++) ui_putch(i, row, UI_DH, 0);
+}
+
+/* Animated rule: a ░▒▓█ "comet" sweeps left→right along the divider. */
+static void draw_rule_scan(int row, uint32_t frame)
+{
+    int W = ui_cols();
+    draw_rule(row);
+    static const uint16_t comet[4] = { UI_SHADE1, UI_SHADE2, UI_SHADE3, UI_BLOCK };
+    int head = (int)((frame * 2u) % (uint32_t)W);   /* 2 cells/frame */
+    for (int k = 0; k < 4; k++) {
+        int x = head - (3 - k);
+        if (x >= 0 && x < W) ui_putch(x, row, comet[k], 0);
+    }
+}
+
+/* 8-frame braille spinner (U+2800 block — present in the font). */
+static uint16_t spinner_glyph(uint32_t frame)
+{
+    static const uint16_t sp[8] = {
+        0x280B, 0x2819, 0x2839, 0x2838, 0x283C, 0x2834, 0x2826, 0x2827
+    };
+    return sp[frame % 8];
+}
+
+/* Left-aligned title chip framed by a shade gradient: ░▒▓█ TEXT █▓▒░ */
+static void draw_titlebar(const char *text)
+{
+    int x = 2;
+    ui_putch(x++, 0, UI_SHADE1, 0);
+    ui_putch(x++, 0, UI_SHADE2, 0);
+    ui_putch(x++, 0, UI_SHADE3, 0);
+    ui_putch(x++, 0, UI_BLOCK,  0);
+    ui_putch(x++, 0, ' ', OVERLAY_ATTR_INVERSE);
+    ui_puts (x, 0, text, OVERLAY_ATTR_INVERSE);
+    x += (int)strlen(text);
+    ui_putch(x++, 0, ' ', OVERLAY_ATTR_INVERSE);
+    ui_putch(x++, 0, UI_BLOCK,  0);
+    ui_putch(x++, 0, UI_SHADE3, 0);
+    ui_putch(x++, 0, UI_SHADE2, 0);
+    ui_putch(x++, 0, UI_SHADE1, 0);
+}
+
+/* Little ● / ○ LED then a label + value, cyberpunk status line. */
+static void draw_status_led(int row, bool on, const char *label, const char *value)
+{
+    ui_putch(2, row, on ? UI_LED_ON : UI_LED_OFF, 0);
+    ui_printf(4, row, 0, "%-4s %s", label, value);
+}
+
 static void render_home(void)
 {
     ui_colors(UI_FG, UI_BG);
     ui_clear();
     ui_fill(0, 0, ui_cols(), ui_rows(), 0);
 
-    /* Header. */
-    ui_puts(3, 0, "C Y B E R D E C K", 0);
-    ui_printf(3, 1, 0, "WiFi %-16s %s",
-              wifi_manager_get_ssid()[0] ? wifi_manager_get_ssid() : "-",
-              wifi_status_str());
-    ui_printf(3, 2, 0, "Kbd  %s", ble_status_str());
+    /* Header banner + status HUD. */
+    draw_titlebar("CYBERDECK");
+    ui_puts(ui_cols() - 12, 0, "// SSH DECK", 0);
+
+    char net[48];
+    snprintf(net, sizeof(net), "%-18s %s",
+             wifi_manager_get_ssid()[0] ? wifi_manager_get_ssid() : "-",
+             wifi_status_str());
+    draw_status_led(1, wifi_manager_is_connected(), "NET", net);
+    bool kbd = s.cfg.ble && s.cfg.ble->get_state && s.cfg.ble->get_state() == 4;
+    draw_status_led(2, kbd, "KBD", ble_status_str());
+    draw_rule_scan(3, s.anim_frame);
 
     /* Tiles: one per profile, plus a trailing "pair keyboard" tile. */
     tilegrid_t g = picker_grid(s.profile_count + 1);
@@ -318,12 +381,18 @@ static void render_home(void)
     }
 
     if (s.profile_count == 0)
-        ui_puts(3, 3, "no profiles — edit profiles.ini in storage", 0);
+        ui_puts(4, 5, "no profiles — edit profiles.ini in storage", 0);
 
-    if (s.toast[0])
-        ui_printf(3, ui_rows() - 2, OVERLAY_ATTR_INVERSE, " %s ", s.toast);
-    ui_puts(3, ui_rows() - 1,
-            "tap a tile to select, tap again to connect   (b r w)", 0);
+    /* Footer strip. */
+    draw_rule(ui_rows() - 2);
+    ui_putch(2, ui_rows() - 1, UI_PLAY, 0);
+    ui_puts(4, ui_rows() - 1,
+            "tap to select, tap again to connect   hold = pair", 0);
+    if (s.toast[0]) {
+        int len = (int)strlen(s.toast) + 2;
+        ui_printf(ui_cols() - len - 1, ui_rows() - 1, OVERLAY_ATTR_INVERSE,
+                  " %s ", s.toast);
+    }
 
     ui_no_cursor();
     ui_present();
@@ -342,8 +411,11 @@ static void render_pairing(void)
     ui_clear();
     ui_fill(0, 0, ui_cols(), ui_rows(), 0);
 
-    ui_puts(3, 0, "PAIR A KEYBOARD", 0);
-    ui_puts(3, 1, s.ndevs ? "Tap your keyboard:" : "Scanning for keyboards...", 0);
+    draw_titlebar("PAIR KEYBOARD");
+    ui_putch(2, 1, s.ndevs ? UI_LED_ON : spinner_glyph(s.anim_frame), 0);
+    ui_puts(4, 1, s.ndevs ? "select your keyboard below"
+                          : "scanning for keyboards...", 0);
+    draw_rule_scan(3, s.anim_frame);
 
     /* Devices + one Cancel tile; cap devices so Cancel always fits. */
     tilegrid_t g = picker_grid(1);            /* start with room for Cancel */
@@ -362,7 +434,9 @@ static void render_pairing(void)
     ui_tile(tile_x(&g, ndev), tile_y(&g, ndev), g.tw, g.th,
             "Cancel", "", ndev == s.pair_sel);
 
-    ui_puts(3, ui_rows() - 1, "tap a keyboard to pair, or Cancel", 0);
+    draw_rule(ui_rows() - 2);
+    ui_putch(2, ui_rows() - 1, UI_PLAY, 0);
+    ui_puts(4, ui_rows() - 1, "put the keyboard in pairing mode, then tap it", 0);
     ui_no_cursor();
     ui_present();
 }
@@ -424,13 +498,28 @@ static void render_connecting(const char *msg)
     ui_clear();
     ui_fill(0, 0, ui_cols(), ui_rows(), 0);
 
-    const conn_profile_t *p = &s.profiles[s.connect_idx];
-    int w = 64, x = (ui_cols() - w) / 2;
-    int y = ui_rows() / 2 - 2;
+    draw_titlebar("CYBERDECK");
+    ui_puts(ui_cols() - 12, 0, "// SSH DECK", 0);
+    draw_rule(3);
 
-    ui_box(x, y, w, 5, " SSH ");
-    ui_printf(x + 2, y + 2, 0, "%s %s@%s:%u ...",
-              msg, p->user, p->host, (unsigned)p->port);
+    const conn_profile_t *p = &s.profiles[s.connect_idx];
+    int cy = ui_rows() / 2;
+
+    char line[96];
+    snprintf(line, sizeof(line), "%s  %s@%s:%u", msg, p->user, p->host,
+             (unsigned)p->port);
+    int lx = (ui_cols() - (int)strlen(line)) / 2;
+    ui_putch(lx - 2, cy - 1, UI_DIAMOND, 0);
+    ui_puts(lx, cy - 1, line, 0);
+
+    /* Cyberpunk "activity" bar: ░▒▓█▓▒░ repeating gradient. */
+    static const uint16_t grad[7] = {
+        UI_SHADE1, UI_SHADE2, UI_SHADE3, UI_BLOCK, UI_SHADE3, UI_SHADE2, UI_SHADE1
+    };
+    int bw = 42, bx = (ui_cols() - bw) / 2;
+    for (int i = 0; i < bw; i++)
+        ui_putch(bx + i, cy + 1, grad[i % 7], 0);
+
     ui_no_cursor();
     ui_present();
 }
@@ -446,7 +535,7 @@ static const char *menu_items[] = {
 static void render_menu(void)
 {
     ui_colors(COLOR_BLACK, COLOR_CYAN);
-    ui_clear();   /* transparent outside the tiles — session stays visible */
+    ui_dim();   /* dim the live session behind the menu so it pops */
 
     tilegrid_t g = { .tw = 40, .th = 4, .gx = 0, .gy = 1,
                      .ncols = 1, .nrows = MENU_COUNT, .count = MENU_COUNT };
@@ -665,6 +754,8 @@ void cyberdeck_app_tick(uint64_t now)
 {
     if (s.halted) return;
 
+    s.anim_frame = (uint32_t)(now / ANIM_PERIOD_MS);
+
     switch (s.state) {
     case ST_BOOT:
         if (now >= s.boot_until)
@@ -673,9 +764,9 @@ void cyberdeck_app_tick(uint64_t now)
 
     case ST_HOME:
         if (now >= s.next_home_refresh) {
-            s.next_home_refresh = now + HOME_REFRESH_MS;
+            s.next_home_refresh = now + ANIM_PERIOD_MS;   /* animation cadence */
             if (s.toast[0] && now >= s.toast_until) s.toast[0] = '\0';
-            render_home();   /* live wifi/ble status */
+            render_home();   /* live wifi/ble status + comet sweep */
         }
         break;
 
@@ -683,6 +774,10 @@ void cyberdeck_app_tick(uint64_t now)
         if (now - s.pair_last_activity > PAIR_TIMEOUT_MS) {
             exit_pairing(now);
             break;
+        }
+        if (now >= s.next_anim) {          /* advance spinner / comet */
+            s.next_anim = now + ANIM_PERIOD_MS;
+            render_pairing();
         }
         if (now - s.pair_last_poll >= PAIR_POLL_MS && s.cfg.ble) {
             s.pair_last_poll = now;

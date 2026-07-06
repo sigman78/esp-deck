@@ -23,6 +23,33 @@
 #define UI_BOX_ML  0x251Cu  /* ├ */
 #define UI_BOX_MR  0x2524u  /* ┤ */
 
+/* Cyberpunk glyph palette — every codepoint below is present in Terminus
+ * 8x16 (verified against the font's range table). Missing glyphs render as
+ * '?', so stick to these. */
+#define UI_DH      0x2550u  /* ═ double horizontal */
+#define UI_DV      0x2551u  /* ║ double vertical   */
+#define UI_DTL     0x2554u  /* ╔ */
+#define UI_DTR     0x2557u  /* ╗ */
+#define UI_DBL     0x255Au  /* ╚ */
+#define UI_DBR     0x255Du  /* ╝ */
+#define UI_DML     0x2560u  /* ╠ */
+#define UI_DMR     0x2563u  /* ╣ */
+#define UI_BLOCK   0x2588u  /* █ full block   */
+#define UI_SHADE3  0x2593u  /* ▓ dark shade   */
+#define UI_SHADE2  0x2592u  /* ▒ medium shade */
+#define UI_SHADE1  0x2591u  /* ░ light shade  */
+#define UI_LHALF   0x258Cu  /* ▌ left half  */
+#define UI_RHALF   0x2590u  /* ▐ right half */
+#define UI_LED_ON  0x25CFu  /* ● */
+#define UI_LED_OFF 0x25CBu  /* ○ */
+#define UI_DIAMOND 0x25C6u  /* ◆ */
+#define UI_PLAY    0x25B6u  /* ▶ */
+#define UI_ARROW   0x25BAu  /* ► */
+#define UI_VBAR    0x25AEu  /* ▮ */
+#define UI_BULLET  0x2022u  /* • */
+#define UI_PL_R    0xE0B0u  /* powerline right-facing separator */
+#define UI_PL_L    0xE0B2u  /* powerline left-facing separator  */
+
 /** Allocate the overlay buffer for the current display size. */
 esp_err_t ui_init(void);
 
@@ -43,6 +70,10 @@ void ui_colors(color_t fg, color_t bg);
 
 /** Clear the whole overlay to transparent. */
 void ui_clear(void);
+
+/** Transparent DIM scrim: session shows through at ~50% brightness. Draw
+ *  opaque chrome (tiles) on top afterwards. Use for modals over a session. */
+void ui_dim(void);
 
 /** Put one codepoint; attrs = 0 or OVERLAY_ATTR_INVERSE. */
 void ui_putch(int col, int row, uint16_t cp, uint8_t attrs);

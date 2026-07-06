@@ -92,8 +92,13 @@ esp_lcd_panel_handle_t display_get_panel(void);
  * All overlay cells share the same fg/bg colors set via
  * display_set_overlay_colors(); OVERLAY_ATTR_INVERSE swaps them per cell
  * (menu selection highlight).
+ *
+ * OVERLAY_ATTR_DIM on a TRANSPARENT cell (cp == 0) is a scrim: the primary
+ * terminal still shows through, but at ~50% brightness — used to dim the live
+ * session behind a modal so the modal pops.
  */
 #define OVERLAY_ATTR_INVERSE  (1 << 0)
+#define OVERLAY_ATTR_DIM      (1 << 1)
 
 typedef struct {
     uint16_t cp;     /* BMP codepoint; 0 = transparent */
