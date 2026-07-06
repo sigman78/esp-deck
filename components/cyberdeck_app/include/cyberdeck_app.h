@@ -39,6 +39,7 @@ typedef struct {
     void (*exit_pairing)(void);
     int  (*get_scan_results)(ble_device_info_t *out, int max);
     void (*select_device)(const uint8_t addr[6], uint8_t addr_type);
+    const char *(*get_name)(void);   /* connected device name, "" if none */
 } cyberdeck_ble_ops_t;
 
 /* ---- configuration ------------------------------------------------------ */
@@ -47,6 +48,7 @@ typedef struct {
     uint64_t boot_delay_ms;       /* splash hold before the shell appears  */
     uint64_t ssh_retry_delay_ms;  /* auto-reconnect backoff                */
     bool     auto_reconnect;      /* reconnect a dropped session           */
+    const char *version;          /* firmware version shown in the header  */
 
     /* Fallbacks when storage holds no profiles (Kconfig / argv). May be
      * NULL/empty. A non-empty fallback_host appears in the picker as

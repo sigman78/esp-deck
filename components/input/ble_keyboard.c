@@ -59,6 +59,7 @@ static int               s_scan_count = 0;
 /* BDA of connected device (NimBLE little-endian: val[0] = LSB) */
 static uint8_t s_connected_bda[6];
 static esp_hidh_dev_t *s_connected_dev = NULL;
+static char    s_connected_name[64] = "";   /* name of the live device, "" = none */
 
 /* Previous HID report keys — for rollover diffing (emit only new keys) */
 static uint8_t s_prev_keys[6];
@@ -167,6 +168,8 @@ static bool ad_is_hid_appearance(const uint8_t *adv, uint8_t adv_len)
 /* ------------------------------------------------------------------ */
 
 ble_state_t ble_keyboard_get_state(void) { return s_state; }
+
+const char *ble_keyboard_get_connected_name(void) { return s_connected_name; }
 
 int ble_keyboard_get_scan_results(ble_device_info_t *out, int max)
 {
@@ -513,6 +516,7 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
         }
         if (dev.name[0] == '\0')
             snprintf(dev.name, sizeof(dev.name), "Unknown HID");
+        snprintf(s_connected_name, sizeof(s_connected_name), "%s", dev.name);
         storage_ble_save(&dev);
         storage_ble_list(s_registry, STORAGE_BLE_MAX, &s_registry_count);
         break;
@@ -521,6 +525,7 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
     case ESP_HIDH_CLOSE_EVENT:
         ESP_LOGI(TAG, "Keyboard disconnected, restarting reconnect scan");
         s_connected_dev = NULL;
+        s_connected_name[0] = '\0';
         memset(s_prev_keys, 0, sizeof(s_prev_keys));
         s_state = (s_registry_count > 0) ? BLE_RECONNECT : BLE_IDLE;
         ble_gap_disc_cancel();
@@ -742,6 +747,7 @@ esp_err_t ble_keyboard_backend_init(void)
 #include "ble_keyboard.h"
 esp_err_t   ble_keyboard_backend_init(void)                            { return ESP_OK; }
 ble_state_t ble_keyboard_get_state(void)                               { return BLE_IDLE; }
+const char *ble_keyboard_get_connected_name(void)                      { return ""; }
 void        ble_keyboard_enter_pairing(void)                           {}
 void        ble_keyboard_exit_pairing(void)                            {}
 void        ble_keyboard_reconnect_start(void)                         {}

@@ -116,9 +116,10 @@ int main(int argc, char *argv[])
     ssh_client_init();
 
     cyberdeck_app_config_t app_cfg = {
-        .boot_delay_ms      = 250,
+        .boot_delay_ms      = 1500,
         .ssh_retry_delay_ms = 5000,
         .auto_reconnect     = true,
+        .version            = "sim",
         .fallback_host      = host,
         .fallback_port      = (uint16_t)port,
         .fallback_user      = user,

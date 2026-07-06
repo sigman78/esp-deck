@@ -25,6 +25,9 @@ typedef enum {
 /** Current connection state (thread-safe read). */
 ble_state_t ble_keyboard_get_state(void);
 
+/** Name of the currently connected device ("" if none). */
+const char *ble_keyboard_get_connected_name(void);
+
 /**
  * Switch to BLE_PAIRING_SCAN mode.
  * Can be called from any state. Disconnects an active connection first.

@@ -28,6 +28,10 @@
 #include "vterm.h"
 #include "wifi_manager.h"
 
+#ifndef BUILD_SIMULATOR
+#include "esp_heap_caps.h"   /* free-RAM stats in the header */
+#endif
+
 static const char *TAG = "cyberdeck_app";
 
 /* ---------------------------------------------------------------- state */
@@ -317,26 +321,42 @@ static uint16_t spinner_glyph(uint32_t frame)
     return sp[frame % 8];
 }
 
-/* Left-aligned title chip framed by a shade gradient: ░▒▓█ TEXT █▓▒░ */
-static void draw_titlebar(const char *text)
+/* Title chip framed by a shade gradient: ░▒▓█ TEXT █▓▒░, drawn at cell x0 on
+ * row 0. The flanking blocks glow: a cyan "spark" travels through them each
+ * frame for a subtle animated shimmer. Its total width is strlen(text)+10. */
+static void draw_titlebar(int x0, const char *text, uint32_t frame)
 {
-    int x = 2;
-    ui_pen(OVERLAY_COL_MAGENTA);
-    ui_putch(x++, 0, UI_SHADE1, 0);
-    ui_putch(x++, 0, UI_SHADE2, 0);
-    ui_putch(x++, 0, UI_SHADE3, 0);
-    ui_putch(x++, 0, UI_BLOCK,  0);
+    int spark = (int)((frame / 3u) % 4u);
+    int x = x0;
+    static const uint16_t lg[4] = { UI_SHADE1, UI_SHADE2, UI_SHADE3, UI_BLOCK };
+    for (int i = 0; i < 4; i++) {
+        ui_pen(i == spark ? OVERLAY_COL_CYAN : OVERLAY_COL_MAGENTA);
+        ui_putch(x++, 0, lg[i], 0);
+    }
     ui_pen(OVERLAY_COL_CYAN);
     ui_putch(x++, 0, ' ', OVERLAY_ATTR_INVERSE);
     ui_puts (x, 0, text, OVERLAY_ATTR_INVERSE);
     x += (int)strlen(text);
     ui_putch(x++, 0, ' ', OVERLAY_ATTR_INVERSE);
-    ui_pen(OVERLAY_COL_MAGENTA);
-    ui_putch(x++, 0, UI_BLOCK,  0);
-    ui_putch(x++, 0, UI_SHADE3, 0);
-    ui_putch(x++, 0, UI_SHADE2, 0);
-    ui_putch(x++, 0, UI_SHADE1, 0);
+    static const uint16_t rg[4] = { UI_BLOCK, UI_SHADE3, UI_SHADE2, UI_SHADE1 };
+    for (int i = 0; i < 4; i++) {
+        ui_pen((3 - i) == spark ? OVERLAY_COL_CYAN : OVERLAY_COL_MAGENTA);
+        ui_putch(x++, 0, rg[i], 0);
+    }
     ui_pen(OVERLAY_COL_DEFAULT);
+}
+
+/* Free-RAM summary for the header. */
+static void ram_stats(char *buf, size_t sz)
+{
+#ifdef BUILD_SIMULATOR
+    snprintf(buf, sz, "host build");
+#else
+    unsigned in = (unsigned)(heap_caps_get_free_size(
+                      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024);
+    unsigned ps = (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024);
+    snprintf(buf, sz, "int %uK  psram %uK", in, ps);
+#endif
 }
 
 /* Little ● / ○ LED then a label + value, cyberpunk status line. */
@@ -416,19 +436,35 @@ static void render_home(void)
     ui_clear();
     ui_fill(0, 0, ui_cols(), ui_rows(), 0);
 
-    /* Header banner + status HUD. */
-    draw_titlebar("CYBERDECK");
-    ui_pen(OVERLAY_COL_BLUE);
-    ui_puts(ui_cols() - 12, 0, "// SSH DECK", 0);
-    ui_pen(OVERLAY_COL_DEFAULT);
-
+    /* ── Status HUD on the LEFT (rows 0-2) ─────────────────────────── */
     char net[48];
-    snprintf(net, sizeof(net), "%-18s %s",
+    snprintf(net, sizeof(net), "%-16s %s",
              wifi_manager_get_ssid()[0] ? wifi_manager_get_ssid() : "-",
              wifi_status_str());
-    draw_status_led(1, wifi_manager_is_connected(), "NET", net);
+    draw_status_led(0, wifi_manager_is_connected(), "NET", net);
+
     bool kbd = s.cfg.ble && s.cfg.ble->get_state && s.cfg.ble->get_state() == 4;
-    draw_status_led(2, kbd, "KBD", ble_status_str());
+    const char *kn = (kbd && s.cfg.ble->get_name) ? s.cfg.ble->get_name() : "";
+    char kbdinfo[64];
+    snprintf(kbdinfo, sizeof(kbdinfo), "%-11s %s", ble_status_str(), kn);
+    draw_status_led(1, kbd, "KBD", kbdinfo);
+
+    char ram[48];
+    ram_stats(ram, sizeof(ram));
+    ui_pen(OVERLAY_COL_BLUE);
+    ui_putch(2, 2, UI_DIAMOND, 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
+    ui_printf(4, 2, 0, "RAM  %s", ram);
+
+    /* ── Title + version on the RIGHT (rows 0-1) ────────────────────── */
+    int tw = (int)strlen("CYBERDECK") + 10;
+    draw_titlebar(ui_cols() - tw - 1, "CYBERDECK", s.anim_frame);
+    char ver[24];
+    snprintf(ver, sizeof(ver), "// %s", s.cfg.version ? s.cfg.version : "?");
+    ui_pen(OVERLAY_COL_BLUE);
+    ui_puts(ui_cols() - (int)strlen(ver) - 1, 1, ver, 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
+
     draw_rule_scan(3, s.anim_frame);
 
     /* Tiles: one per profile, plus a trailing "pair keyboard" tile. */
@@ -493,7 +529,7 @@ static void render_pairing(void)
     ui_clear();
     ui_fill(0, 0, ui_cols(), ui_rows(), 0);
 
-    draw_titlebar("PAIR KEYBOARD");
+    draw_titlebar(2, "PAIR KEYBOARD", s.anim_frame);
     ui_pen(s.ndevs ? OVERLAY_COL_GREEN : OVERLAY_COL_AMBER);
     ui_putch(2, 1, s.ndevs ? UI_LED_ON : spinner_glyph(s.anim_frame), 0);
     ui_pen(OVERLAY_COL_DEFAULT);
@@ -590,7 +626,7 @@ static void render_connecting(const char *msg)
     ui_clear();
     ui_fill(0, 0, ui_cols(), ui_rows(), 0);
 
-    draw_titlebar("CYBERDECK");
+    draw_titlebar(2, "CYBERDECK", s.anim_frame);
     ui_pen(OVERLAY_COL_BLUE);
     ui_puts(ui_cols() - 12, 0, "// SSH DECK", 0);
     ui_pen(OVERLAY_COL_DEFAULT);

@@ -10,6 +10,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_app_desc.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -79,6 +80,7 @@ static const cyberdeck_ble_ops_t s_ble_ops = {
     .exit_pairing     = ble_keyboard_exit_pairing,
     .get_scan_results = ble_keyboard_get_scan_results,
     .select_device    = ble_keyboard_select_device,
+    .get_name         = ble_keyboard_get_connected_name,
 };
 
 /* -------------------------------------------------------------------------
@@ -156,6 +158,7 @@ void app_main(void)
         .boot_delay_ms      = 1500,
         .ssh_retry_delay_ms = 5000,
         .auto_reconnect     = CONFIG_SSH_AUTO_RECONNECT,
+        .version            = esp_app_get_description()->version,
         .fallback_host      = CONFIG_SSH_DEFAULT_HOST,
         .fallback_port      = CONFIG_SSH_DEFAULT_PORT,
         .fallback_user      = CONFIG_SSH_DEFAULT_USER,
