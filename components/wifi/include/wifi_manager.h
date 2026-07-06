@@ -1,36 +1,45 @@
 /*
- * WiFi manager interface
+ * WiFi manager — profile-driven STA lifecycle.
+ *
+ * wifi_manager_connect() takes a list of stored profiles and works through
+ * them in order (async, event-driven) until one yields an IP. On link loss
+ * it retries automatically; wifi_manager_disconnect() stops that.
+ *
+ * Simulator: always CONNECTED after connect() (host has networking);
+ * init performs WSAStartup.
  */
 
 #ifndef WIFI_MANAGER_H
 #define WIFI_MANAGER_H
 
 #include "esp_err.h"
+#include "storage.h"    /* wifi_profile_t */
 #include <stdbool.h>
 
-/**
- * Initialize WiFi manager
- */
+typedef enum {
+    WIFI_MGR_IDLE = 0,      /* no connect requested (or intentionally down) */
+    WIFI_MGR_CONNECTING,    /* cycling through profiles                     */
+    WIFI_MGR_CONNECTED,     /* associated, got IP                           */
+    WIFI_MGR_LOST,          /* had a link, lost it — auto-retrying          */
+    WIFI_MGR_FAILED,        /* full profile cycle failed — slow retry       */
+} wifi_mgr_state_t;
+
+/** One-time driver init. Idempotent. Call after esp_netif/event loop init. */
 esp_err_t wifi_manager_init(void);
 
 /**
- * Connect to WiFi network
+ * Start connecting. Profiles are copied; tried in array order, cycling with
+ * backoff until one connects or wifi_manager_disconnect() is called.
  */
-esp_err_t wifi_manager_connect(void);
+esp_err_t wifi_manager_connect(const wifi_profile_t *profiles, int count);
 
-/**
- * Disconnect from WiFi
- */
+/** Intentional disconnect — stops auto-retry, state returns to IDLE. */
 esp_err_t wifi_manager_disconnect(void);
 
-/**
- * Check if connected to WiFi
- */
-bool wifi_manager_is_connected(void);
-
-/**
- * Get IP address
- */
-const char* wifi_manager_get_ip(void);
+wifi_mgr_state_t wifi_manager_get_state(void);
+bool             wifi_manager_is_connected(void);
+const char      *wifi_manager_get_ip(void);
+/** SSID of the connected (or currently attempted) profile, "" if none. */
+const char      *wifi_manager_get_ssid(void);
 
 #endif // WIFI_MANAGER_H
