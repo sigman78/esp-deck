@@ -68,6 +68,11 @@ void ui_no_cursor(void);
 /** Set the two overlay colors (all cells share them; INVERSE swaps). */
 void ui_colors(color_t fg, color_t bg);
 
+/** Set the current accent color (OVERLAY_COL_*) for subsequent draws. Applies
+ *  to every ui_putch/puts/printf/tile until changed; reset to default each
+ *  ui_clear()/ui_dim(). */
+void ui_pen(uint8_t color);
+
 /** Clear the whole overlay to transparent. */
 void ui_clear(void);
 

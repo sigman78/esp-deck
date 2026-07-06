@@ -100,10 +100,23 @@ esp_lcd_panel_handle_t display_get_panel(void);
 #define OVERLAY_ATTR_INVERSE  (1 << 0)
 #define OVERLAY_ATTR_DIM      (1 << 1)
 
+/* Per-cell accent color: index into the overlay palette. 0 = use the screen's
+ * default overlay fg (set via display_set_overlay_colors); 1..N pick a fixed
+ * accent so a single screen can mix colors without a per-screen repaint. */
+#define OVERLAY_COL_DEFAULT   0
+#define OVERLAY_COL_GREEN     1
+#define OVERLAY_COL_CYAN      2
+#define OVERLAY_COL_MAGENTA   3
+#define OVERLAY_COL_AMBER     4
+#define OVERLAY_COL_RED       5
+#define OVERLAY_COL_BLUE      6
+#define OVERLAY_COL_WHITE     7
+#define OVERLAY_PAL_SIZE      8
+
 typedef struct {
     uint16_t cp;     /* BMP codepoint; 0 = transparent */
     uint8_t  attrs;  /* OVERLAY_ATTR_* flags            */
-    uint8_t  _rsvd;
+    uint8_t  color;  /* OVERLAY_COL_* accent palette index */
 } display_overlay_cell_t;
 
 /** Register (or clear) the overlay buffer.  Pass NULL to disable the overlay.

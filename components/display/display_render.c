@@ -30,6 +30,20 @@ static DRAM_ATTR int                     s_overlay_rows = 0;
 static DRAM_ATTR color_t                 s_overlay_fg   = COLOR_BLACK;
 static DRAM_ATTR color_t                 s_overlay_bg   = COLOR_CYAN;
 
+/* Overlay accent palette (index 0 is a sentinel → use s_overlay_fg). Kept in
+ * DRAM so the bounce-buffer ISR can read it without touching flash. */
+/* Classic VGA bright-16 palette (the iconic DOS text-mode colors). */
+static DRAM_ATTR const color_t s_overlay_pal[OVERLAY_PAL_SIZE] = {
+    0,                        /* 0: default → replaced by s_overlay_fg */
+    RGB565( 85, 255,  85),    /* 1 green   (VGA bright green)   */
+    RGB565( 85, 255, 255),    /* 2 cyan    (VGA bright cyan)    */
+    RGB565(255,  85, 255),    /* 3 magenta (VGA bright magenta) */
+    RGB565(255, 255,  85),    /* 4 amber   (VGA yellow)         */
+    RGB565(255,  85,  85),    /* 5 red     (VGA bright red)     */
+    RGB565( 85,  85, 255),    /* 6 blue    (VGA bright blue)    */
+    RGB565(255, 255, 255),    /* 7 white   (VGA white)          */
+};
+
 /* -------------------------------------------------------------------------
  * Cursor state — updated by terminal via display_set_cursor().
  * Blink is driven internally by a frame counter; ~2 Hz at 60 fps.
@@ -217,10 +231,11 @@ void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
 
         const uint8_t ov_attrs = (ov_row && c < s_overlay_cols) ? ov_row[c].attrs : 0;
         const uint16_t ov_cp   = (ov_row && c < s_overlay_cols) ? ov_row[c].cp   : 0;
+        const uint8_t ov_color = (ov_row && c < s_overlay_cols) ? ov_row[c].color : 0;
 
         if (ov_cp != 0) {
-            /* Overlay cell — global overlay colors, overlay codepoint */
-            fg    = s_overlay_fg;
+            /* Overlay cell — per-cell accent (or the screen default) + codepoint */
+            fg    = ov_color ? s_overlay_pal[ov_color] : s_overlay_fg;
             bg    = s_overlay_bg;
             if (ov_attrs & OVERLAY_ATTR_INVERSE) {
                 color_t t = fg; fg = bg; bg = t;

@@ -50,9 +50,10 @@ typedef enum {
 #define ANIM_PERIOD_MS   100          /* ~10 fps subtle UI animation */
 #define TOAST_MS         3000
 
-/* Shell palette — pale green on near-black, classic terminal glow. */
-#define UI_FG   RGB565(140, 255, 190)
-#define UI_BG   RGB565(0, 24, 16)
+/* Shell palette — VGA phosphor green on black. Per-cell accents (OVERLAY_COL_*)
+ * layer the rest of the classic 16-color set on top. */
+#define UI_FG   RGB565(85, 255, 85)   /* VGA bright green */
+#define UI_BG   RGB565(0, 0, 0)       /* VGA black        */
 
 /* A page of finger-sized tiles laid out in a grid, with two-axis touch
  * hit-testing. Recomputed by each render_*() and saved for the tap handler.
@@ -290,17 +291,19 @@ static void draw_rule(int row)
     for (int i = 0; i < ui_cols(); i++) ui_putch(i, row, UI_DH, 0);
 }
 
-/* Animated rule: a ░▒▓█ "comet" sweeps left→right along the divider. */
+/* Animated rule: a cyan ░▒▓█ "comet" sweeps left→right along the divider. */
 static void draw_rule_scan(int row, uint32_t frame)
 {
     int W = ui_cols();
     draw_rule(row);
     static const uint16_t comet[4] = { UI_SHADE1, UI_SHADE2, UI_SHADE3, UI_BLOCK };
     int head = (int)((frame * 2u) % (uint32_t)W);   /* 2 cells/frame */
+    ui_pen(OVERLAY_COL_CYAN);
     for (int k = 0; k < 4; k++) {
         int x = head - (3 - k);
         if (x >= 0 && x < W) ui_putch(x, row, comet[k], 0);
     }
+    ui_pen(OVERLAY_COL_DEFAULT);
 }
 
 /* 8-frame braille spinner (U+2800 block — present in the font). */
@@ -316,25 +319,93 @@ static uint16_t spinner_glyph(uint32_t frame)
 static void draw_titlebar(const char *text)
 {
     int x = 2;
+    ui_pen(OVERLAY_COL_MAGENTA);
     ui_putch(x++, 0, UI_SHADE1, 0);
     ui_putch(x++, 0, UI_SHADE2, 0);
     ui_putch(x++, 0, UI_SHADE3, 0);
     ui_putch(x++, 0, UI_BLOCK,  0);
+    ui_pen(OVERLAY_COL_CYAN);
     ui_putch(x++, 0, ' ', OVERLAY_ATTR_INVERSE);
     ui_puts (x, 0, text, OVERLAY_ATTR_INVERSE);
     x += (int)strlen(text);
     ui_putch(x++, 0, ' ', OVERLAY_ATTR_INVERSE);
+    ui_pen(OVERLAY_COL_MAGENTA);
     ui_putch(x++, 0, UI_BLOCK,  0);
     ui_putch(x++, 0, UI_SHADE3, 0);
     ui_putch(x++, 0, UI_SHADE2, 0);
     ui_putch(x++, 0, UI_SHADE1, 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
 }
 
 /* Little ● / ○ LED then a label + value, cyberpunk status line. */
 static void draw_status_led(int row, bool on, const char *label, const char *value)
 {
+    ui_pen(on ? OVERLAY_COL_GREEN : OVERLAY_COL_RED);
     ui_putch(2, row, on ? UI_LED_ON : UI_LED_OFF, 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
     ui_printf(4, row, 0, "%-4s %s", label, value);
+}
+
+/* 5x5 block glyphs for the boot logo (row-major, '#' = filled). */
+static const char *boot_glyph(char c)
+{
+    switch (c) {
+    case 'C': return "#####" "#    " "#    " "#    " "#####";
+    case 'Y': return "#   #" " # # " "  #  " "  #  " "  #  ";
+    case 'B': return "#### " "#   #" "#### " "#   #" "#### ";
+    case 'E': return "#####" "#    " "###  " "#    " "#####";
+    case 'R': return "#### " "#   #" "#### " "#  # " "#   #";
+    case 'D': return "#### " "#   #" "#   #" "#   #" "#### ";
+    case 'K': return "#   #" "#  # " "###  " "#  # " "#   #";
+    case '*': return "  #  " "# # #" " ### " "# # #" "  #  ";
+    default:  return "     " "     " "     " "     " "     ";
+    }
+}
+
+/* Boot splash: a big CYBER*DECK block logo that wipes in left→right over ~80%
+ * of the boot delay (a bright white scan edge leads the reveal), then holds.
+ * Runs from the ST_BOOT tick while WiFi/BLE come up in the background. */
+static void render_boot(uint64_t now)
+{
+    static const char LOGO[] = "CYBER*DECK";
+    const int GW = 5, GH = 5, GAP = 1;
+    int n = (int)strlen(LOGO);
+    int total_w = n * (GW + GAP) - GAP;
+    int x0 = (ui_cols() - total_w) / 2;
+    int y0 = ui_rows() / 4;
+
+    uint64_t start     = s.boot_until - s.cfg.boot_delay_ms;
+    uint32_t reveal_ms = s.cfg.boot_delay_ms * 4 / 5;
+    uint32_t el        = (uint32_t)(now - start);
+    int reveal = reveal_ms ? (int)((uint64_t)el * total_w / reveal_ms) : total_w;
+    if (reveal > total_w) reveal = total_w;
+
+    ui_colors(UI_FG, UI_BG);
+    ui_clear();
+    ui_fill(0, 0, ui_cols(), ui_rows(), 0);
+
+    for (int i = 0; i < n; i++) {
+        const char *g = boot_glyph(LOGO[i]);
+        int gx = x0 + i * (GW + GAP);
+        uint8_t base = (LOGO[i] == '*') ? OVERLAY_COL_MAGENTA : OVERLAY_COL_CYAN;
+        for (int r = 0; r < GH; r++)
+            for (int c = 0; c < GW; c++) {
+                int col_abs = gx + c - x0;
+                if (col_abs >= reveal || g[r * GW + c] != '#') continue;
+                bool edge = (col_abs >= reveal - 2);   /* glowing scan front */
+                ui_pen(edge ? OVERLAY_COL_WHITE : base);
+                ui_putch(gx + c, y0 + r, UI_BLOCK, 0);
+            }
+    }
+
+    ui_pen(OVERLAY_COL_GREEN);
+    char sub[24];
+    snprintf(sub, sizeof(sub), "INITIALIZING%.*s", (int)(s.anim_frame % 4), "...");
+    ui_puts((ui_cols() - 15) / 2, y0 + GH + 2, sub, 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
+
+    ui_no_cursor();
+    ui_present();
 }
 
 static void render_home(void)
@@ -345,7 +416,9 @@ static void render_home(void)
 
     /* Header banner + status HUD. */
     draw_titlebar("CYBERDECK");
+    ui_pen(OVERLAY_COL_BLUE);
     ui_puts(ui_cols() - 12, 0, "// SSH DECK", 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
 
     char net[48];
     snprintf(net, sizeof(net), "%-18s %s",
@@ -373,25 +446,32 @@ static void render_home(void)
             snprintf(body, sizeof(body), "%s@%s:%u%s",
                      p->user, p->host, (unsigned)p->port,
                      p->auth == STORAGE_AUTH_KEY ? "  [key]" : "");
+            ui_pen(OVERLAY_COL_GREEN);
             ui_tile(cx, cy, g.tw, g.th, p->name, body, sel);
         } else {
+            ui_pen(OVERLAY_COL_CYAN);
             ui_tile(cx, cy, g.tw, g.th, "+ Pair keyboard",
                     s.cfg.ble ? "tap or long-press" : "(no BLE)", sel);
         }
     }
+    ui_pen(OVERLAY_COL_DEFAULT);
 
     if (s.profile_count == 0)
         ui_puts(4, 5, "no profiles — edit profiles.ini in storage", 0);
 
     /* Footer strip. */
     draw_rule(ui_rows() - 2);
+    ui_pen(OVERLAY_COL_CYAN);
     ui_putch(2, ui_rows() - 1, UI_PLAY, 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
     ui_puts(4, ui_rows() - 1,
             "tap to select, tap again to connect   hold = pair", 0);
     if (s.toast[0]) {
         int len = (int)strlen(s.toast) + 2;
+        ui_pen(OVERLAY_COL_AMBER);
         ui_printf(ui_cols() - len - 1, ui_rows() - 1, OVERLAY_ATTR_INVERSE,
                   " %s ", s.toast);
+        ui_pen(OVERLAY_COL_DEFAULT);
     }
 
     ui_no_cursor();
@@ -412,7 +492,9 @@ static void render_pairing(void)
     ui_fill(0, 0, ui_cols(), ui_rows(), 0);
 
     draw_titlebar("PAIR KEYBOARD");
+    ui_pen(s.ndevs ? OVERLAY_COL_GREEN : OVERLAY_COL_AMBER);
     ui_putch(2, 1, s.ndevs ? UI_LED_ON : spinner_glyph(s.anim_frame), 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
     ui_puts(4, 1, s.ndevs ? "select your keyboard below"
                           : "scanning for keyboards...", 0);
     draw_rule_scan(3, s.anim_frame);
@@ -425,17 +507,22 @@ static void render_pairing(void)
     s.grid   = g;
     if (s.pair_sel >= g.count) s.pair_sel = g.count - 1;
 
+    ui_pen(OVERLAY_COL_GREEN);
     for (int i = 0; i < ndev; i++) {
         ui_tile(tile_x(&g, i), tile_y(&g, i), g.tw, g.th,
                 s.devs[i].name,
                 s.devs[i].addr_type ? "random addr" : "public addr",
                 i == s.pair_sel);
     }
+    ui_pen(OVERLAY_COL_RED);
     ui_tile(tile_x(&g, ndev), tile_y(&g, ndev), g.tw, g.th,
             "Cancel", "", ndev == s.pair_sel);
+    ui_pen(OVERLAY_COL_DEFAULT);
 
     draw_rule(ui_rows() - 2);
+    ui_pen(OVERLAY_COL_CYAN);
     ui_putch(2, ui_rows() - 1, UI_PLAY, 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
     ui_puts(4, ui_rows() - 1, "put the keyboard in pairing mode, then tap it", 0);
     ui_no_cursor();
     ui_present();
@@ -481,9 +568,12 @@ static void render_hostkey(void)
     const char *trust = s.fp_mismatch
         ? (s.hostkey_armed ? "TAP AGAIN to REPLACE" : "Replace key")
         : "Trust & Connect";
+    ui_pen(s.fp_mismatch ? OVERLAY_COL_AMBER : OVERLAY_COL_GREEN);
     ui_tile(tile_x(&g, 0), tile_y(&g, 0), g.tw, g.th, trust,
             s.fp_mismatch ? "danger" : "", s.hostkey_armed);
+    ui_pen(s.fp_mismatch ? OVERLAY_COL_GREEN : OVERLAY_COL_DEFAULT);
     ui_tile(tile_x(&g, 1), tile_y(&g, 1), g.tw, g.th, "Cancel", "", false);
+    ui_pen(OVERLAY_COL_DEFAULT);
 
     ui_puts(4, ui_rows() - 1, s.fp_mismatch
             ? "keyboard: Y = replace   Esc = cancel"
@@ -499,7 +589,9 @@ static void render_connecting(const char *msg)
     ui_fill(0, 0, ui_cols(), ui_rows(), 0);
 
     draw_titlebar("CYBERDECK");
+    ui_pen(OVERLAY_COL_BLUE);
     ui_puts(ui_cols() - 12, 0, "// SSH DECK", 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
     draw_rule(3);
 
     const conn_profile_t *p = &s.profiles[s.connect_idx];
@@ -509,7 +601,9 @@ static void render_connecting(const char *msg)
     snprintf(line, sizeof(line), "%s  %s@%s:%u", msg, p->user, p->host,
              (unsigned)p->port);
     int lx = (ui_cols() - (int)strlen(line)) / 2;
+    ui_pen(OVERLAY_COL_CYAN);
     ui_putch(lx - 2, cy - 1, UI_DIAMOND, 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
     ui_puts(lx, cy - 1, line, 0);
 
     /* Cyberpunk "activity" bar: ░▒▓█▓▒░ repeating gradient. */
@@ -517,8 +611,10 @@ static void render_connecting(const char *msg)
         UI_SHADE1, UI_SHADE2, UI_SHADE3, UI_BLOCK, UI_SHADE3, UI_SHADE2, UI_SHADE1
     };
     int bw = 42, bx = (ui_cols() - bw) / 2;
+    ui_pen(OVERLAY_COL_CYAN);
     for (int i = 0; i < bw; i++)
         ui_putch(bx + i, cy + 1, grad[i % 7], 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
 
     ui_no_cursor();
     ui_present();
@@ -534,7 +630,7 @@ static const char *menu_items[] = {
 
 static void render_menu(void)
 {
-    ui_colors(COLOR_BLACK, COLOR_CYAN);
+    ui_colors(UI_FG, UI_BG);
     ui_dim();   /* dim the live session behind the menu so it pops */
 
     tilegrid_t g = { .tw = 40, .th = 4, .gx = 0, .gy = 1,
@@ -543,11 +639,19 @@ static void render_menu(void)
     g.y0 = (ui_rows() - (MENU_COUNT * g.th + (MENU_COUNT - 1) * g.gy)) / 2;
     s.grid = g;
 
+    static const uint8_t menu_col[MENU_COUNT] = {
+        OVERLAY_COL_GREEN,   /* resume            */
+        OVERLAY_COL_AMBER,   /* disconnect        */
+        OVERLAY_COL_AMBER,   /* disconnect+profile */
+        OVERLAY_COL_CYAN,    /* pair keyboard     */
+    };
     for (int i = 0; i < MENU_COUNT; i++) {
         bool dim = (i == 3 && !s.cfg.ble);   /* no BLE on this platform */
+        ui_pen(menu_col[i]);
         ui_tile(tile_x(&g, i), tile_y(&g, i), g.tw, g.th,
                 menu_items[i], dim ? "(unavailable)" : "", i == s.menu_sel);
     }
+    ui_pen(OVERLAY_COL_DEFAULT);
     ui_no_cursor();
     ui_present();
 }
@@ -758,8 +862,14 @@ void cyberdeck_app_tick(uint64_t now)
 
     switch (s.state) {
     case ST_BOOT:
-        if (now >= s.boot_until)
+        if (now >= s.boot_until) {
             enter_home(now);
+            break;
+        }
+        if (now >= s.next_anim) {
+            s.next_anim = now + ANIM_PERIOD_MS;
+            render_boot(now);
+        }
         break;
 
     case ST_HOME:

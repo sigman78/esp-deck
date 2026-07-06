@@ -23,6 +23,7 @@ static display_overlay_cell_t *s_draw   = NULL;   /* we write here (back)  */
 static int  s_cols    = 0;
 static int  s_rows    = 0;
 static bool s_visible = false;
+static uint8_t s_pen  = OVERLAY_COL_DEFAULT;   /* current accent color */
 
 esp_err_t ui_init(void)
 {
@@ -84,6 +85,7 @@ void ui_colors(color_t fg, color_t bg)
 
 void ui_clear(void)
 {
+    s_pen = OVERLAY_COL_DEFAULT;   /* each frame starts on the screen default */
     if (s_draw)
         memset(s_draw, 0, (size_t)s_cols * s_rows * sizeof(*s_draw));
 }
@@ -93,18 +95,23 @@ void ui_dim(void)
     /* Transparent scrim: every cell stays see-through (cp==0) but flagged DIM,
      * so the renderer shows the terminal behind at ~50% brightness. Draw
      * opaque chrome on top afterwards. */
+    s_pen = OVERLAY_COL_DEFAULT;
     if (!s_draw) return;
     for (int i = 0; i < s_cols * s_rows; i++) {
         s_draw[i].cp    = 0;
         s_draw[i].attrs = OVERLAY_ATTR_DIM;
+        s_draw[i].color = 0;
     }
 }
+
+void ui_pen(uint8_t color) { s_pen = color; }
 
 void ui_putch(int col, int row, uint16_t cp, uint8_t attrs)
 {
     if (s_draw && col >= 0 && col < s_cols && row >= 0 && row < s_rows) {
         s_draw[row * s_cols + col].cp    = cp;
         s_draw[row * s_cols + col].attrs = attrs;
+        s_draw[row * s_cols + col].color = s_pen;
     }
 }
 
