@@ -33,6 +33,14 @@ ble_state_t ble_keyboard_get_state(void);
 void ble_keyboard_enter_pairing(void);
 
 /**
+ * Leave BLE_PAIRING_SCAN without selecting a device.
+ * Resumes the reconnect scan when bonded devices exist, else goes idle.
+ * (Without this, a dismissed pairing UI left the backend scanning forever
+ * and auto-reconnect was dead until reboot.)
+ */
+void ble_keyboard_exit_pairing(void);
+
+/**
  * Start reconnect scan for devices already in the storage registry.
  * Called automatically by backend_init if registry is non-empty.
  * No-op if already connected.

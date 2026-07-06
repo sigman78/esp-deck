@@ -20,6 +20,7 @@
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
 #include "host/ble_gap.h"
+#include "host/ble_store.h"
 #include "store/config/ble_store_config.h"
 
 #include <string.h>
@@ -46,6 +47,10 @@ static int               s_scan_count = 0;
 
 /* BDA of connected device (NimBLE little-endian: val[0] = LSB) */
 static uint8_t s_connected_bda[6];
+static esp_hidh_dev_t *s_connected_dev = NULL;
+
+/* Previous HID report keys — for rollover diffing (emit only new keys) */
+static uint8_t s_prev_keys[6];
 
 /* ------------------------------------------------------------------ */
 /*  Forward declarations                                               */
@@ -158,6 +163,20 @@ void ble_keyboard_reconnect_start(void)
     start_scan(CONFIG_INPUT_BLE_SCAN_DURATION * 1000);
 }
 
+void ble_keyboard_exit_pairing(void)
+{
+    if (s_state != BLE_PAIRING_SCAN) return;
+    ESP_LOGI(TAG, "Leaving pairing mode");
+    ble_gap_disc_cancel();
+    if (s_registry_count > 0) {
+        /* Resume looking for a known keyboard. */
+        s_state = BLE_RECONNECT;
+        start_scan(CONFIG_INPUT_BLE_SCAN_DURATION * 1000);
+    } else {
+        s_state = BLE_IDLE;
+    }
+}
+
 void ble_keyboard_select_device(const uint8_t addr[6], uint8_t addr_type)
 {
     log_addr("Connecting to", addr);
@@ -168,11 +187,28 @@ void ble_keyboard_select_device(const uint8_t addr[6], uint8_t addr_type)
 
 void ble_keyboard_forget_device(const uint8_t addr[6])
 {
+    /* Find the stored addr_type before removing the registry record. */
+    uint8_t addr_type = 0;
+    for (int i = 0; i < s_registry_count; i++) {
+        if (memcmp(s_registry[i].addr, addr, 6) == 0) {
+            addr_type = s_registry[i].addr_type;
+            break;
+        }
+    }
+
     storage_ble_remove(addr);
     storage_ble_list(s_registry, STORAGE_BLE_MAX, &s_registry_count);
-    if (s_state == BLE_CONNECTED && memcmp(s_connected_bda, addr, 6) == 0) {
-        /* TODO: disconnect active connection */
-        ESP_LOGW(TAG, "forget_device: disconnect not yet implemented");
+
+    /* Delete the NimBLE bond so the slot (MAX_BONDS=3) is freed and a
+     * re-pair starts from scratch. */
+    ble_addr_t peer = { .type = addr_type };
+    memcpy(peer.val, addr, 6);
+    ble_store_util_delete_peer(&peer);
+
+    if (s_state == BLE_CONNECTED && memcmp(s_connected_bda, addr, 6) == 0 &&
+        s_connected_dev) {
+        esp_hidh_dev_close(s_connected_dev);
+        /* CLOSE_EVT will drive the state machine from here. */
     }
 }
 
@@ -211,6 +247,10 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         if (!ad_has_hid_uuid(d->data, d->length_data)) break;
 
         if (s_state == BLE_RECONNECT) {
+            /* Registry holds IDENTITY addresses. Keyboards advertising with
+             * a static-random or public address match directly; ones that
+             * rotate RPAs need host-based privacy (resolving list) to match
+             * here — enable BT_NIMBLE_HOST_BASED_PRIVACY if yours does. */
             if (addr_in_registry(d->addr.val)) {
                 log_addr("Known device found, connecting", d->addr.val);
                 ble_gap_disc_cancel();
@@ -250,15 +290,11 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg)
         }
         break;
 
-    case BLE_GAP_EVENT_ENC_CHANGE:
-        if (event->enc_change.status == 0) {
-            ESP_LOGI(TAG, "Encryption established");
-        } else {
-            ESP_LOGW(TAG, "Encryption failed (status=%d)",
-                     event->enc_change.status);
-            s_state = BLE_RECONNECT;
-        }
-        break;
+    /* Note: connection-oriented events (ENC_CHANGE, REPEAT_PAIRING) do not
+     * arrive here — this callback is registered via ble_gap_disc and only
+     * receives discovery events. esp_hidh owns the connection callback;
+     * stale-bond recovery is handled by deleting the bond in
+     * ble_keyboard_forget_device (and NimBLE's repeat-pairing Kconfig). */
 
     default:
         break;
@@ -296,16 +332,44 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
         }
         log_addr("Connected:", bda);
         memcpy(s_connected_bda, bda, 6);
+        s_connected_dev = data->open.dev;
+        memset(s_prev_keys, 0, sizeof(s_prev_keys));
         s_state = BLE_CONNECTED;
 
-        /* Save/update device in registry */
+        /* Save/update the registry record. Prefer the peer's IDENTITY
+         * address from the connection descriptor (survives RPA rotation);
+         * name/addr_type come from the pairing scan buffer, else from the
+         * existing record (boot-time reconnect has no scan buffer — the
+         * old code clobbered the stored name with "Unknown HID" here). */
         ble_device_info_t dev = {0};
         memcpy(dev.addr, bda, 6);
-        for (int i = 0; i < s_scan_count; i++) {
+
+        struct ble_gap_conn_desc desc;
+        ble_addr_t search = { .type = BLE_ADDR_PUBLIC };
+        memcpy(search.val, bda, 6);
+        bool have_desc = false;
+        for (uint8_t t = 0; t <= 1 && !have_desc; t++) {
+            search.type = t;
+            have_desc = (ble_gap_conn_find_by_addr(&search, &desc) == 0);
+        }
+        if (have_desc) {
+            memcpy(dev.addr, desc.peer_id_addr.val, 6);
+            dev.addr_type = desc.peer_id_addr.type;
+        }
+
+        bool found = false;
+        for (int i = 0; i < s_scan_count && !found; i++) {
             if (memcmp(s_scan_results[i].addr, bda, 6) == 0) {
-                dev.addr_type = s_scan_results[i].addr_type;
+                if (!have_desc) dev.addr_type = s_scan_results[i].addr_type;
                 memcpy(dev.name, s_scan_results[i].name, sizeof(dev.name));
-                break;
+                found = true;
+            }
+        }
+        for (int i = 0; i < s_registry_count && !found; i++) {
+            if (memcmp(s_registry[i].addr, dev.addr, 6) == 0) {
+                memcpy(dev.name, s_registry[i].name, sizeof(dev.name));
+                if (!have_desc) dev.addr_type = s_registry[i].addr_type;
+                found = true;
             }
         }
         if (dev.name[0] == '\0')
@@ -317,9 +381,12 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
 
     case ESP_HIDH_CLOSE_EVT:
         ESP_LOGI(TAG, "Keyboard disconnected, restarting reconnect scan");
-        s_state = BLE_RECONNECT;
+        s_connected_dev = NULL;
+        memset(s_prev_keys, 0, sizeof(s_prev_keys));
+        s_state = (s_registry_count > 0) ? BLE_RECONNECT : BLE_IDLE;
         ble_gap_disc_cancel();
-        start_scan(CONFIG_INPUT_BLE_SCAN_DURATION * 1000);
+        if (s_state == BLE_RECONNECT)
+            start_scan(CONFIG_INPUT_BLE_SCAN_DURATION * 1000);
         break;
 
     case ESP_HIDH_INPUT_EVT: {
@@ -330,9 +397,22 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
         uint8_t        modifiers = report[0];
         uint8_t n = (data->input.length < 8) ? (uint8_t)data->input.length : 8u;
 
+        /* Boot-protocol reports list ALL held keys every time. Emit only
+         * keys absent from the previous report, otherwise holding 'a' and
+         * pressing 'b' re-sends 'a' (classic rollover duplication). */
+        uint8_t new_keys[6] = {0};
+        uint8_t nk = 0;
+
         for (uint8_t i = 2; i < n; i++) {
             uint8_t kc = report[i];
             if (kc == 0x00 || kc == 0x01) continue;   /* 0x01 = ErrorRollOver */
+            if (nk < sizeof(new_keys)) new_keys[nk++] = kc;
+
+            bool held = false;
+            for (uint8_t j = 0; j < sizeof(s_prev_keys); j++) {
+                if (s_prev_keys[j] == kc) { held = true; break; }
+            }
+            if (held) continue;
 
             uint8_t buf[INPUT_EVENT_MAX_LEN];
             uint8_t len = hid_keymap_translate(kc, modifiers,
@@ -343,6 +423,7 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
             for (uint8_t j = 0; j < len; j++) ev.buf[j] = buf[j];
             input_hal_post_event(&ev);
         }
+        memcpy(s_prev_keys, new_keys, sizeof(s_prev_keys));
         break;
     }
 
@@ -442,6 +523,7 @@ esp_err_t ble_keyboard_backend_init(void)
 esp_err_t   ble_keyboard_backend_init(void)                            { return ESP_OK; }
 ble_state_t ble_keyboard_get_state(void)                               { return BLE_IDLE; }
 void        ble_keyboard_enter_pairing(void)                           {}
+void        ble_keyboard_exit_pairing(void)                            {}
 void        ble_keyboard_reconnect_start(void)                         {}
 int         ble_keyboard_get_scan_results(ble_device_info_t *o, int m) { (void)o; (void)m; return 0; }
 void        ble_keyboard_select_device(const uint8_t a[6], uint8_t t)  { (void)a; (void)t; }
