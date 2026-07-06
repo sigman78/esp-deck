@@ -106,6 +106,22 @@ static StackType_t      *s_read_task_stack = NULL;
  */
 static SemaphoreHandle_t s_session_lock = NULL;
 
+/* Pending terminal-response bytes (DA1 / cursor-position replies that tsm
+ * emits while parsing during vterm_write). These MUST NOT be written to
+ * libssh2 from the response callback: it runs inside the read task with
+ * s_session_lock held, and a blocking write there could park the read task
+ * holding the lock — which, if disconnect() then force-deletes the task,
+ * orphans the mutex and wedges all future SSH I/O. Instead we buffer them and
+ * drain non-blocking from the read loop (still under the lock). Responses are
+ * a handful of bytes; 256 is plenty. Only ever touched under s_session_lock. */
+#define SSH_RESP_BUF 256
+static uint8_t s_resp_buf[SSH_RESP_BUF];
+static size_t  s_resp_len = 0;
+
+/* Bound on any blocking libssh2 call (handshake/auth). Non-blocking calls in
+ * the read loop are unaffected — they return EAGAIN immediately. */
+#define SSH_BLOCKING_TIMEOUT_MS 20000
+
 /* Fingerprint of the most recent connect attempt + last error message. */
 static char s_fingerprint[65] = "";
 static char s_last_error[96]  = "";
@@ -135,6 +151,7 @@ static void ssh_cleanup(void)
         s_sock = -1;
     }
     s_connected = false;
+    s_resp_len  = 0;
     ESP_LOGI(TAG, "SSH cleanup done  — libssh2 heap: %zu B (expect 0)", s_alloc_bytes);
 }
 
@@ -145,11 +162,32 @@ static void ssh_cleanup(void)
 static void ssh_vterm_response_cb(const char *data, size_t len, void *user)
 {
     (void)user;
-    if (s_connected && s_channel && len > 0) {
-        /* Use the blocking send path; responses are tiny. */
-        libssh2_session_set_blocking(s_session, 1);
-        libssh2_channel_write(s_channel, data, len);
-        libssh2_session_set_blocking(s_session, 0);
+    if (!s_connected || len == 0) return;
+    /* Runs inside the read loop with s_session_lock held. Only buffer here —
+     * never write to libssh2 (see s_resp_buf note). Drop the overflow tail:
+     * the buffer only fills if the uplink is wedged, in which case the
+     * session is about to drop anyway. */
+    size_t room = sizeof(s_resp_buf) - s_resp_len;
+    if (len > room) len = room;
+    if (len) {
+        memcpy(s_resp_buf + s_resp_len, data, len);
+        s_resp_len += len;
+    }
+}
+
+/* Flush buffered terminal responses with NON-blocking writes. Caller must hold
+ * s_session_lock and the session must be in non-blocking mode. Anything not
+ * sent (EAGAIN) stays buffered for the next read-loop iteration. */
+static void drain_responses(void)
+{
+    while (s_resp_len > 0 && s_channel) {
+        ssize_t rc = libssh2_channel_write(s_channel,
+                                           (const char *)s_resp_buf, s_resp_len);
+        if (rc == LIBSSH2_ERROR_EAGAIN) break;   /* retry next iteration */
+        if (rc < 0) { s_resp_len = 0; break; }   /* unrecoverable — drop */
+        if ((size_t)rc >= s_resp_len) { s_resp_len = 0; break; }
+        memmove(s_resp_buf, s_resp_buf + rc, s_resp_len - (size_t)rc);
+        s_resp_len -= (size_t)rc;
     }
 }
 
@@ -190,7 +228,7 @@ static void ssh_read_task(void *arg)
          * that is safe: same task, lock already held, cb does not re-take. */
         int n = libssh2_channel_read(s_channel, buf, sizeof(buf));
         if (n > 0) {
-            vterm_write(buf, (size_t)n);
+            vterm_write(buf, (size_t)n);   /* may buffer replies via the cb */
         } else if (n == LIBSSH2_ERROR_EAGAIN) {
             /* No data — good time to send a keepalive if one is due. */
 #if CONFIG_SSH_KEEPALIVE_INTERVAL > 0
@@ -202,6 +240,10 @@ static void ssh_read_task(void *arg)
             log_last_error("channel_read");
             s_connected = false;
         }
+
+        /* Push out any terminal responses tsm queued above (non-blocking, so
+         * this never parks the task while holding the lock). */
+        if (s_connected) drain_responses();
 
         if (s_connected && libssh2_channel_eof(s_channel)) {
             ESP_LOGI(TAG, "ssh_read_task: channel EOF");
@@ -331,6 +373,9 @@ esp_err_t ssh_client_connect(const ssh_config_t *config)
         return ESP_FAIL;
     }
     libssh2_session_set_blocking(s_session, 1);
+    /* Never let the blocking handshake/auth hang forever on a dead link
+     * (do_connect runs synchronously on the shell task). */
+    libssh2_session_set_timeout(s_session, SSH_BLOCKING_TIMEOUT_MS);
 
     /* ── 4. SSH handshake ───────────────────────────────────────────── */
     ESP_LOGI(TAG, "SSH handshake...");
@@ -510,11 +555,18 @@ esp_err_t ssh_client_disconnect(void)
         vTaskDelay(pdMS_TO_TICKS(20));
 
     if (!s_read_task_done && s_read_task) {
-        /* Should never happen; forcing it risks abandoned libssh2 state. */
+        /* Should never happen now that the read task holds the lock only
+         * across non-blocking calls. If it ever does, the killed task may
+         * still own s_session_lock (FreeRTOS never releases a deleted task's
+         * mutex), so recreate the lock or every later take() deadlocks.
+         * Safe here: disconnect runs on the shell task, which is the only
+         * other taker — so nobody is parked on the lock at this instant. */
         ESP_LOGE(TAG, "ssh_read_task did not exit — force-deleting");
         vTaskDelete(s_read_task);
         s_read_task = NULL;
         s_read_task_done = true;
+        vSemaphoreDelete(s_session_lock);
+        s_session_lock = xSemaphoreCreateMutex();
     }
 
     vterm_set_response_cb(NULL, NULL);

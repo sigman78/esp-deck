@@ -19,3 +19,14 @@ static inline BaseType_t xTaskCreatePinnedToCore(
     if (out) *out = h;
     return pdPASS;
 }
+
+/* Static variant — the host has no separate TCB/stack, so the caller's
+ * buffers are ignored and a plain thread is spawned. Returns the handle
+ * (NULL on failure), matching the real xTaskCreateStatic* signature. */
+static inline TaskHandle_t xTaskCreateStaticPinnedToCore(
+    void (*fn)(void *), const char *name, uint32_t stack,
+    void *arg, unsigned prio, StackType_t *stackbuf, StaticTask_t *tcb, int core)
+{
+    (void)name; (void)stack; (void)prio; (void)stackbuf; (void)tcb; (void)core;
+    return CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)fn, arg, 0, NULL);
+}

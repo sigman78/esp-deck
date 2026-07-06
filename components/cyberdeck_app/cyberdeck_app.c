@@ -343,7 +343,11 @@ static void render_hostkey(void)
     ui_puts(x + 10, y + 5, half, 0);
     ui_puts(x + 10, y + 6, fp + 32, 0);
 
-    ui_puts(x + 2, y + h - 2, "Enter trust & connect      Esc cancel", 0);
+    if (s.fp_mismatch)
+        ui_puts(x + 2, y + h - 2,
+                "Press Y to REPLACE the pinned key      Esc cancel", 0);
+    else
+        ui_puts(x + 2, y + h - 2, "Enter trust & connect      Esc cancel", 0);
     ui_no_cursor();
     ui_present();
 }
@@ -459,6 +463,20 @@ static void start_connect(int idx, uint64_t not_before, uint64_t now)
         s.pinned_fp[0] = '\0';
 
     render_connecting(now < not_before ? "Retrying" : "Connecting to");
+}
+
+/* Pin the server's current fingerprint and (re)connect. Called from the
+ * hostkey prompt once the user has confirmed — a plain Enter for a first-seen
+ * host, but only an explicit 'Y' for a CHANGED key (possible MITM). */
+static void hostkey_trust_and_connect(uint64_t now)
+{
+    const conn_profile_t *p = &s.profiles[s.connect_idx];
+    storage_known_host_set(p->host, p->port, ssh_client_get_fingerprint());
+    snprintf(s.pinned_fp, sizeof(s.pinned_fp), "%s", ssh_client_get_fingerprint());
+    s.connect_armed = true;
+    s.connect_at    = now;
+    s.state         = ST_CONNECTING;
+    render_connecting("Connecting to");
 }
 
 static void enter_session(uint64_t now)
@@ -743,18 +761,17 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
         break;
 
     case ST_HOSTKEY:
-        if (k == K_ENTER) {
-            const conn_profile_t *p = &s.profiles[s.connect_idx];
-            storage_known_host_set(p->host, p->port,
-                                   ssh_client_get_fingerprint());
-            snprintf(s.pinned_fp, sizeof(s.pinned_fp), "%s",
-                     ssh_client_get_fingerprint());
-            s.connect_armed = true;
-            s.connect_at = now;
-            s.state = ST_CONNECTING;
-            render_connecting("Connecting to");
-        } else if (k == K_ESC) {
-            enter_home(now);
+        if (!s.fp_mismatch) {
+            /* First contact (TOFU): a single Enter pins the key and connects. */
+            if (k == K_ENTER)     hostkey_trust_and_connect(now);
+            else if (k == K_ESC)  enter_home(now);
+        } else {
+            /* The pinned key CHANGED — possible MITM. Never let a stray Enter
+             * silently overwrite a trusted pin; demand an explicit 'Y'. */
+            if (k == K_CHAR && (ch == 'y' || ch == 'Y'))
+                hostkey_trust_and_connect(now);
+            else if (k == K_ESC || k == K_ENTER)
+                enter_home(now);
         }
         break;
 
