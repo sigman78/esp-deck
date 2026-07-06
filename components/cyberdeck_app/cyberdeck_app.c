@@ -199,8 +199,10 @@ static void load_profiles(void)
         n = 0;
     s.profile_count = n;
 
-    /* Synthesize "(default)" from the fallback config if present. */
-    if (s.cfg.fallback_host && s.cfg.fallback_host[0]) {
+    /* Synthesize "(default)" from the Kconfig fallback ONLY when profiles.ini
+     * gave us nothing — otherwise a populated file gets padded with a
+     * redundant extra entry. */
+    if (n == 0 && s.cfg.fallback_host && s.cfg.fallback_host[0]) {
         conn_profile_t *p = &s.profiles[s.profile_count++];
         memset(p, 0, sizeof(*p));
         snprintf(p->name, sizeof(p->name), "(default)");
