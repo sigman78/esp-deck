@@ -29,10 +29,14 @@ esp_err_t ui_init(void);
 int  ui_cols(void);
 int  ui_rows(void);
 
-/** Show/hide the overlay layer (registers/unregisters the buffer). */
-void ui_show(void);
+/** Publish the drawn frame (double-buffered, atomic) and swap. */
+void ui_present(void);
+/** Unregister the overlay so the terminal buffer shows through. */
 void ui_hide(void);
 bool ui_visible(void);
+
+/** Park the terminal cursor off-screen (call in full-screen modals). */
+void ui_no_cursor(void);
 
 /** Set the two overlay colors (all cells share them; INVERSE swaps). */
 void ui_colors(color_t fg, color_t bg);

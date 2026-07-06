@@ -28,11 +28,12 @@ CPMAddPackage(
     OPTIONS "SDL_SHARED OFF" "SDL_STATIC ON" "SDL_TEST OFF"
 )
 
-# Component dependency order: idfsim -> font -> display -> tsm -> vterm -> libssh2_esp -> wifi -> storage -> ssh
+# Component dependency order: idfsim -> font -> display -> tsm -> terminal -> vterm -> ...
 add_subdirectory(${ROOT}/idfsim                    idfsim)
 add_subdirectory(${ROOT}/components/font           font)
 add_subdirectory(${ROOT}/components/display        display)
 add_subdirectory(${ROOT}/components/tsm            tsm)
+add_subdirectory(${ROOT}/components/terminal       terminal)
 add_subdirectory(${ROOT}/components/vterm          vterm)
 add_subdirectory(${ROOT}/components/libssh2_esp    libssh2_esp)
 add_subdirectory(${ROOT}/components/wifi           wifi)

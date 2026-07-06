@@ -61,6 +61,11 @@ static struct {
     int  profile_count;
     int  sel;                       /* HOME selection */
 
+    /* HOME list geometry, saved by render_home for touch hit-testing */
+    int  home_row0;                 /* screen row of first visible profile */
+    int  home_first;                /* index of first visible profile      */
+    int  home_visible;              /* visible profile rows                */
+
     /* connecting */
     int      connect_idx;           /* profile being connected            */
     bool     connect_armed;         /* render one frame, then connect     */
@@ -229,12 +234,18 @@ static void render_home(void)
     ui_printf(x + 2, y + 3, 0, "Kbd  %s", ble_status_str());
     ui_hline(x, y + 4, w, UI_BOX_ML, UI_BOX_H, UI_BOX_MR);
 
+    int list_rows = h - 8;
+    int first = 0;
+    if (s.sel >= list_rows) first = s.sel - list_rows + 1;
+
+    /* Save geometry so touch taps can hit-test a profile row. */
+    s.home_row0    = y + 5;
+    s.home_first   = first;
+    s.home_visible = 0;
+
     if (s.profile_count == 0) {
         ui_puts(x + 2, y + 5, "no profiles — edit profiles.ini in storage", 0);
     } else {
-        int list_rows = h - 8;
-        int first = 0;
-        if (s.sel >= list_rows) first = s.sel - list_rows + 1;
         for (int i = 0; i < s.profile_count - first && i < list_rows; i++) {
             const conn_profile_t *p = &s.profiles[first + i];
             uint8_t a = (first + i == s.sel) ? OVERLAY_ATTR_INVERSE : 0;
@@ -248,17 +259,19 @@ static void render_home(void)
             for (int c = 0; c < inner; c++)
                 ui_putch(x + 1 + c, y + 5 + i,
                          c < len ? (uint8_t)line[c] : ' ', a);
+            s.home_visible++;
         }
     }
 
     ui_hline(x, y + h - 3, w, UI_BOX_ML, UI_BOX_H, UI_BOX_MR);
     ui_puts(x + 2, y + h - 2,
-            "Enter connect   b pair kbd   r reload   w wifi retry", 0);
+            "tap=connect  hold=pair kbd   (or keys: Enter b r w)", 0);
 
     if (s.toast[0])
         ui_printf(x + 2, y + h - 4, OVERLAY_ATTR_INVERSE, " %s ", s.toast);
 
-    ui_show();
+    ui_no_cursor();
+    ui_present();
 }
 
 static void render_pairing(void)
@@ -286,7 +299,8 @@ static void render_pairing(void)
 
     ui_hline(x, y + h - 3, w, UI_BOX_ML, UI_BOX_H, UI_BOX_MR);
     ui_puts(x + 2, y + h - 2, "Enter pair   Esc cancel   (tap to pick)", 0);
-    ui_show();
+    ui_no_cursor();
+    ui_present();
 }
 
 static void render_hostkey(void)
@@ -319,7 +333,8 @@ static void render_hostkey(void)
     ui_puts(x + 10, y + 6, fp + 32, 0);
 
     ui_puts(x + 2, y + h - 2, "Enter trust & connect      Esc cancel", 0);
-    ui_show();
+    ui_no_cursor();
+    ui_present();
 }
 
 static void render_connecting(const char *msg)
@@ -335,7 +350,8 @@ static void render_connecting(const char *msg)
     ui_box(x, y, w, 5, " SSH ");
     ui_printf(x + 2, y + 2, 0, "%s %s@%s:%u ...",
               msg, p->user, p->host, (unsigned)p->port);
-    ui_show();
+    ui_no_cursor();
+    ui_present();
 }
 
 static const char *menu_items[] = {
@@ -364,7 +380,8 @@ static void render_menu(void)
         if (dim) line[1] = '(';
         ui_puts(x + 2, y + 2 + i, line, a);
     }
-    ui_show();
+    ui_no_cursor();
+    ui_present();
 }
 
 static void render_session_toast(uint64_t now)
@@ -378,7 +395,7 @@ static void render_session_toast(uint64_t now)
     int len = (int)strlen(s.toast) + 2;
     int x = ui_cols() - len - 1;
     ui_printf(x, 0, 0, " %s ", s.toast);
-    ui_show();
+    ui_present();
 }
 
 /* -------------------------------------------------------- state changes */
@@ -627,6 +644,28 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
         break;
 
     case ST_HOME:
+        /* Touch: the only input available before a keyboard is paired.
+         * Hold anywhere = open pairing; tap a profile row = connect it. */
+        if (ev->type == CYBERDECK_INPUT_LONG_PRESS) {
+            if (s.cfg.ble) enter_pairing(now);
+            break;
+        }
+        if (ev->type == CYBERDECK_INPUT_TAP) {
+            int row = ev->y / 16;
+            int i   = row - s.home_row0;
+            if (i >= 0 && i < s.home_visible) {
+                s.sel = s.home_first + i;
+                if (!wifi_manager_is_connected()) {
+                    toast(now, "WiFi not connected yet");
+                    render_home();
+                } else {
+                    start_connect(s.sel, now, now);
+                }
+            } else {
+                render_home();   /* tap outside list: just repaint */
+            }
+            break;
+        }
         switch (k) {
         case K_UP:
             if (s.sel > 0) { s.sel--; render_home(); }

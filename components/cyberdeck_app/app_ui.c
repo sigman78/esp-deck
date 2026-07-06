@@ -1,9 +1,12 @@
 /*
- * app_ui.c — overlay TUI primitives.
+ * app_ui.c — overlay TUI primitives, double-buffered.
  *
- * The buffer is allocated once from internal DRAM (the display ISR reads it)
- * and sized to the actual display geometry, so non-default terminal sizes
- * render with the correct stride.
+ * Two internal-DRAM buffers: the shell draws into the *back* buffer while the
+ * display ISR composites the *front* one, so a frame is never shown while it
+ * is being rebuilt. ui_present() publishes the back buffer with a single
+ * pointer store (the ISR picks it up on its next scan) and swaps. Without
+ * this, the ISR caught render_*()'s clear-then-redraw mid-flight and the
+ * underlying terminal flashed through every repaint.
  */
 
 #include "app_ui.h"
@@ -15,7 +18,8 @@
 
 static const char *TAG = "app_ui";
 
-static display_overlay_cell_t *s_buf  = NULL;
+static display_overlay_cell_t *s_buf[2] = { NULL, NULL };
+static display_overlay_cell_t *s_draw   = NULL;   /* we write here (back)  */
 static int  s_cols    = 0;
 static int  s_rows    = 0;
 static bool s_visible = false;
@@ -28,26 +32,32 @@ esp_err_t ui_init(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    s_buf = heap_caps_calloc((size_t)s_cols * s_rows,
-                             sizeof(display_overlay_cell_t),
-                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (!s_buf) {
-        ESP_LOGE(TAG, "no DRAM for %dx%d overlay", s_cols, s_rows);
-        return ESP_ERR_NO_MEM;
+    for (int i = 0; i < 2; i++) {
+        s_buf[i] = heap_caps_calloc((size_t)s_cols * s_rows,
+                                    sizeof(display_overlay_cell_t),
+                                    MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+        if (!s_buf[i]) {
+            ESP_LOGE(TAG, "no DRAM for %dx%d overlay", s_cols, s_rows);
+            return ESP_ERR_NO_MEM;
+        }
     }
-    ESP_LOGI(TAG, "overlay %dx%d (%u B)", s_cols, s_rows,
-             (unsigned)((size_t)s_cols * s_rows * sizeof(*s_buf)));
+    s_draw = s_buf[0];
+    ESP_LOGI(TAG, "overlay %dx%d (2x%u B)", s_cols, s_rows,
+             (unsigned)((size_t)s_cols * s_rows * sizeof(**s_buf)));
     return ESP_OK;
 }
 
 int ui_cols(void) { return s_cols; }
 int ui_rows(void) { return s_rows; }
 
-void ui_show(void)
+void ui_present(void)
 {
-    if (!s_buf || s_visible) return;
-    display_set_overlay_buffer(s_buf, s_cols, s_rows);
+    if (!s_draw) return;
+    /* Publish the freshly drawn buffer; ISR reads it next scan. */
+    display_set_overlay_buffer(s_draw, s_cols, s_rows);
     s_visible = true;
+    /* Swap: next frame is drawn into the buffer the ISR just stopped using. */
+    s_draw = (s_draw == s_buf[0]) ? s_buf[1] : s_buf[0];
 }
 
 void ui_hide(void)
@@ -59,6 +69,14 @@ void ui_hide(void)
 
 bool ui_visible(void) { return s_visible; }
 
+void ui_no_cursor(void)
+{
+    /* Park the terminal cursor off-screen so its blinking XOR block does not
+     * flicker through a full-screen modal. vterm restores it on the next
+     * session write. */
+    display_set_cursor(-1, -1, CURSOR_NONE);
+}
+
 void ui_colors(color_t fg, color_t bg)
 {
     display_set_overlay_colors(fg, bg);
@@ -66,15 +84,15 @@ void ui_colors(color_t fg, color_t bg)
 
 void ui_clear(void)
 {
-    if (s_buf)
-        memset(s_buf, 0, (size_t)s_cols * s_rows * sizeof(*s_buf));
+    if (s_draw)
+        memset(s_draw, 0, (size_t)s_cols * s_rows * sizeof(*s_draw));
 }
 
 void ui_putch(int col, int row, uint16_t cp, uint8_t attrs)
 {
-    if (s_buf && col >= 0 && col < s_cols && row >= 0 && row < s_rows) {
-        s_buf[row * s_cols + col].cp    = cp;
-        s_buf[row * s_cols + col].attrs = attrs;
+    if (s_draw && col >= 0 && col < s_cols && row >= 0 && row < s_rows) {
+        s_draw[row * s_cols + col].cp    = cp;
+        s_draw[row * s_cols + col].attrs = attrs;
     }
 }
 
