@@ -79,6 +79,8 @@ static struct {
     ble_device_info_t devs[PAIR_MAX];
     int      ndevs;
     int      pair_sel;
+    int      pair_row0;             /* screen row of first device entry   */
+    int      pair_rowh;             /* rows per device entry (touch size)  */
     uint64_t pair_last_poll;
     uint64_t pair_last_activity;
 
@@ -279,26 +281,35 @@ static void render_pairing(void)
     ui_colors(COLOR_BLACK, COLOR_CYAN);
     ui_clear();
 
+    const int rowh  = 2;                    /* 2 cells (32px) per entry — finger-sized */
+    int shown = s.ndevs ? s.ndevs : 1;
     int w = 56;
     int x = (ui_cols() - w) / 2;
-    int h = 6 + (s.ndevs ? s.ndevs : 1);
     int y = 2;
+    int h = shown * rowh + 5;               /* title + list + separator + footer + borders */
 
-    ui_box(x, y, w, h, " BLE Pairing ");
+    ui_box(x, y, w, h, " Pair a keyboard ");
+
+    s.pair_row0 = y + 2;                     /* first device entry row */
+    s.pair_rowh = rowh;
 
     if (s.ndevs == 0) {
-        ui_puts(x + 2, y + 2, "Scanning...", 0);
+        ui_puts(x + 2, y + 2, "Scanning for keyboards...", 0);
     } else {
         for (int i = 0; i < s.ndevs; i++) {
             uint8_t a = (i == s.pair_sel) ? OVERLAY_ATTR_INVERSE : 0;
-            char line[64];
-            snprintf(line, sizeof(line), " %-40s", s.devs[i].name);
-            ui_puts(x + 2, y + 2 + i, line, a);
+            int ry = y + 2 + i * rowh;
+            /* Full-width bar across the whole entry so the touch target is
+             * two rows tall, not one thin line. */
+            for (int r = 0; r < rowh; r++)
+                for (int c = 1; c < w - 1; c++)
+                    ui_putch(x + c, ry + r, ' ', a);
+            ui_printf(x + 2, ry, a, "%d. %-.*s", i + 1, w - 8, s.devs[i].name);
         }
     }
 
     ui_hline(x, y + h - 3, w, UI_BOX_ML, UI_BOX_H, UI_BOX_MR);
-    ui_puts(x + 2, y + h - 2, "Enter pair   Esc cancel   (tap to pick)", 0);
+    ui_puts(x + 2, y + h - 2, "Tap a keyboard to pair      Esc cancel", 0);
     ui_no_cursor();
     ui_present();
 }
@@ -696,9 +707,8 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
     case ST_PAIRING:
         s.pair_last_activity = now;
         if (ev->type == CYBERDECK_INPUT_TAP) {
-            /* rows: box starts at y=2, first device row at y+2 = 4 */
-            int row = ev->y / 16;
-            int idx = row - 4;
+            int rel = ev->y / 16 - s.pair_row0;
+            int idx = (rel >= 0 && s.pair_rowh > 0) ? rel / s.pair_rowh : -1;
             if (idx >= 0 && idx < s.ndevs && s.cfg.ble) {
                 s.cfg.ble->select_device(s.devs[idx].addr,
                                          s.devs[idx].addr_type);

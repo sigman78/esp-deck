@@ -88,6 +88,16 @@ static volatile bool     s_connected  = false;
 static volatile bool     s_read_task_done = true;   /* read task has exited */
 static bool              s_libssh2_initialized = false;
 
+/* ssh_read_task runs in PSRAM: internal DRAM is scarce once WiFi + NimBLE +
+ * the display overlay are up, and a dynamic 8 KB internal stack alloc fails
+ * (that is the "Failed to create ssh_read_task" error). The task only does
+ * sockets + crypto + vterm writes — no flash/ISR work — so an external-RAM
+ * stack is safe. TCB stays in internal DRAM; the stack buffer is reused
+ * across sessions. */
+#define SSH_READ_STACK_BYTES 8192
+static StaticTask_t      s_read_task_tcb;
+static StackType_t      *s_read_task_stack = NULL;
+
 /*
  * Serializes all libssh2 session/channel calls. libssh2 is not thread-safe
  * per session, and ssh_read_task (core 0) races ssh_client_send (core 1).
@@ -464,10 +474,21 @@ auth_done:
     /* ── 11. Spawn read task on core 0 ──────────────────────────────── */
     s_connected = true;
     s_read_task_done = false;
-    BaseType_t ret = xTaskCreatePinnedToCore(ssh_read_task, "ssh_read",
-                                             8192, NULL, 6,
-                                             &s_read_task, 0);
-    if (ret != pdPASS) {
+    if (!s_read_task_stack)
+        s_read_task_stack = heap_caps_malloc(SSH_READ_STACK_BYTES,
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_read_task_stack) {
+        ESP_LOGE(TAG, "No PSRAM for ssh_read stack");
+        s_connected = false;
+        s_read_task_done = true;
+        ssh_cleanup();
+        return ESP_FAIL;
+    }
+    s_read_task = xTaskCreateStaticPinnedToCore(
+        ssh_read_task, "ssh_read",
+        SSH_READ_STACK_BYTES / sizeof(StackType_t), NULL, 6,
+        s_read_task_stack, &s_read_task_tcb, 0);
+    if (!s_read_task) {
         ESP_LOGE(TAG, "Failed to create ssh_read_task");
         s_connected = false;
         s_read_task_done = true;
