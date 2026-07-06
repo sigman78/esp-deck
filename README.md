@@ -1,128 +1,101 @@
-# Cyberdeck SSH Terminal - POC
+# Cyberdeck — ESP32-S3 SSH Terminal
 
-ESP32-S3 based portable SSH terminal with 7-inch display and BLE keyboard support.
-
-## Project Structure
+A portable SSH terminal on the Waveshare ESP32-S3-Touch-LCD-7: a 7" 800×480
+RGB LCD, a Bluetooth keyboard, WiFi, and `libssh2`. Boot it, pick a stored
+connection profile, and you are in a remote shell. The same firmware also
+builds as a native Windows/SDL **simulator** for fast UI iteration.
 
 ```
-cyberdeck/
-├── main/                   # Main application
-│   ├── main.c             # Application entry point
-│   ├── include/           # Main headers
-│   └── Kconfig.projbuild  # Configuration options
-├── components/            # Project components
-│   ├── display/           # LCD display driver
-│   ├── font/              # Font rendering (Terminus 8x16)
-│   ├── terminal/          # Terminal emulator
-│   ├── ssh/               # SSH client
-│   ├── input/             # BLE keyboard & touch
-│   └── wifi/              # WiFi manager
-└── CMakeLists.txt         # Root build config
+Boot ─► Profile picker ─► WiFi ─► SSH (host-key pinned) ─► Session
+         │  b: pair keyboard                                 F12: menu
+         └─ arrows + Enter                          (resume/disconnect/pair)
 ```
 
-## Quick Start
+## How it renders (no framebuffer)
 
-### Prerequisites
+There is no pixel framebuffer. The ESP32 RGB LCD peripheral runs in
+bounce-buffer mode: every 16-scanline band is rasterized on demand inside
+the DMA ISR from a 100×30 grid of 8-byte cells plus the Terminus 8×16 bitmap
+font — all IRAM/DRAM resident. The **same** render core (`display_render.c`)
+is compiled for the simulator, where it fills an SDL texture. This saves
+~750 KB of RAM and guarantees the sim looks exactly like the hardware.
 
-1. **Install ESP-IDF v5.1 or later** (required for RGB LCD support)
-   ```bash
-   # Clone ESP-IDF
-   git clone --recursive https://github.com/espressif/esp-idf.git
-   cd esp-idf
-   git checkout v5.1  # or later (v5.2, v5.3, etc.)
-   ./install.sh esp32s3
-   ```
+## Architecture
 
-2. Set up ESP-IDF environment:
-   ```bash
-   . $HOME/esp-idf/export.sh
-   ```
+| Component | Role |
+|-----------|------|
+| `display` + `font` | Bounce-buffer render core, ANSI-256 palette, cursor + overlay compositing layer. Shared HW/sim. |
+| `tsm` | VT100/VT220/xterm parser + terminal state (cells, SGR, scroll regions, ?2026 sync output). |
+| `vterm` | Bridges `tsm`'s grid into the display cell buffer. |
+| `ssh` | `libssh2` client: connect, host-key check, auth, PTY, shell; session-locked, own read task. |
+| `wifi` | Profile-driven STA: cycles stored networks with backoff, event-driven status. |
+| `storage` | INI profiles (SSH + WiFi), known-hosts pins, BLE bonds, SSH keys. LittleFS (device) / host FS (sim). |
+| `input` | NimBLE HID keyboard (pair/bond/reconnect), GT911 touch, USB-serial. Sim uses SDL keyboard. |
+| `cyberdeck_app` | **The shell**: boot → picker → session state machine, overlay TUI, input routing. Platform-neutral. |
 
-   **Important**: ESP-IDF v5.0 and earlier do not have full RGB LCD panel support.
-   You must use v5.1 or later for this project.
+Everything the user sees is drawn in the display **overlay layer** by the
+shell; the `vterm` cell buffer belongs to the SSH session alone, so shell
+chrome never corrupts a full-screen remote app.
 
-### Build & Flash
+## Configuration & credentials
 
-1. Configure project:
-   ```bash
-   idf.py menuconfig
-   ```
-   - Set WiFi SSID/password in "Cyberdeck Configuration"
-   - Set SSH server details
-   - Adjust terminal size if needed
+Connection details live in **storage**, not in the firmware:
 
-2. Build:
-   ```bash
-   idf.py build
-   ```
+- `sim_storage/profiles.ini` — SSH profiles (host, port, user, auth)
+- `sim_storage/wifi.ini` — WiFi networks, tried in order
+- `sim_storage/keys/*.pem` — unencrypted private keys for key auth
 
-3. Flash:
-   ```bash
-   idf.py -p /dev/ttyUSB0 flash monitor
-   ```
+`sim_storage/` is gitignored (it holds real credentials). Copy the tracked
+`sim_storage.example/` skeleton to start. On device this directory is baked
+into the LittleFS partition at build time; the device build falls back to
+the example skeleton if `sim_storage/` is absent. Kconfig `WIFI_*` /
+`SSH_DEFAULT_*` values become the `(default)` profile when storage is empty.
 
-## Configuration
+Host keys are trust-on-first-use: the first connect shows the server's
+SHA256 fingerprint and pins it in `known_hosts.ini`; a later mismatch is
+flagged in red and blocks the connection before any credentials are sent.
 
-All configuration is in `idf.py menuconfig` → "Cyberdeck Configuration":
+## Build — device (ESP32-S3)
 
-- Terminal dimensions (default: 100×30)
-- Scrollback buffer size
-- WiFi credentials
-- SSH server details
-- Colors
+Requires ESP-IDF **v5.1+** (RGB LCD support); tested on v5.5.2.
 
-## Key Features
+```bash
+. $IDF_PATH/export.sh
+idf.py set-target esp32s3        # first time
+idf.py build
+idf.py -p /dev/ttyUSB0 flash monitor
+```
 
-### 🚀 Bounce Buffer Rendering
-- **No framebuffer needed** - saves 768KB PSRAM!
-- Small bounce buffer in fast SRAM
+`sdkconfig.defaults` pins the load-bearing settings (S3 target, 16 MB flash,
+octal PSRAM, NimBLE, custom partition table, `LCD_RGB_ISR_IRAM_SAFE`). Local
+overrides and credentials go in the gitignored `sdkconfig`.
 
-## Current Status
+## Build — simulator (Windows/SDL)
 
-### ✅ Working
-- [x] **Display driver** - RGB LCD with bounce buffer rendering (ISR callback-based)
-- [x] **Font rendering** - Real Terminus 8x16 font integrated
-- [x] **WiFi manager** - Connection and event handling
-- [x] **Terminal buffer** - 100×30 cell buffer with dirty row tracking
-- [x] **Project structure** - All components organized and building
+```bash
+cmake --preset sim-windows       # fetches SDL2 + builds libssh2 (WinCNG)
+cmake --build build-sim
+./build-sim/sim/cyberdeck_sim.exe [host [port [user [password]]]]
+```
 
-### ⚠️ Stub/Placeholder
-- [ ] **SSH client** - Interface defined, mock implementation only
-- [ ] **BLE keyboard** - Interface defined, not implemented
-- [ ] **Touch input** - Not implemented
-- [ ] **Terminal emulation** - Basic text only, no ANSI sequences yet
+Optional argv becomes the `(default)` profile. Controls: arrows + Enter in
+the picker, `b` to pair, **F12** for the in-session menu, right-click =
+touch long-press, Alt+Enter toggles window scale.
 
-### 📋 Next Steps
-1. Integrate libvterm for full terminal emulation (256 colors, alt screen, etc.)
-2. Implement SSH client (libssh or custom with mbedTLS)
-3. Connect terminal rendering to bounce buffer callback
-4. Implement BLE HID host for keyboard input
-5. Add touch UI for WiFi config
-6. Power management and OTA updates
+> The simulator's `libssh2` uses the WinCNG crypto backend, which cannot
+> negotiate key exchange with some modern SSH servers (handshake error −5).
+> The device build uses the mbedTLS backend and is unaffected. The sim is
+> for UI/state-machine work; the device is the real SSH target.
+
+## Tests
+
+```bash
+cd tests/tsm && cmake -B build && cmake --build build --config Debug
+ctest --test-dir build -C Debug          # vtparse + termstate suites
+```
 
 ## Hardware
 
-**Board**: Waveshare ESP32-S3-Touch-LCD-7
-
-- **Display**: 800×480 RGB LCD (16-bit parallel interface)
-- **Touch**: GT911 capacitive (not yet implemented)
-- **MCU**: ESP32-S3 dual-core @ 240MHz
-- **RAM**: 512KB SRAM + 8MB PSRAM
-- **Flash**: 16MB
-
-**Display Configuration** (in `lcd_driver.c`):
-- PCLK: 20MHz
-- Pin mapping configured for actual board (may differ from Waveshare documentation)
-- Bounce buffer: 25.6KB in SRAM (800×16 pixels)
-
-## License
-
-TBD
-
-## Contributing
-
-This is a POC project. Contributions welcome!
-
----
-
-*For detailed implementation guide, see CYBERDECK_POC_DOCUMENTATION.md*
+**Waveshare ESP32-S3-Touch-LCD-7** — 800×480 RGB LCD (16-bit parallel),
+GT911 touch, ESP32-S3 @ 240 MHz, 512 KB SRAM + 8 MB octal PSRAM, 16 MB
+flash. Pin map and 16 MHz PCLK are in `components/display/lcd_driver.c`.
