@@ -8,6 +8,15 @@ cyberdeck_component_register(
     REQUIRES_DEV esp_littlefs
 )
 
+# Seed the device littlefs partition from sim_storage/ (gitignored — holds
+# real credentials). A fresh clone without it must still build: fall back to
+# the tracked sim_storage.example/ skeleton.
 if(NOT BUILD_SIMULATOR)
-littlefs_create_partition_image(storage ../../sim_storage FLASH_IN_PROJECT)
+    if(EXISTS ${PROJECT_DIR}/sim_storage)
+        littlefs_create_partition_image(storage ../../sim_storage FLASH_IN_PROJECT)
+    else()
+        message(WARNING "sim_storage/ not found — flashing example skeleton. "
+                        "Copy sim_storage.example/ to sim_storage/ and edit.")
+        littlefs_create_partition_image(storage ../../sim_storage.example FLASH_IN_PROJECT)
+    endif()
 endif()

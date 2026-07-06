@@ -43,6 +43,13 @@ typedef struct {
     char            key_id[32];     /* Key identifier (auth == KEY)   */
 } conn_profile_t;
 
+#define STORAGE_WIFI_MAX 8
+
+typedef struct {
+    char ssid[33];                  /* 802.11 SSID (32 bytes + NUL)   */
+    char password[65];              /* WPA passphrase, "" = open net  */
+} wifi_profile_t;
+
 /* -------------------------------------------------------------------------
  * Lifecycle
  * ---------------------------------------------------------------------- */
@@ -95,6 +102,40 @@ esp_err_t storage_save_profiles(const conn_profile_t *profiles, int count);
 const conn_profile_t *storage_find_profile(const conn_profile_t *profiles,
                                            int count,
                                            const char *name);
+
+/* -------------------------------------------------------------------------
+ * WiFi profiles
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Load WiFi profiles from <mount_point>/wifi.ini, in file order.
+ * Order is the connect-preference order. Missing file: *count = 0, ESP_OK.
+ */
+esp_err_t storage_wifi_load(wifi_profile_t *out, int *count, int max);
+
+/**
+ * Save WiFi profiles to <mount_point>/wifi.ini (atomic replace).
+ */
+esp_err_t storage_wifi_save(const wifi_profile_t *profiles, int count);
+
+/* -------------------------------------------------------------------------
+ * Known SSH host keys (TOFU pinning)
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Look up the pinned host-key fingerprint for host:port.
+ *
+ * @param fp_out    Buffer for the hex SHA256 fingerprint (>= 65 bytes).
+ * @return ESP_OK if found, ESP_ERR_NOT_FOUND if the host is unknown.
+ */
+esp_err_t storage_known_host_get(const char *host, uint16_t port,
+                                 char *fp_out, size_t fp_len);
+
+/**
+ * Pin (add or replace) the fingerprint for host:port in known_hosts.ini.
+ */
+esp_err_t storage_known_host_set(const char *host, uint16_t port,
+                                 const char *fp_hex);
 
 /* -------------------------------------------------------------------------
  * SSH key blobs

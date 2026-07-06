@@ -1,13 +1,16 @@
 /*
  * storage_sim.c — local directory platform backend (simulator only).
  *
- * Creates sim_storage/ and sim_storage/keys/ in the current working
- * directory (i.e. build-sim/) if they do not already exist.
+ * Locates an existing sim_storage/ by walking up from the current working
+ * directory (so the exe works from repo root, build-sim/, or build-sim/sim/).
+ * If none is found, creates sim_storage/ in the CWD.
  */
 
 #include "storage.h"
 #include "esp_log.h"
 
+#include <stdio.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <errno.h>
 
@@ -23,9 +26,17 @@
 
 static const char *TAG = "storage_sim";
 
+static char s_mount[64] = SIM_MOUNT;
+
 const char *storage_platform_mount_point(void)
 {
-    return SIM_MOUNT;
+    return s_mount;
+}
+
+static int dir_exists(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 && (st.st_mode & S_IFDIR);
 }
 
 static esp_err_t ensure_dir(const char *path)
@@ -42,11 +53,26 @@ static esp_err_t ensure_dir(const char *path)
 
 esp_err_t storage_platform_init(void)
 {
+    /* Prefer an existing sim_storage/ up to three levels above the CWD */
+    static const char *candidates[] = {
+        SIM_MOUNT, "../" SIM_MOUNT, "../../" SIM_MOUNT, "../../../" SIM_MOUNT,
+    };
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        if (dir_exists(candidates[i])) {
+            snprintf(s_mount, sizeof(s_mount), "%s", candidates[i]);
+            break;
+        }
+    }
+
     esp_err_t ret;
-    ret = ensure_dir(SIM_MOUNT);
+    ret = ensure_dir(s_mount);
     if (ret != ESP_OK) return ret;
-    ret = ensure_dir(SIM_MOUNT "/keys");
+
+    char keys[80];
+    snprintf(keys, sizeof(keys), "%s/keys", s_mount);
+    ret = ensure_dir(keys);
     if (ret != ESP_OK) return ret;
-    ESP_LOGI(TAG, "Sim storage ready at '%s'", SIM_MOUNT);
+
+    ESP_LOGI(TAG, "Sim storage ready at '%s'", s_mount);
     return ESP_OK;
 }
