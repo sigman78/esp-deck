@@ -6,6 +6,7 @@ idf_component_register(
     INCLUDE_DIRS
         "include"
     REQUIRES
+        cyberdeck_app
         nvs_flash
         storage
         esp_wifi

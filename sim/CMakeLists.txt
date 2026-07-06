@@ -40,10 +40,11 @@ add_subdirectory(${ROOT}/components/wifi           wifi)
 target_link_libraries(wifi PUBLIC ws2_32)   # wifi_manager_sim.c uses Winsock
 add_subdirectory(${ROOT}/components/storage        storage)
 add_subdirectory(${ROOT}/components/ssh            ssh)
+add_subdirectory(${ROOT}/components/cyberdeck_app  cyberdeck_app)
 
 add_executable(cyberdeck_sim main.c)
 # SDL2main provides WinMain on Windows (SDL.h renames main -> SDL_main)
-target_link_libraries(cyberdeck_sim PRIVATE SDL2::SDL2main ssh wifi storage)
+target_link_libraries(cyberdeck_sim PRIVATE SDL2::SDL2main cyberdeck_app ssh wifi storage)
 
 set_target_properties(cyberdeck_sim PROPERTIES
     VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_PROJECT_DIR}/"

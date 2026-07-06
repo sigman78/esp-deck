@@ -42,7 +42,9 @@ macro(cyberdeck_component_register)
             target_include_directories(${_CCR_NAME} PUBLIC ${_CCR_INCLUDE_DIRS})
         endif()
 
-        target_compile_options(${_CCR_NAME} PRIVATE -Wno-deprecated-declarations)
+        if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+            target_compile_options(${_CCR_NAME} PRIVATE -Wno-deprecated-declarations)
+        endif()
 
         # idfsim provides ESP-IDF header stubs; always needed on the host.
         target_link_libraries(${_CCR_NAME} PUBLIC
