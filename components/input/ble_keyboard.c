@@ -612,6 +612,18 @@ static int sec_gap_event(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_ENC_CHANGE:
         ESP_LOGI(TAG, "encryption change: status=%d", event->enc_change.status);
+        if (event->enc_change.status != 0) {
+            /* Encryption failed — almost always a stale LTK (the keyboard was
+             * reset or re-paired elsewhere and dropped its side of the bond).
+             * Drop our bond so the next reconnect pairs fresh instead of
+             * looping forever on a key the peer no longer honours. The link
+             * then drops and CLOSE_EVENT restarts the reconnect scan. */
+            struct ble_gap_conn_desc desc;
+            if (ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0) {
+                ESP_LOGW(TAG, "encryption failed — dropping stale bond");
+                ble_store_util_delete_peer(&desc.peer_id_addr);
+            }
+        }
         break;
 
     case BLE_GAP_EVENT_REPEAT_PAIRING: {

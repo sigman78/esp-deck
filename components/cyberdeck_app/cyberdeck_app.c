@@ -763,8 +763,8 @@ static void enter_session(uint64_t now)
 {
     s.state = ST_SESSION;
     ui_hide();
-    /* Clear whatever the splash/previous session left behind. */
-    vterm_write("\x1b[2J\x1b[H", 7);
+    /* The terminal was cleared inside ssh_client_connect() before the read
+     * task spawned — doing it here would race that task inside vterm. */
     toast(now, "connected — F12 for menu");
     render_session_toast(now);
 }

@@ -101,7 +101,13 @@ static esp_err_t atomic_close(atomic_file_t *af)
         remove(af->tmp);
         return ESP_FAIL;
     }
-    remove(af->dst);                 /* Windows rename() refuses to clobber */
+    /* Try an atomic replace first: on LittleFS rename() clobbers the
+     * destination in one operation, so the old file is never absent (no
+     * power-loss window that could lose known_hosts.ini). Only if rename()
+     * refuses to overwrite (Windows/sim) do we remove-then-rename. */
+    if (rename(af->tmp, af->dst) == 0)
+        return ESP_OK;
+    remove(af->dst);
     if (rename(af->tmp, af->dst) != 0) {
         ESP_LOGE(TAG, "rename '%s' -> '%s' failed: errno=%d",
                  af->tmp, af->dst, errno);

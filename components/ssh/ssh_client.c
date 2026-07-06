@@ -274,7 +274,9 @@ static void ssh_read_task(void *arg)
 /* -------------------------------------------------------------------------
  * Keyboard-interactive response callback.
  * Responds to every prompt with s_kb_password (set before auth attempt).
- * libssh2 frees responses[i].text after the callback returns.
+ * libssh2 frees responses[i].text (via ssh_free) after the callback returns,
+ * so allocate through ssh_malloc — otherwise the free decrements s_alloc_bytes
+ * for a block that was never counted, corrupting the leak gauge.
  * ---------------------------------------------------------------------- */
 static LIBSSH2_USERAUTH_KBDINT_RESPONSE_FUNC(kbd_callback)
 {
@@ -282,9 +284,13 @@ static LIBSSH2_USERAUTH_KBDINT_RESPONSE_FUNC(kbd_callback)
     (void)instruction; (void)instruction_len;
     (void)abstract;
     const char *pwd = s_kb_password ? s_kb_password : "";
+    size_t len = strlen(pwd);
     for (int i = 0; i < num_prompts; i++) {
-        responses[i].text   = strdup(pwd);
-        responses[i].length = (unsigned int)strlen(pwd);
+        char *buf = ssh_malloc(len + 1, NULL);   /* counted; freed via ssh_free */
+        if (!buf) { responses[i].text = NULL; responses[i].length = 0; continue; }
+        memcpy(buf, pwd, len + 1);
+        responses[i].text   = buf;
+        responses[i].length = (unsigned int)len;
     }
 }
 
@@ -516,7 +522,13 @@ auth_done:
     libssh2_session_set_blocking(s_session, 0);
     vterm_set_response_cb(ssh_vterm_response_cb, NULL);
 
-    /* ── 11. Spawn read task on core 0 ──────────────────────────────── */
+    /* ── 11. Clear the terminal, then spawn the read task on core 0 ───── */
+    /* Clear from THIS task before the read task exists: vterm has no lock, so
+     * letting main_task's clear race the read task's feed inside tsm_feed on
+     * two cores could corrupt the grid. Doing it here makes the read task the
+     * session's sole vterm writer. */
+    vterm_write("\x1b[2J\x1b[H", 7);
+
     s_connected = true;
     s_read_task_done = false;
     if (!s_read_task_stack)
