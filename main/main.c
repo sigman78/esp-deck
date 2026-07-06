@@ -30,6 +30,11 @@
 
 static const char *TAG = "cyberdeck";
 
+/* Disabled bool Kconfig options emit no #define at all, so guard it. */
+#ifndef CONFIG_SSH_AUTO_RECONNECT
+#define CONFIG_SSH_AUTO_RECONNECT 0
+#endif
+
 /* -------------------------------------------------------------------------
  * Heap diagnostic helper
  * ---------------------------------------------------------------------- */
