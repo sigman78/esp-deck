@@ -19,6 +19,7 @@
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 #include "libssh2.h"
 
@@ -84,7 +85,25 @@ static LIBSSH2_CHANNEL  *s_channel    = NULL;
 static int               s_sock       = -1;
 static TaskHandle_t      s_read_task  = NULL;
 static volatile bool     s_connected  = false;
+static volatile bool     s_read_task_done = true;   /* read task has exited */
 static bool              s_libssh2_initialized = false;
+
+/*
+ * Serializes all libssh2 session/channel calls. libssh2 is not thread-safe
+ * per session, and ssh_read_task (core 0) races ssh_client_send (core 1).
+ * The vterm response callback runs inside the read task's tsm_feed while
+ * the read task already holds the lock — it must NOT take it again.
+ */
+static SemaphoreHandle_t s_session_lock = NULL;
+
+/* Fingerprint of the most recent connect attempt + last error message. */
+static char s_fingerprint[65] = "";
+static char s_last_error[96]  = "";
+
+static void set_last_error(const char *msg)
+{
+    snprintf(s_last_error, sizeof(s_last_error), "%s", msg ? msg : "");
+}
 
 /* -------------------------------------------------------------------------
  * ssh_cleanup — release all libssh2 and socket resources
@@ -132,6 +151,10 @@ static void log_last_error(const char *context)
     char *errmsg = NULL;
     libssh2_session_last_error(s_session, &errmsg, NULL, 0);
     ESP_LOGE(TAG, "%s: %s", context, errmsg ? errmsg : "unknown");
+
+    char buf[96];
+    snprintf(buf, sizeof(buf), "%s: %s", context, errmsg ? errmsg : "unknown");
+    set_last_error(buf);
 }
 
 /* -------------------------------------------------------------------------
@@ -152,6 +175,9 @@ static void ssh_read_task(void *arg)
     TickType_t last_stat = xTaskGetTickCount();
 
     while (s_connected) {
+        xSemaphoreTake(s_session_lock, portMAX_DELAY);
+        /* vterm_write below may re-enter libssh2 via the response callback —
+         * that is safe: same task, lock already held, cb does not re-take. */
         int n = libssh2_channel_read(s_channel, buf, sizeof(buf));
         if (n > 0) {
             vterm_write(buf, (size_t)n);
@@ -165,16 +191,17 @@ static void ssh_read_task(void *arg)
             /* EOF or unrecoverable error */
             log_last_error("channel_read");
             s_connected = false;
-            break;
         }
 
-        if (libssh2_channel_eof(s_channel)) {
+        if (s_connected && libssh2_channel_eof(s_channel)) {
             ESP_LOGI(TAG, "ssh_read_task: channel EOF");
             s_connected = false;
-            break;
         }
+        xSemaphoreGive(s_session_lock);
 
-        /* Periodic memory stat — once every 10 s. */
+        if (!s_connected) break;
+
+        /* Periodic memory stat. */
         TickType_t now = xTaskGetTickCount();
         if ((now - last_stat) >= pdMS_TO_TICKS(30000)) {
             ESP_LOGI(TAG, "libssh2 heap: %zu B", s_alloc_bytes);
@@ -187,6 +214,7 @@ static void ssh_read_task(void *arg)
         vTaskDelay(n > 0 ? 1 : pdMS_TO_TICKS(10));
     }
 
+    s_read_task_done = true;   /* disconnect() polls this before cleanup */
     s_read_task = NULL;
     vTaskDelete(NULL);
 }
@@ -225,11 +253,19 @@ esp_err_t ssh_client_connect(const ssh_config_t *config)
         return ESP_ERR_INVALID_ARG;
     }
 
+    if (!s_session_lock) {
+        s_session_lock = xSemaphoreCreateMutex();
+        if (!s_session_lock) return ESP_ERR_NO_MEM;
+    }
+
+    s_fingerprint[0] = '\0';
+    s_last_error[0]  = '\0';
+
     /* ── 0. Release any leftover state from a previous session ──────── *
      * ssh_read_task sets s_connected=false on disconnect but does not    *
      * call ssh_cleanup() — that must happen here before we allocate new  *
      * libssh2 objects, otherwise session_init() fails with OOM.         */
-    ssh_cleanup();
+    ssh_client_disconnect();
 
     /* ── 1. TCP connect ─────────────────────────────────────────────── */
     char port_str[6];
@@ -308,13 +344,30 @@ esp_err_t ssh_client_connect(const ssh_config_t *config)
     ESP_LOGI(TAG, "Keepalive every %d s", CONFIG_SSH_KEEPALIVE_INTERVAL);
 #endif
 
-    /* ── 5. Log host fingerprint ────────────────────────────────────── */
+    /* ── 5. Host-key verification (TOFU pinning) ────────────────────── */
     const char *fp = libssh2_hostkey_hash(s_session, LIBSSH2_HOSTKEY_HASH_SHA256);
-    if (fp) {
-        char fp_hex[65] = {0};
-        for (int i = 0; i < 32; i++)
-            snprintf(fp_hex + i * 2, 3, "%02x", (unsigned char)fp[i]);
-        ESP_LOGI(TAG, "Host fingerprint SHA256: %s", fp_hex);
+    if (!fp) {
+        set_last_error("no host key hash");
+        ssh_cleanup();
+        return ESP_FAIL;
+    }
+    for (int i = 0; i < 32; i++)
+        snprintf(s_fingerprint + i * 2, 3, "%02x", (unsigned char)fp[i]);
+    ESP_LOGI(TAG, "Host fingerprint SHA256: %s", s_fingerprint);
+
+    if (!config->expected_fp) {
+        /* Unknown host: stop BEFORE sending credentials so the user can
+         * confirm the fingerprint first. Caller re-connects with it set. */
+        set_last_error("unknown host key");
+        ssh_cleanup();
+        return SSH_ERR_HOSTKEY_UNKNOWN;
+    }
+    if (strcmp(config->expected_fp, s_fingerprint) != 0) {
+        ESP_LOGE(TAG, "HOST KEY MISMATCH for %s (expected %s)",
+                 config->host, config->expected_fp);
+        set_last_error("HOST KEY MISMATCH");
+        ssh_cleanup();
+        return SSH_ERR_HOSTKEY_MISMATCH;
     }
 
     /* ── 6. Authentication ──────────────────────────────────────────── */
@@ -364,7 +417,7 @@ esp_err_t ssh_client_connect(const ssh_config_t *config)
     s_kb_password = NULL;
     log_last_error("authentication");
     ssh_cleanup();
-    return ESP_FAIL;
+    return SSH_ERR_AUTH;
 
 auth_done:
     s_kb_password = NULL;
@@ -410,12 +463,14 @@ auth_done:
 
     /* ── 11. Spawn read task on core 0 ──────────────────────────────── */
     s_connected = true;
+    s_read_task_done = false;
     BaseType_t ret = xTaskCreatePinnedToCore(ssh_read_task, "ssh_read",
                                              8192, NULL, 6,
                                              &s_read_task, 0);
     if (ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create ssh_read_task");
         s_connected = false;
+        s_read_task_done = true;
         ssh_cleanup();
         return ESP_FAIL;
     }
@@ -428,13 +483,17 @@ esp_err_t ssh_client_disconnect(void)
 {
     s_connected = false;
 
-    /* Give the read task a chance to notice and exit cleanly. */
-    if (s_read_task) {
-        vTaskDelay(pdMS_TO_TICKS(200));
-        if (s_read_task) {
-            vTaskDelete(s_read_task);
-            s_read_task = NULL;
-        }
+    /* Wait for the read task to exit on its own — it checks s_connected
+     * every iteration (worst case one EAGAIN sleep + one lock hold). */
+    for (int i = 0; i < 100 && !s_read_task_done; i++)
+        vTaskDelay(pdMS_TO_TICKS(20));
+
+    if (!s_read_task_done && s_read_task) {
+        /* Should never happen; forcing it risks abandoned libssh2 state. */
+        ESP_LOGE(TAG, "ssh_read_task did not exit — force-deleting");
+        vTaskDelete(s_read_task);
+        s_read_task = NULL;
+        s_read_task_done = true;
     }
 
     vterm_set_response_cb(NULL, NULL);
@@ -449,11 +508,20 @@ int ssh_client_send(const uint8_t *data, size_t len)
 
     ssize_t sent = 0;
     while ((size_t)sent < len) {
-        ssize_t rc = libssh2_channel_write(s_channel,
-                                           (const char *)data + sent,
-                                           len - (size_t)sent);
+        if (!s_connected) return -1;   /* dropped while we were spinning */
+
+        xSemaphoreTake(s_session_lock, portMAX_DELAY);
+        ssize_t rc = s_channel
+            ? libssh2_channel_write(s_channel,
+                                    (const char *)data + sent,
+                                    len - (size_t)sent)
+            : LIBSSH2_ERROR_CHANNEL_CLOSED;
+        xSemaphoreGive(s_session_lock);
+
         if (rc == LIBSSH2_ERROR_EAGAIN) {
-            vTaskDelay(pdMS_TO_TICKS(5));
+            /* >= 1 tick even at 100 Hz — a 5 ms request would round to a
+             * busy-yield and trip the idle-task watchdog on a dead link. */
+            vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
         if (rc < 0) {
@@ -468,4 +536,14 @@ int ssh_client_send(const uint8_t *data, size_t len)
 bool ssh_client_is_connected(void)
 {
     return s_connected;
+}
+
+const char *ssh_client_get_fingerprint(void)
+{
+    return s_fingerprint;
+}
+
+const char *ssh_client_last_error(void)
+{
+    return s_last_error;
 }
