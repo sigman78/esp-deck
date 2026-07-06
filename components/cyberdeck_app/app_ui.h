@@ -62,3 +62,8 @@ void ui_fill(int col, int row, int w, int h, uint8_t attrs);
 
 /** Box with border and title centered in the top rule. */
 void ui_box(int col, int row, int w, int h, const char *title);
+
+/** Draw a finger-sized tile: filled + bordered block with a title line and an
+ *  optional body line, inverted when selected. Text is truncated to fit. */
+void ui_tile(int col, int row, int w, int h,
+             const char *title, const char *body, bool selected);

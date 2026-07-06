@@ -53,18 +53,27 @@ typedef enum {
 #define UI_FG   RGB565(140, 255, 190)
 #define UI_BG   RGB565(0, 24, 16)
 
+/* A page of finger-sized tiles laid out in a grid, with two-axis touch
+ * hit-testing. Recomputed by each render_*() and saved for the tap handler.
+ * All dimensions are in 8x16-px character cells. */
+typedef struct {
+    int x0, y0;        /* top-left cell of the grid            */
+    int tw, th;        /* tile size in cells                   */
+    int gx, gy;        /* gutter between tiles, in cells       */
+    int ncols, nrows;  /* tiles per page                       */
+    int count;         /* live tiles on this page (<= ncols*nrows) */
+} tilegrid_t;
+
 static struct {
     cyberdeck_app_config_t cfg;
     app_state_t state;
 
     conn_profile_t profiles[MAX_PROFILES];
     int  profile_count;
-    int  sel;                       /* HOME selection */
+    int  sel;                       /* HOME tile selection */
 
-    /* HOME list geometry, saved by render_home for touch hit-testing */
-    int  home_row0;                 /* screen row of first visible profile */
-    int  home_first;                /* index of first visible profile      */
-    int  home_visible;              /* visible profile rows                */
+    /* Tile grid of the current screen, saved for touch hit-testing. */
+    tilegrid_t grid;
 
     /* connecting */
     int      connect_idx;           /* profile being connected            */
@@ -74,13 +83,12 @@ static struct {
 
     /* hostkey prompt */
     bool     fp_mismatch;
+    bool     hostkey_armed;         /* mismatch REPLACE needs a 2nd tap   */
 
     /* pairing */
     ble_device_info_t devs[PAIR_MAX];
     int      ndevs;
     int      pair_sel;
-    int      pair_row0;             /* screen row of first device entry   */
-    int      pair_rowh;             /* rows per device entry (touch size)  */
     uint64_t pair_last_poll;
     uint64_t pair_last_activity;
 
@@ -129,6 +137,52 @@ static ui_key_t decode_key(const cyberdeck_input_t *ev, char *ch)
 static bool is_f12(const cyberdeck_input_t *ev)
 {
     return ev->len == 5 && memcmp(ev->buf, "\x1b[24~", 5) == 0;
+}
+
+/* ---------------------------------------------------------- tile grid */
+
+/* Cell coordinates of tile @p slot's top-left corner. */
+static int tile_x(const tilegrid_t *g, int slot)
+{
+    return g->x0 + (slot % g->ncols) * (g->tw + g->gx);
+}
+static int tile_y(const tilegrid_t *g, int slot)
+{
+    return g->y0 + (slot / g->ncols) * (g->th + g->gy);
+}
+
+/* Map a touch pixel to a tile slot, or -1 for a gutter / margin / empty cell.
+ * This is the two-axis hit-test: a tap must land inside a tile on BOTH axes,
+ * not merely on the right row. */
+static int tile_hit(const tilegrid_t *g, int px, int py)
+{
+    if (g->ncols <= 0 || g->nrows <= 0) return -1;
+    int cc = px / 8  - g->x0;
+    int cr = py / 16 - g->y0;
+    if (cc < 0 || cr < 0) return -1;
+    int pitchx = g->tw + g->gx, pitchy = g->th + g->gy;
+    int col = cc / pitchx, row = cr / pitchy;
+    if (col >= g->ncols || row >= g->nrows) return -1;
+    if (cc % pitchx >= g->tw || cr % pitchy >= g->th) return -1;  /* gutter */
+    int slot = row * g->ncols + col;
+    return slot < g->count ? slot : -1;
+}
+
+/* Keyboard navigation within the grid (arrow keys). */
+static int tile_nav(const tilegrid_t *g, int sel, ui_key_t k)
+{
+    if (g->count <= 0) return 0;
+    int col = sel % g->ncols, row = sel / g->ncols;
+    switch (k) {
+    case K_LEFT:  if (col > 0)                                sel -= 1;       break;
+    case K_RIGHT: if (col < g->ncols - 1 && sel + 1 < g->count) sel += 1;     break;
+    case K_UP:    if (row > 0)                                sel -= g->ncols; break;
+    case K_DOWN:  if (sel + g->ncols < g->count)              sel += g->ncols; break;
+    default: break;
+    }
+    if (sel < 0)             sel = 0;
+    if (sel >= g->count)     sel = g->count - 1;
+    return sel;
 }
 
 /* ------------------------------------------------------------- profiles */
@@ -215,103 +269,112 @@ static const char *ble_status_str(void)
     }
 }
 
+/* Shared full-screen picker grid (HOME + PAIRING): 3 x 4 tiles, each 30 x 5
+ * cells (240 x 80 px ~ 15 mm tall — comfortably above a finger target). */
+static tilegrid_t picker_grid(int count)
+{
+    tilegrid_t g = { .x0 = 3, .y0 = 4, .tw = 30, .th = 5,
+                     .gx = 2, .gy = 1, .ncols = 3, .nrows = 4 };
+    int cap = g.ncols * g.nrows;
+    g.count = count < cap ? count : cap;
+    return g;
+}
+
 static void render_home(void)
 {
     ui_colors(UI_FG, UI_BG);
     ui_clear();
     ui_fill(0, 0, ui_cols(), ui_rows(), 0);
 
-    int w = ui_cols() - 8;
-    if (w > 72) w = 72;
-    int x = (ui_cols() - w) / 2;
-    int h = 10 + (s.profile_count ? s.profile_count : 1);
-    if (h > ui_rows() - 2) h = ui_rows() - 2;
-    int y = (ui_rows() - h) / 2;
-
-    ui_box(x, y, w, h, " C Y B E R D E C K ");
-
-    ui_printf(x + 2, y + 2, 0, "WiFi %-10s %s",
+    /* Header. */
+    ui_puts(3, 0, "C Y B E R D E C K", 0);
+    ui_printf(3, 1, 0, "WiFi %-16s %s",
               wifi_manager_get_ssid()[0] ? wifi_manager_get_ssid() : "-",
               wifi_status_str());
-    ui_printf(x + 2, y + 3, 0, "Kbd  %s", ble_status_str());
-    ui_hline(x, y + 4, w, UI_BOX_ML, UI_BOX_H, UI_BOX_MR);
+    ui_printf(3, 2, 0, "Kbd  %s", ble_status_str());
 
-    int list_rows = h - 8;
-    int first = 0;
-    if (s.sel >= list_rows) first = s.sel - list_rows + 1;
+    /* Tiles: one per profile, plus a trailing "pair keyboard" tile. */
+    tilegrid_t g = picker_grid(s.profile_count + 1);
+    s.grid = g;
+    if (s.sel >= g.count) s.sel = g.count ? g.count - 1 : 0;
+    if (s.profile_count + 1 > g.ncols * g.nrows)
+        ESP_LOGW(TAG, "%d profiles exceed one page; showing first %d",
+                 s.profile_count, g.count - 1);
 
-    /* Save geometry so touch taps can hit-test a profile row. */
-    s.home_row0    = y + 5;
-    s.home_first   = first;
-    s.home_visible = 0;
-
-    if (s.profile_count == 0) {
-        ui_puts(x + 2, y + 5, "no profiles — edit profiles.ini in storage", 0);
-    } else {
-        for (int i = 0; i < s.profile_count - first && i < list_rows; i++) {
-            const conn_profile_t *p = &s.profiles[first + i];
-            uint8_t a = (first + i == s.sel) ? OVERLAY_ATTR_INVERSE : 0;
-            char line[96];
-            snprintf(line, sizeof(line), " %-14s %s@%s:%u %s",
-                     p->name, p->user, p->host, (unsigned)p->port,
-                     p->auth == STORAGE_AUTH_KEY ? "[key]" : "");
-            /* pad to full inner width so the highlight is a solid bar */
-            int inner = w - 2;
-            int len = (int)strlen(line);
-            for (int c = 0; c < inner; c++)
-                ui_putch(x + 1 + c, y + 5 + i,
-                         c < len ? (uint8_t)line[c] : ' ', a);
-            s.home_visible++;
+    for (int i = 0; i < g.count; i++) {
+        int cx = tile_x(&g, i), cy = tile_y(&g, i);
+        bool sel = (i == s.sel);
+        if (i < s.profile_count) {
+            const conn_profile_t *p = &s.profiles[i];
+            char body[48];
+            snprintf(body, sizeof(body), "%s@%s:%u%s",
+                     p->user, p->host, (unsigned)p->port,
+                     p->auth == STORAGE_AUTH_KEY ? "  [key]" : "");
+            ui_tile(cx, cy, g.tw, g.th, p->name, body, sel);
+        } else {
+            ui_tile(cx, cy, g.tw, g.th, "+ Pair keyboard",
+                    s.cfg.ble ? "tap or long-press" : "(no BLE)", sel);
         }
     }
 
-    ui_hline(x, y + h - 3, w, UI_BOX_ML, UI_BOX_H, UI_BOX_MR);
-    ui_puts(x + 2, y + h - 2,
-            "tap=connect  hold=pair kbd   (or keys: Enter b r w)", 0);
+    if (s.profile_count == 0)
+        ui_puts(3, 3, "no profiles — edit profiles.ini in storage", 0);
 
     if (s.toast[0])
-        ui_printf(x + 2, y + h - 4, OVERLAY_ATTR_INVERSE, " %s ", s.toast);
+        ui_printf(3, ui_rows() - 2, OVERLAY_ATTR_INVERSE, " %s ", s.toast);
+    ui_puts(3, ui_rows() - 1,
+            "tap a tile to select, tap again to connect   (b r w)", 0);
 
     ui_no_cursor();
     ui_present();
 }
 
+/* Number of device tiles PAIRING shows (the rest of the page is the Cancel
+ * tile, which is always the last slot). */
+static int pairing_ndev(const tilegrid_t *g)
+{
+    return g->count - 1;
+}
+
 static void render_pairing(void)
 {
-    ui_colors(COLOR_BLACK, COLOR_CYAN);
+    ui_colors(UI_FG, UI_BG);
     ui_clear();
+    ui_fill(0, 0, ui_cols(), ui_rows(), 0);
 
-    const int rowh  = 2;                    /* 2 cells (32px) per entry — finger-sized */
-    int shown = s.ndevs ? s.ndevs : 1;
-    int w = 56;
-    int x = (ui_cols() - w) / 2;
-    int y = 2;
-    int h = shown * rowh + 5;               /* title + list + separator + footer + borders */
+    ui_puts(3, 0, "PAIR A KEYBOARD", 0);
+    ui_puts(3, 1, s.ndevs ? "Tap your keyboard:" : "Scanning for keyboards...", 0);
 
-    ui_box(x, y, w, h, " Pair a keyboard ");
+    /* Devices + one Cancel tile; cap devices so Cancel always fits. */
+    tilegrid_t g = picker_grid(1);            /* start with room for Cancel */
+    int cap  = g.ncols * g.nrows;
+    int ndev = s.ndevs > cap - 1 ? cap - 1 : s.ndevs;
+    g.count  = ndev + 1;
+    s.grid   = g;
+    if (s.pair_sel >= g.count) s.pair_sel = g.count - 1;
 
-    s.pair_row0 = y + 2;                     /* first device entry row */
-    s.pair_rowh = rowh;
-
-    if (s.ndevs == 0) {
-        ui_puts(x + 2, y + 2, "Scanning for keyboards...", 0);
-    } else {
-        for (int i = 0; i < s.ndevs; i++) {
-            uint8_t a = (i == s.pair_sel) ? OVERLAY_ATTR_INVERSE : 0;
-            int ry = y + 2 + i * rowh;
-            /* Full-width bar across the whole entry so the touch target is
-             * two rows tall, not one thin line. */
-            for (int r = 0; r < rowh; r++)
-                for (int c = 1; c < w - 1; c++)
-                    ui_putch(x + c, ry + r, ' ', a);
-            ui_printf(x + 2, ry, a, "%d. %-.*s", i + 1, w - 8, s.devs[i].name);
-        }
+    for (int i = 0; i < ndev; i++) {
+        ui_tile(tile_x(&g, i), tile_y(&g, i), g.tw, g.th,
+                s.devs[i].name,
+                s.devs[i].addr_type ? "random addr" : "public addr",
+                i == s.pair_sel);
     }
+    ui_tile(tile_x(&g, ndev), tile_y(&g, ndev), g.tw, g.th,
+            "Cancel", "", ndev == s.pair_sel);
 
-    ui_hline(x, y + h - 3, w, UI_BOX_ML, UI_BOX_H, UI_BOX_MR);
-    ui_puts(x + 2, y + h - 2, "Tap a keyboard to pair      Esc cancel", 0);
+    ui_puts(3, ui_rows() - 1, "tap a keyboard to pair, or Cancel", 0);
     ui_no_cursor();
     ui_present();
+}
+
+/* Hostkey prompt buttons: two side-by-side tiles (trust/replace + cancel).
+ * Slot 0 = trust/replace, slot 1 = cancel. */
+static tilegrid_t hostkey_grid(void)
+{
+    tilegrid_t g = { .y0 = 18, .tw = 36, .th = 5,
+                     .gx = 4, .gy = 0, .ncols = 2, .nrows = 1, .count = 2 };
+    g.x0 = (ui_cols() - (g.tw * 2 + g.gx)) / 2;
+    return g;
 }
 
 static void render_hostkey(void)
@@ -324,30 +387,33 @@ static void render_hostkey(void)
     const conn_profile_t *p = &s.profiles[s.connect_idx];
     const char *fp = ssh_client_get_fingerprint();
 
-    int w = 72, x = (ui_cols() - w) / 2;
-    int h = 10, y = (ui_rows() - h) / 2;
-
-    ui_box(x, y, w, h, s.fp_mismatch ? " ! HOST KEY CHANGED ! "
-                                     : " Unknown host ");
     if (s.fp_mismatch) {
-        ui_puts(x + 2, y + 2, "The server's key DIFFERS from the pinned one.", 0);
-        ui_puts(x + 2, y + 3, "This may be a man-in-the-middle attack.", 0);
+        ui_puts(4, 2, "!  HOST KEY CHANGED — possible attack  !", 0);
+        ui_puts(4, 4, "The server's key DIFFERS from the pinned one.", 0);
+        ui_puts(4, 5, "Only replace it if you KNOW the server was rekeyed.", 0);
     } else {
-        ui_printf(x + 2, y + 2, 0, "First connection to %s:%u.",
-                  p->host, (unsigned)p->port);
-        ui_puts(x + 2, y + 3, "Verify the fingerprint before trusting it.", 0);
+        ui_puts(4, 2, "Unknown host — first connection", 0);
+        ui_printf(4, 4, 0, "First connection to %s:%u.", p->host, (unsigned)p->port);
+        ui_puts(4, 5, "Verify the fingerprint before trusting it.", 0);
     }
-    ui_puts(x + 2, y + 5, "SHA256:", 0);
+    ui_puts(4, 7, "SHA256:", 0);
     char half[33];
     memcpy(half, fp, 32); half[32] = '\0';
-    ui_puts(x + 10, y + 5, half, 0);
-    ui_puts(x + 10, y + 6, fp + 32, 0);
+    ui_puts(12, 7, half, 0);
+    ui_puts(12, 8, fp + 32, 0);
 
-    if (s.fp_mismatch)
-        ui_puts(x + 2, y + h - 2,
-                "Press Y to REPLACE the pinned key      Esc cancel", 0);
-    else
-        ui_puts(x + 2, y + h - 2, "Enter trust & connect      Esc cancel", 0);
+    tilegrid_t g = hostkey_grid();
+    s.grid = g;
+    const char *trust = s.fp_mismatch
+        ? (s.hostkey_armed ? "TAP AGAIN to REPLACE" : "Replace key")
+        : "Trust & Connect";
+    ui_tile(tile_x(&g, 0), tile_y(&g, 0), g.tw, g.th, trust,
+            s.fp_mismatch ? "danger" : "", s.hostkey_armed);
+    ui_tile(tile_x(&g, 1), tile_y(&g, 1), g.tw, g.th, "Cancel", "", false);
+
+    ui_puts(4, ui_rows() - 1, s.fp_mismatch
+            ? "keyboard: Y = replace   Esc = cancel"
+            : "keyboard: Enter = trust   Esc = cancel", 0);
     ui_no_cursor();
     ui_present();
 }
@@ -380,20 +446,18 @@ static const char *menu_items[] = {
 static void render_menu(void)
 {
     ui_colors(COLOR_BLACK, COLOR_CYAN);
-    ui_clear();   /* transparent outside the box — session stays visible */
+    ui_clear();   /* transparent outside the tiles — session stays visible */
 
-    int w = 34, h = MENU_COUNT + 4;
-    int x = (ui_cols() - w) / 2;
-    int y = (ui_rows() - h) / 2;
+    tilegrid_t g = { .tw = 40, .th = 4, .gx = 0, .gy = 1,
+                     .ncols = 1, .nrows = MENU_COUNT, .count = MENU_COUNT };
+    g.x0 = (ui_cols() - g.tw) / 2;
+    g.y0 = (ui_rows() - (MENU_COUNT * g.th + (MENU_COUNT - 1) * g.gy)) / 2;
+    s.grid = g;
 
-    ui_box(x, y, w, h, " Menu ");
     for (int i = 0; i < MENU_COUNT; i++) {
         bool dim = (i == 3 && !s.cfg.ble);   /* no BLE on this platform */
-        uint8_t a = (i == s.menu_sel) ? OVERLAY_ATTR_INVERSE : 0;
-        char line[40];
-        snprintf(line, sizeof(line), " %-28s", menu_items[i]);
-        if (dim) line[1] = '(';
-        ui_puts(x + 2, y + 2 + i, line, a);
+        ui_tile(tile_x(&g, i), tile_y(&g, i), g.tw, g.th,
+                menu_items[i], dim ? "(unavailable)" : "", i == s.menu_sel);
     }
     ui_no_cursor();
     ui_present();
@@ -445,6 +509,29 @@ static void exit_pairing(uint64_t now)
         ui_hide();
     } else {
         enter_home(now);
+    }
+}
+
+/* Run the in-session menu action for the current selection. */
+static void menu_activate(uint64_t now)
+{
+    switch (s.menu_sel) {
+    case 0:                                   /* resume session */
+        s.state = ST_SESSION;
+        ui_hide();
+        break;
+    case 1:                                   /* disconnect */
+        ssh_client_disconnect();
+        enter_home(now);
+        break;
+    case 2:                                   /* disconnect + reload profiles */
+        ssh_client_disconnect();
+        load_profiles();
+        enter_home(now);
+        break;
+    case 3:                                   /* pair keyboard (session lives on) */
+        if (s.cfg.ble) enter_pairing(now);
+        break;
     }
 }
 
@@ -518,13 +605,15 @@ static void do_connect(uint64_t now)
         break;
 
     case SSH_ERR_HOSTKEY_UNKNOWN:
-        s.fp_mismatch = false;
+        s.fp_mismatch   = false;
+        s.hostkey_armed = false;
         s.state = ST_HOSTKEY;
         render_hostkey();
         break;
 
     case SSH_ERR_HOSTKEY_MISMATCH:
-        s.fp_mismatch = true;
+        s.fp_mismatch   = true;
+        s.hostkey_armed = false;
         s.state = ST_HOSTKEY;
         render_hostkey();
         break;
@@ -673,37 +762,37 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
         break;
 
     case ST_HOME:
-        /* Touch: the only input available before a keyboard is paired.
-         * Hold anywhere = open pairing; tap a profile row = connect it. */
+        /* Long-press anywhere = open pairing (works without a keyboard). */
         if (ev->type == CYBERDECK_INPUT_LONG_PRESS) {
             if (s.cfg.ble) enter_pairing(now);
             break;
         }
         if (ev->type == CYBERDECK_INPUT_TAP) {
-            int row = ev->y / 16;
-            int i   = row - s.home_row0;
-            if (i >= 0 && i < s.home_visible) {
-                s.sel = s.home_first + i;
-                if (!wifi_manager_is_connected()) {
-                    toast(now, "WiFi not connected yet");
-                    render_home();
-                } else {
-                    start_connect(s.sel, now, now);
-                }
-            } else {
-                render_home();   /* tap outside list: just repaint */
+            int slot = tile_hit(&s.grid, ev->x, ev->y);
+            if (slot < 0) break;                     /* gutter/margin: ignore */
+            if (slot >= s.profile_count) {           /* the "pair keyboard" tile */
+                if (s.cfg.ble) enter_pairing(now);
+            } else if (s.sel != slot) {              /* first tap: select + show */
+                s.sel = slot;
+                render_home();
+            } else if (!wifi_manager_is_connected()) {
+                toast(now, "WiFi not connected yet");
+                render_home();
+            } else {                                 /* second tap on same tile */
+                start_connect(slot, now, now);
             }
             break;
         }
         switch (k) {
-        case K_UP:
-            if (s.sel > 0) { s.sel--; render_home(); }
+        case K_UP: case K_DOWN: case K_LEFT: case K_RIGHT: {
+            int ns = tile_nav(&s.grid, s.sel, k);
+            if (ns != s.sel) { s.sel = ns; render_home(); }
             break;
-        case K_DOWN:
-            if (s.sel < s.profile_count - 1) { s.sel++; render_home(); }
-            break;
+        }
         case K_ENTER:
-            if (s.profile_count > 0) {
+            if (s.sel >= s.profile_count) {          /* pair tile focused */
+                if (s.cfg.ble) enter_pairing(now);
+            } else if (s.profile_count > 0) {
                 if (!wifi_manager_is_connected()) {
                     toast(now, "WiFi not connected yet");
                     render_home();
@@ -725,31 +814,31 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
     case ST_PAIRING:
         s.pair_last_activity = now;
         if (ev->type == CYBERDECK_INPUT_TAP) {
-            int rel = ev->y / 16 - s.pair_row0;
-            int idx = (rel >= 0 && s.pair_rowh > 0) ? rel / s.pair_rowh : -1;
-            if (idx >= 0 && idx < s.ndevs && s.cfg.ble) {
-                s.cfg.ble->select_device(s.devs[idx].addr,
-                                         s.devs[idx].addr_type);
-                toast(now, "pairing %.32s...", s.devs[idx].name);
+            int slot = tile_hit(&s.grid, ev->x, ev->y);
+            if (slot < 0) break;                       /* gutter: ignore, keep scanning */
+            if (slot < pairing_ndev(&s.grid) && s.cfg.ble) {
+                s.cfg.ble->select_device(s.devs[slot].addr, s.devs[slot].addr_type);
+                toast(now, "pairing %.32s...", s.devs[slot].name);
                 exit_pairing(now);
-            } else {
+            } else {                                   /* Cancel tile */
                 exit_pairing(now);
             }
             break;
         }
         switch (k) {
-        case K_UP:
-            if (s.pair_sel > 0) { s.pair_sel--; render_pairing(); }
+        case K_UP: case K_DOWN: case K_LEFT: case K_RIGHT: {
+            int ns = tile_nav(&s.grid, s.pair_sel, k);
+            if (ns != s.pair_sel) { s.pair_sel = ns; render_pairing(); }
             break;
-        case K_DOWN:
-            if (s.pair_sel < s.ndevs - 1) { s.pair_sel++; render_pairing(); }
-            break;
+        }
         case K_ENTER:
-            if (s.ndevs > 0 && s.cfg.ble) {
+            if (s.pair_sel < pairing_ndev(&s.grid) && s.cfg.ble) {
                 s.cfg.ble->select_device(s.devs[s.pair_sel].addr,
                                          s.devs[s.pair_sel].addr_type);
                 toast(now, "pairing %.32s...", s.devs[s.pair_sel].name);
                 exit_pairing(now);   /* backend continues async */
+            } else {
+                exit_pairing(now);   /* Cancel tile focused */
             }
             break;
         case K_ESC:
@@ -761,6 +850,17 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
         break;
 
     case ST_HOSTKEY:
+        if (ev->type == CYBERDECK_INPUT_TAP) {
+            int slot = tile_hit(&s.grid, ev->x, ev->y);
+            if (slot == 1) {                         /* Cancel tile */
+                enter_home(now);
+            } else if (slot == 0) {                  /* Trust / Replace tile */
+                if (!s.fp_mismatch || s.hostkey_armed)
+                    hostkey_trust_and_connect(now);
+                else { s.hostkey_armed = true; render_hostkey(); }  /* arm 2-tap */
+            }
+            break;
+        }
         if (!s.fp_mismatch) {
             /* First contact (TOFU): a single Enter pins the key and connects. */
             if (k == K_ENTER)     hostkey_trust_and_connect(now);
@@ -789,29 +889,25 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
             ui_hide();
             break;
         }
-        switch (k) {
-        case K_UP:
-            if (s.menu_sel > 0) { s.menu_sel--; render_menu(); }
-            break;
-        case K_DOWN:
-            if (s.menu_sel < MENU_COUNT - 1) { s.menu_sel++; render_menu(); }
-            break;
-        case K_ENTER:
-            switch (s.menu_sel) {
-            case 0:   /* resume */
+        if (ev->type == CYBERDECK_INPUT_TAP) {
+            int slot = tile_hit(&s.grid, ev->x, ev->y);
+            if (slot < 0) {                    /* tap outside the menu = resume */
                 s.state = ST_SESSION;
                 ui_hide();
-                break;
-            case 1:   /* disconnect (stay on profiles) */
-            case 2:   /* disconnect + profiles */
-                ssh_client_disconnect();
-                enter_home(now);
-                break;
-            case 3:   /* pair keyboard — session keeps running behind it */
-                if (s.cfg.ble)
-                    enter_pairing(now);
-                break;
+            } else {
+                s.menu_sel = slot;
+                menu_activate(now);            /* same as pressing Enter */
             }
+            break;
+        }
+        switch (k) {
+        case K_UP: case K_DOWN: case K_LEFT: case K_RIGHT: {
+            int ns = tile_nav(&s.grid, s.menu_sel, k);
+            if (ns != s.menu_sel) { s.menu_sel = ns; render_menu(); }
+            break;
+        }
+        case K_ENTER:
+            menu_activate(now);
             break;
         default:
             break;

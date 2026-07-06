@@ -146,3 +146,42 @@ void ui_box(int col, int row, int w, int h, const char *title)
         ui_puts(col + 1 + toff, row, title, 0);
     }
 }
+
+void ui_tile(int col, int row, int w, int h,
+             const char *title, const char *body, bool selected)
+{
+    uint8_t a = selected ? OVERLAY_ATTR_INVERSE : 0;
+
+    /* Solid fill so the whole tile is a tappable, visible target. */
+    for (int r = 0; r < h; r++)
+        for (int c = 0; c < w; c++)
+            ui_putch(col + c, row + r, ' ', a);
+
+    /* Border. */
+    ui_putch(col,         row,         UI_BOX_TL, a);
+    ui_putch(col + w - 1, row,         UI_BOX_TR, a);
+    ui_putch(col,         row + h - 1, UI_BOX_BL, a);
+    ui_putch(col + w - 1, row + h - 1, UI_BOX_BR, a);
+    for (int c = 1; c < w - 1; c++) {
+        ui_putch(col + c, row,         UI_BOX_H, a);
+        ui_putch(col + c, row + h - 1, UI_BOX_H, a);
+    }
+    for (int r = 1; r < h - 1; r++) {
+        ui_putch(col,         row + r, UI_BOX_V, a);
+        ui_putch(col + w - 1, row + r, UI_BOX_V, a);
+    }
+
+    /* Title on the first inner row, body on the second — both truncated to
+     * the inner width so they never spill past the border. */
+    int inner = w - 2;
+    if (inner < 1) return;
+    char t[80];
+    if (title && *title && h >= 2) {
+        snprintf(t, sizeof(t), "%-.*s", inner, title);
+        ui_puts(col + 1, row + 1, t, a);
+    }
+    if (body && *body && h >= 3) {
+        snprintf(t, sizeof(t), "%-.*s", inner, body);
+        ui_puts(col + 1, row + 2, t, a);
+    }
+}
