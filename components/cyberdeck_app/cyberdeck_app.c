@@ -27,6 +27,7 @@
 #include "storage.h"
 #include "vterm.h"
 #include "wifi_manager.h"
+#include "wifi_provision.h"
 
 #ifndef BUILD_SIMULATOR
 #include "esp_heap_caps.h"   /* free-RAM stats in the header */
@@ -44,6 +45,7 @@ typedef enum {
     ST_CONNECTING,  /* pending/armed SSH connect                     */
     ST_SESSION,     /* bytes flow to/from SSH                        */
     ST_MENU,        /* in-session overlay menu                       */
+    ST_WIFIPROV,    /* SoftAP WiFi onboarding (modal)                */
 } app_state_t;
 
 #define MAX_PROFILES     (8 + 1)          /* stored + synthesized fallback */
@@ -105,6 +107,9 @@ static struct {
     int  menu_page;        /* 0 = main menu, 1 = config submenu */
     bool menu_from_home;   /* config opened from HOME (no session) */
     char menu_msg[48];     /* last config action result, shown in the submenu */
+
+    /* wifi provisioning */
+    uint64_t prov_done_at; /* when to finish after CRED_SUCCESS (0 = not set) */
 
     /* toast (SESSION only; UI states draw status inline) */
     char     toast[64];
@@ -683,13 +688,16 @@ static const uint8_t  main_cols[]  = {
 
 /* Page 1 — the configuration submenu (reachable from HOME and in-session). */
 static const char    *config_items[] = {
-    "WiFi reconnect", "WiFi disconnect", "Forget keyboard", "Back",
+    "WiFi reconnect", "WiFi disconnect", "WiFi setup (phone)",
+    "Forget keyboard", "Back",
 };
 static const uint8_t  config_cols[]   = {
-    OVERLAY_COL_GREEN, OVERLAY_COL_AMBER, OVERLAY_COL_RED, OVERLAY_COL_BLUE,
+    OVERLAY_COL_GREEN, OVERLAY_COL_AMBER, OVERLAY_COL_CYAN,
+    OVERLAY_COL_RED,   OVERLAY_COL_BLUE,
 };
 #define CONFIG_COUNT ((int)(sizeof(config_items) / sizeof(config_items[0])))
-#define CONFIG_FORGET_KBD 2   /* index of "Forget keyboard" (needs BLE) */
+#define CONFIG_WIFI_SETUP 2   /* index of "WiFi setup" */
+#define CONFIG_FORGET_KBD 3   /* index of "Forget keyboard" (needs BLE) */
 
 static void render_menu(void)
 {
@@ -798,6 +806,100 @@ static void pairing_select(int slot, uint64_t now)
 }
 
 /* Run the in-session menu action for the current selection. */
+/* Full-screen SoftAP onboarding modal. */
+static void render_wifiprov(void)
+{
+    ui_colors(UI_FG, UI_BG);
+    ui_clear();
+    ui_fill(0, 0, ui_cols(), ui_rows(), 0);
+
+    draw_titlebar(2, "WIFI SETUP", s.anim_frame);
+    ui_pen(OVERLAY_COL_BLUE);
+    ui_puts(ui_cols() - 10, 0, "// SoftAP", 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
+    draw_rule_scan(3, s.anim_frame);
+
+    int st = wifi_provision_state();
+
+    if (st == WIFI_PROV_ST_SUCCESS) {
+        ui_pen(OVERLAY_COL_GREEN);
+        ui_putch(4, 6, UI_LED_ON, 0);
+        ui_printf(6, 6, 0, "Connected to '%s' - saved!", wifi_provision_ssid());
+        ui_pen(OVERLAY_COL_DEFAULT);
+        ui_puts(6, 8, "returning home...", 0);
+        ui_no_cursor();
+        ui_present();
+        return;
+    }
+    if (st == WIFI_PROV_ST_FAILED) {
+        ui_pen(OVERLAY_COL_RED);
+        ui_putch(4, 6, UI_DIAMOND, 0);
+        ui_puts(6, 6, "Failed - wrong password or network not found.", 0);
+        ui_pen(OVERLAY_COL_DEFAULT);
+        ui_puts(6, 8, "Retry from the app, or tap/Esc to cancel.", 0);
+        ui_no_cursor();
+        ui_present();
+        return;
+    }
+
+    /* ACTIVE / RECEIVED — numbered onboarding steps. */
+    ui_pen(OVERLAY_COL_CYAN);  ui_puts(4, 6, "1", 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
+    ui_puts(6, 6, "Install \"ESP SoftAP Provisioning\" (App Store / Play).", 0);
+
+    ui_pen(OVERLAY_COL_CYAN);  ui_puts(4, 8, "2", 0);
+    ui_pen(OVERLAY_COL_DEFAULT); ui_puts(6, 8, "Join this WiFi network:", 0);
+    ui_pen(OVERLAY_COL_GREEN);
+    ui_printf(31, 8, OVERLAY_ATTR_INVERSE, " %s ", wifi_provision_service_name());
+    ui_pen(OVERLAY_COL_DEFAULT);
+
+    ui_pen(OVERLAY_COL_CYAN);  ui_puts(4, 10, "3", 0);
+    ui_pen(OVERLAY_COL_DEFAULT); ui_puts(6, 10, "Enter this proof code:", 0);
+    ui_pen(OVERLAY_COL_AMBER);
+    ui_printf(31, 10, OVERLAY_ATTR_INVERSE, " %s ", wifi_provision_pop());
+    ui_pen(OVERLAY_COL_DEFAULT);
+
+    ui_pen(OVERLAY_COL_CYAN);  ui_puts(4, 12, "4", 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
+    ui_puts(6, 12, "In the app, pick your home WiFi and type its password.", 0);
+
+    bool recv = (st == WIFI_PROV_ST_RECEIVED);
+    ui_pen(recv ? OVERLAY_COL_AMBER : OVERLAY_COL_GREEN);
+    ui_putch(4, 15, spinner_glyph(s.anim_frame), 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
+    ui_puts(6, 15, recv ? "credentials received - testing connection..."
+                        : "waiting for the phone...", 0);
+
+    /* Live RAM readout — watch the internal-DRAM peak while the AP+httpd run. */
+    char ram[48];
+    ram_stats(ram, sizeof(ram));
+    ui_pen(OVERLAY_COL_BLUE);
+    ui_putch(4, 17, UI_DIAMOND, 0);
+    ui_printf(6, 17, 0, "RAM  %s", ram);
+    ui_pen(OVERLAY_COL_DEFAULT);
+
+    draw_rule(ui_rows() - 2);
+    ui_pen(OVERLAY_COL_CYAN);
+    ui_putch(2, ui_rows() - 1, UI_PLAY, 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
+    ui_puts(4, ui_rows() - 1, "tap or Esc to cancel", 0);
+    ui_no_cursor();
+    ui_present();
+}
+
+static void enter_wifiprov(uint64_t now)
+{
+    if (wifi_provision_start() != ESP_OK) {
+        toast(now, "wifi setup unavailable");
+        enter_home(now);
+        return;
+    }
+    s.prov_done_at = 0;
+    s.next_anim    = 0;
+    s.state        = ST_WIFIPROV;
+    render_wifiprov();
+}
+
 static void menu_open_config(void)
 {
     s.menu_page   = 1;
@@ -846,13 +948,16 @@ static void menu_activate(uint64_t now)
         wifi_manager_disconnect();
         snprintf(s.menu_msg, sizeof(s.menu_msg), "wifi disconnected");
         break;
+    case CONFIG_WIFI_SETUP:                    /* WiFi onboarding via phone */
+        enter_wifiprov(now);
+        return;                                /* leaves the menu entirely */
     case CONFIG_FORGET_KBD:                   /* Forget keyboard */
         if (s.cfg.ble && s.cfg.ble->forget) {
             s.cfg.ble->forget();
             snprintf(s.menu_msg, sizeof(s.menu_msg), "keyboard bonds cleared");
         }
         break;
-    case 3:                                   /* Back */
+    case CONFIG_COUNT - 1:                     /* Back */
         if (s.menu_from_home) { enter_home(now); return; }
         s.menu_page   = 0;                    /* in-session: back to main menu */
         s.menu_sel    = 0;
@@ -1101,6 +1206,23 @@ void cyberdeck_app_tick(uint64_t now)
         }
         break;
 
+    case ST_WIFIPROV:
+        if (wifi_provision_state() == WIFI_PROV_ST_SUCCESS) {
+            if (s.prov_done_at == 0) {
+                s.prov_done_at = now + 2500;   /* let the phone read the ack  */
+                render_wifiprov();
+            } else if (now >= s.prov_done_at) {
+                wifi_provision_stop();
+                kick_wifi();                   /* reconnect with the new creds */
+                toast(now, "wifi saved - connecting");
+                enter_home(now);
+            }
+        } else if (now >= s.next_anim) {
+            s.next_anim = now + ANIM_PERIOD_MS;
+            render_wifiprov();
+        }
+        break;
+
     default:
         break;
     }
@@ -1296,6 +1418,18 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
             break;
         default:
             break;
+        }
+        break;
+
+    case ST_WIFIPROV:
+        /* Esc or any tap cancels (unless already finishing after success). */
+        if ((k == K_ESC || ev->type == CYBERDECK_INPUT_TAP ||
+             ev->type == CYBERDECK_INPUT_LONG_PRESS) &&
+            wifi_provision_state() != WIFI_PROV_ST_SUCCESS) {
+            wifi_provision_stop();
+            kick_wifi();                       /* un-park wifi_manager */
+            toast(now, "wifi setup cancelled");
+            enter_home(now);
         }
         break;
 
