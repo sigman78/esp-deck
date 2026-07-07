@@ -126,6 +126,13 @@ esp_err_t vterm_init(int cols, int rows)
 void vterm_write(const char *data, size_t len)
 {
     if (!s_initialized) return;
+
+    /* Visual bell: tsm swallows BEL (0x07) silently, so trigger the screen
+     * shake here. A bare BEL in the stream is the terminal bell; the rare
+     * 0x07 inside an escape sequence just gives a harmless extra shake. */
+    for (size_t i = 0; i < len; i++)
+        if (data[i] == 0x07) { display_bell(); break; }
+
 #ifdef CONFIG_VTERM_BENCH
     uint32_t t0 = esp_cpu_get_cycle_count();
 #endif

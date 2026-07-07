@@ -130,6 +130,10 @@ void display_set_overlay_colors(color_t fg, color_t bg);
 /** Query the currently registered terminal buffer dimensions (0,0 if not set). */
 void display_get_text_size(int *cols, int *rows);
 
+/** Trigger the visual bell: a brief decaying vertical screen shake (a speaker-
+ *  less substitute for the terminal BEL). Safe to call from any task. */
+void display_bell(void);
+
 /**
  * Register the terminal cell buffer so the display ISR can render from it.
  *

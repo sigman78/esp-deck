@@ -170,6 +170,114 @@ void display_get_text_size(int *cols, int *rows)
     if (rows) *rows = s_cell_rows;
 }
 
+/* -------------------------------------------------------------------------
+ * Terminal BELL → screen shake. A visual bell for a device with no speaker:
+ * display_bell() arms a decaying vertical jitter; the ISR advances it once per
+ * frame and, while active, renders each band shifted (render_shaken_band()).
+ * The normal (unshaken) render path below is left untouched.
+ * ---------------------------------------------------------------------- */
+static DRAM_ATTR volatile int s_bell_frames = 0;   /* frames of shake remaining */
+static DRAM_ATTR int          s_shake_dy    = 0;    /* current vertical offset px */
+
+void display_bell(void) { s_bell_frames = 14; }     /* ~230 ms at 60 fps */
+
+static IRAM_ATTR void advance_shake(void)
+{
+    if (s_bell_frames > 0) {
+        int amp = (s_bell_frames * 6) / 14;              /* 6 px → 0, decaying   */
+        s_shake_dy = (s_bell_frames & 1) ? amp : -amp;   /* alternate up/down     */
+        s_bell_frames--;
+    } else {
+        s_shake_dy = 0;
+    }
+}
+
+/* Fill s_col_cache with the resolved fg/bg/glyph for character row @p cr. */
+static IRAM_ATTR void build_row_cache(int cr)
+{
+    const terminal_cell_t *row_cells = s_cell_buf + cr * s_cell_cols;
+    const int ncols = s_cell_cols;
+    const display_overlay_cell_t *ov_row =
+        (s_overlay_buf && cr < s_overlay_rows)
+        ? (s_overlay_buf + cr * s_overlay_cols) : NULL;
+
+    for (int c = 0; c < ncols; c++) {
+        color_t fg, bg;
+        const uint8_t *glyph;
+        uint8_t underline = 0;
+
+        const uint8_t  ov_attrs = (ov_row && c < s_overlay_cols) ? ov_row[c].attrs : 0;
+        const uint16_t ov_cp    = (ov_row && c < s_overlay_cols) ? ov_row[c].cp    : 0;
+        const uint8_t  ov_color = (ov_row && c < s_overlay_cols) ? ov_row[c].color : 0;
+
+        if (ov_cp != 0) {
+            fg = ov_color ? s_overlay_pal[ov_color] : s_overlay_fg;
+            bg = s_overlay_bg;
+            if (ov_attrs & OVERLAY_ATTR_INVERSE) { color_t t = fg; fg = bg; bg = t; }
+            glyph = font_get_glyph(ov_cp);
+        } else {
+            const terminal_cell_t *cell = &row_cells[c];
+            fg = cell->fg_color;
+            bg = cell->bg_color;
+            if (cell->attrs & ATTR_REVERSE) { color_t t = fg; fg = bg; bg = t; }
+            underline = cell->attrs & ATTR_UNDERLINE;
+            glyph = font_get_glyph(cell->cp);
+            if (ov_attrs & OVERLAY_ATTR_DIM) {
+                fg = (color_t)((fg >> 1) & 0x7BEFu);
+                bg = (color_t)((bg >> 1) & 0x7BEFu);
+            }
+        }
+        s_col_cache[c].glyph     = glyph;
+        s_col_cache[c].bg        = bg;
+        s_col_cache[c].xorfg     = (uint16_t)(fg ^ bg);
+        s_col_cache[c].underline = underline;
+    }
+}
+
+/* Render one scanline (glyph row @p gl) from s_col_cache. */
+static IRAM_ATTR void render_scanline(uint32_t *d, int gl)
+{
+    const int ncols = s_cell_cols;
+    const uint8_t g  = (uint8_t)gl;
+    int c = 0;
+    for (; c + 1 < ncols; c += 2) {
+        const uint8_t b0 = s_col_cache[c    ].glyph ? s_col_cache[c    ].glyph[g] : 0u;
+        const uint8_t b1 = s_col_cache[c + 1].glyph ? s_col_cache[c + 1].glyph[g] : 0u;
+        const uint16_t bg0 = s_col_cache[c    ].bg, xf0 = s_col_cache[c    ].xorfg;
+        const uint16_t bg1 = s_col_cache[c + 1].bg, xf1 = s_col_cache[c + 1].xorfg;
+        d[0] = GPAIR(b0,0,1,bg0,xf0); d[1] = GPAIR(b0,2,3,bg0,xf0);
+        d[2] = GPAIR(b0,4,5,bg0,xf0); d[3] = GPAIR(b0,6,7,bg0,xf0);
+        d[4] = GPAIR(b1,0,1,bg1,xf1); d[5] = GPAIR(b1,2,3,bg1,xf1);
+        d[6] = GPAIR(b1,4,5,bg1,xf1); d[7] = GPAIR(b1,6,7,bg1,xf1);
+        d += 8;
+    }
+    if (c < ncols) {
+        const uint8_t b0 = s_col_cache[c].glyph ? s_col_cache[c].glyph[g] : 0u;
+        const uint16_t bg0 = s_col_cache[c].bg, xf0 = s_col_cache[c].xorfg;
+        d[0] = GPAIR(b0,0,1,bg0,xf0); d[1] = GPAIR(b0,2,3,bg0,xf0);
+        d[2] = GPAIR(b0,4,5,bg0,xf0); d[3] = GPAIR(b0,6,7,bg0,xf0);
+    }
+}
+
+/* Shake path: render a band with the whole picture shifted by s_shake_dy px,
+ * exposing black where the shift runs past the text area. Only used during a
+ * bell, so the per-scanline cache rebuild on a row boundary is fine. */
+static IRAM_ATTR void render_shaken_band(color_t *dst, int start_scan, int num_scans)
+{
+    int last_row = -999;
+    for (int n = 0; n < num_scans; n++) {
+        uint32_t *d = (uint32_t *)(dst + (unsigned)n * DISPLAY_WIDTH);
+        int src_scan = start_scan + n - s_shake_dy;
+        int src_row  = (src_scan >= 0) ? src_scan / FONT_HEIGHT : -1;
+        if (src_row < 0 || src_row >= s_cell_rows) {
+            for (int i = 0; i < DISPLAY_WIDTH / 2; i++) d[i] = 0;   /* black */
+            continue;
+        }
+        if (src_row != last_row) { build_row_cache(src_row); last_row = src_row; }
+        render_scanline(d, src_scan - src_row * FONT_HEIGHT);
+    }
+}
+
 /**
  * Render one horizontal band (one character-row height) into dst.
  *
@@ -200,6 +308,13 @@ void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
             s_blink_count    = 0;
             s_cursor_visible = !s_cursor_visible;
         }
+        advance_shake();
+    }
+
+    /* Bell shake active — render this band shifted and skip the fast path. */
+    if (s_shake_dy != 0 && char_row < s_cell_rows) {
+        render_shaken_band(dst, pos_px / DISPLAY_WIDTH, num_scans);
+        return;
     }
 
     /* Below the text area — fill black. */
@@ -210,56 +325,10 @@ void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
         return;
     }
 
-    /* ------------------------------------------------------------------
-     * Build per-column cache for this character row.
-     * ansi_to_rgb565 and font_get_glyph are both IRAM_ATTR; their data
-     * is DRAM_ATTR — no Flash access.
-     * ------------------------------------------------------------------ */
-    const terminal_cell_t *row_cells = s_cell_buf + char_row * s_cell_cols;
+    /* Build the per-column cache for this character row (shared with the
+     * bell-shake path). */
+    build_row_cache(char_row);
     const int ncols = s_cell_cols;
-
-    /* Overlay row pointer — NULL when overlay is inactive or row is out of range. */
-    const display_overlay_cell_t *ov_row =
-        (s_overlay_buf && char_row < s_overlay_rows)
-        ? (s_overlay_buf + char_row * s_overlay_cols)
-        : NULL;
-
-    for (int c = 0; c < ncols; c++) {
-        color_t fg, bg;
-        const uint8_t *glyph;
-        uint8_t underline = 0;
-
-        const uint8_t ov_attrs = (ov_row && c < s_overlay_cols) ? ov_row[c].attrs : 0;
-        const uint16_t ov_cp   = (ov_row && c < s_overlay_cols) ? ov_row[c].cp   : 0;
-        const uint8_t ov_color = (ov_row && c < s_overlay_cols) ? ov_row[c].color : 0;
-
-        if (ov_cp != 0) {
-            /* Overlay cell — per-cell accent (or the screen default) + codepoint */
-            fg    = ov_color ? s_overlay_pal[ov_color] : s_overlay_fg;
-            bg    = s_overlay_bg;
-            if (ov_attrs & OVERLAY_ATTR_INVERSE) {
-                color_t t = fg; fg = bg; bg = t;
-            }
-            glyph = font_get_glyph(ov_cp);
-        } else {
-            /* Primary terminal cell (optionally dimmed by a DIM scrim). */
-            const terminal_cell_t *cell = &row_cells[c];
-            fg = cell->fg_color;
-            bg = cell->bg_color;
-            if (cell->attrs & ATTR_REVERSE) { color_t t = fg; fg = bg; bg = t; }
-            underline = cell->attrs & ATTR_UNDERLINE;
-            glyph = font_get_glyph(cell->cp);
-            if (ov_attrs & OVERLAY_ATTR_DIM) {   /* halve each RGB565 channel */
-                fg = (color_t)((fg >> 1) & 0x7BEFu);
-                bg = (color_t)((bg >> 1) & 0x7BEFu);
-            }
-        }
-
-        s_col_cache[c].glyph     = glyph;
-        s_col_cache[c].bg        = bg;
-        s_col_cache[c].xorfg     = (uint16_t)(fg ^ bg);
-        s_col_cache[c].underline = underline;
-    }
 
     /* ------------------------------------------------------------------
      * Render scanlines.
