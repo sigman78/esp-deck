@@ -25,3 +25,6 @@ const char *wifi_provision_service_name(void) { return "CYBERDECK-SIM"; }
 const char *wifi_provision_pop(void)          { return "1A2B3C4D"; }
 const char *wifi_provision_qr_payload(void)   { return s_qr; }
 const char *wifi_provision_ssid(void)         { return ""; }
+
+int  wifi_provision_qr_size(void)             { return 0; }   /* no QR on host */
+bool wifi_provision_qr_module(int x, int y)   { (void)x; (void)y; return false; }

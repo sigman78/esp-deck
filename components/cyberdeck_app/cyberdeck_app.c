@@ -842,26 +842,53 @@ static void render_wifiprov(void)
         return;
     }
 
-    /* ACTIVE / RECEIVED — numbered onboarding steps. */
+    /* ACTIVE / RECEIVED — numbered onboarding steps on the left. */
     ui_pen(OVERLAY_COL_CYAN);  ui_puts(4, 6, "1", 0);
     ui_pen(OVERLAY_COL_DEFAULT);
-    ui_puts(6, 6, "Install \"ESP SoftAP Provisioning\" (App Store / Play).", 0);
+    ui_puts(6, 6, "Get the \"ESP SoftAP Provisioning\" app,", 0);
+    ui_puts(6, 7, "or scan the QR to the right.", 0);
 
-    ui_pen(OVERLAY_COL_CYAN);  ui_puts(4, 8, "2", 0);
-    ui_pen(OVERLAY_COL_DEFAULT); ui_puts(6, 8, "Join this WiFi network:", 0);
+    ui_pen(OVERLAY_COL_CYAN);  ui_puts(4, 9, "2", 0);
+    ui_pen(OVERLAY_COL_DEFAULT); ui_puts(6, 9, "Join this WiFi network:", 0);
     ui_pen(OVERLAY_COL_GREEN);
-    ui_printf(31, 8, OVERLAY_ATTR_INVERSE, " %s ", wifi_provision_service_name());
+    ui_printf(30, 9, OVERLAY_ATTR_INVERSE, " %s ", wifi_provision_service_name());
     ui_pen(OVERLAY_COL_DEFAULT);
 
-    ui_pen(OVERLAY_COL_CYAN);  ui_puts(4, 10, "3", 0);
-    ui_pen(OVERLAY_COL_DEFAULT); ui_puts(6, 10, "Enter this proof code:", 0);
+    ui_pen(OVERLAY_COL_CYAN);  ui_puts(4, 11, "3", 0);
+    ui_pen(OVERLAY_COL_DEFAULT); ui_puts(6, 11, "Enter this proof code:", 0);
     ui_pen(OVERLAY_COL_AMBER);
-    ui_printf(31, 10, OVERLAY_ATTR_INVERSE, " %s ", wifi_provision_pop());
+    ui_printf(30, 11, OVERLAY_ATTR_INVERSE, " %s ", wifi_provision_pop());
     ui_pen(OVERLAY_COL_DEFAULT);
 
-    ui_pen(OVERLAY_COL_CYAN);  ui_puts(4, 12, "4", 0);
+    ui_pen(OVERLAY_COL_CYAN);  ui_puts(4, 13, "4", 0);
     ui_pen(OVERLAY_COL_DEFAULT);
-    ui_puts(6, 12, "In the app, pick your home WiFi and type its password.", 0);
+    ui_puts(6, 13, "Pick your WiFi + password in the app.", 0);
+
+    /* QR (right side): scan instead of typing the AP name + code. Rendered
+     * dark-on-white via INVERSE white cells; two QR rows per half-block cell. */
+    int qsz = wifi_provision_qr_size();
+    if (qsz > 0) {
+        const int QZ   = 2;                 /* quiet-zone modules      */
+        int span  = qsz + 2 * QZ;
+        int crows = (span + 1) / 2;
+        int qx = ui_cols() - span - 2;
+        int qy = 6;
+        ui_pen(OVERLAY_COL_WHITE);
+        for (int cr = 0; cr < crows; cr++) {
+            for (int cc = 0; cc < span; cc++) {
+                bool top = wifi_provision_qr_module(cc - QZ, 2 * cr - QZ);
+                bool bot = wifi_provision_qr_module(cc - QZ, 2 * cr - QZ + 1);
+                uint16_t g = (top && bot) ? UI_BLOCK
+                           : top ? 0x2580u              /* upper half block */
+                           : bot ? 0x2584u              /* lower half block */
+                           : ' ';
+                ui_putch(qx + cc, qy + cr, g, OVERLAY_ATTR_INVERSE);
+            }
+        }
+        ui_pen(OVERLAY_COL_CYAN);
+        ui_puts(qx + (span - 13) / 2, qy + crows, "scan with app", 0);
+        ui_pen(OVERLAY_COL_DEFAULT);
+    }
 
     bool recv = (st == WIFI_PROV_ST_RECEIVED);
     ui_pen(recv ? OVERLAY_COL_AMBER : OVERLAY_COL_GREEN);

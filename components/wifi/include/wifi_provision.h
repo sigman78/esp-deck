@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include "esp_err.h"
 
 /* UI-facing provisioning state (poll from the shell). */
@@ -40,6 +41,12 @@ const char *wifi_provision_pop(void);
 
 /** JSON payload for the provisioning QR code. */
 const char *wifi_provision_qr_payload(void);
+
+/** Side length (modules) of the generated QR, or 0 if none. */
+int wifi_provision_qr_size(void);
+
+/** True if the QR module at (x,y) is dark. Out-of-range returns false. */
+bool wifi_provision_qr_module(int x, int y);
 
 /** SSID that was received/provisioned ("" until CRED_RECV). */
 const char *wifi_provision_ssid(void);

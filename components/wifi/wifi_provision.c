@@ -13,6 +13,7 @@
 
 #include "wifi_provisioning/manager.h"
 #include "wifi_provisioning/scheme_softap.h"
+#include "qrcode.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -27,6 +28,47 @@ static char s_got_ssid[33] = "";
 static char s_got_pass[65] = "";
 static bool s_ap_netif  = false;   /* AP netif created once, then reused */
 static bool s_handler   = false;   /* prov event handler registered      */
+
+/* Bit-packed QR module matrix (RAM-frugal: ~253 B vs a byte-per-module). */
+#define QR_MAX 45
+static uint8_t s_qr_mod[(QR_MAX * QR_MAX + 7) / 8];
+static int     s_qr_size = 0;
+
+static inline void qr_setbit(int i)  { s_qr_mod[i >> 3] |= (uint8_t)(1u << (i & 7)); }
+static inline bool qr_getbit(int i)  { return (s_qr_mod[i >> 3] >> (i & 7)) & 1u; }
+
+static void qr_display_cb(esp_qrcode_handle_t qr)
+{
+    int sz = esp_qrcode_get_size(qr);
+    if (sz <= 0 || sz > QR_MAX) { s_qr_size = 0; return; }
+    memset(s_qr_mod, 0, sizeof(s_qr_mod));
+    for (int y = 0; y < sz; y++)
+        for (int x = 0; x < sz; x++)
+            if (esp_qrcode_get_module(qr, x, y)) qr_setbit(y * QR_MAX + x);
+    s_qr_size = sz;
+}
+
+static void generate_qr(const char *text)
+{
+    s_qr_size = 0;
+    esp_qrcode_config_t cfg = ESP_QRCODE_CONFIG_DEFAULT();
+    cfg.display_func       = qr_display_cb;   /* copy modules, don't print   */
+    cfg.max_qrcode_version = 6;               /* our payload -> ~v4 (33 mod) */
+    cfg.qrcode_ecc_level   = ESP_QRCODE_ECC_LOW;
+    esp_err_t e = esp_qrcode_generate(&cfg, text);
+    if (e != ESP_OK)
+        ESP_LOGW(TAG, "QR generate failed: %s", esp_err_to_name(e));
+    else
+        ESP_LOGI(TAG, "QR generated: %d modules", s_qr_size);
+}
+
+int wifi_provision_qr_size(void) { return s_qr_size; }
+
+bool wifi_provision_qr_module(int x, int y)
+{
+    if (x < 0 || y < 0 || x >= s_qr_size || y >= s_qr_size) return false;
+    return qr_getbit(y * QR_MAX + x);
+}
 
 /* Merge the freshly provisioned network into wifi.ini as the preferred (first)
  * profile, dropping any prior entry with the same SSID. Runs on the event
@@ -133,6 +175,7 @@ esp_err_t wifi_provision_start(void)
     snprintf(s_qr, sizeof(s_qr),
              "{\"ver\":\"v1\",\"name\":\"%s\",\"pop\":\"%s\",\"transport\":\"softap\"}",
              s_service, s_pop);
+    generate_qr(s_qr);
     ESP_LOGI(TAG, "SoftAP provisioning up: join '%s', PoP '%s'", s_service, s_pop);
     return ESP_OK;
 }
@@ -151,7 +194,8 @@ void wifi_provision_stop(void)
     }
     esp_wifi_set_mode(WIFI_MODE_STA);   /* drop the AP, back to plain STA */
 
-    s_state = WIFI_PROV_ST_IDLE;
+    s_state   = WIFI_PROV_ST_IDLE;
+    s_qr_size = 0;
     s_qr[0] = s_service[0] = s_pop[0] = '\0';
     ESP_LOGI(TAG, "Provisioning stopped");
 }
