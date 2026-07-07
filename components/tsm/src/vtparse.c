@@ -11,10 +11,20 @@
 #include "vtparse.h"
 #include <string.h>
 
+#ifdef ESP_PLATFORM
+#include "esp_attr.h"
+#define likely(x)   __builtin_expect(!!(x), 1)
+#define unlikely(x) __builtin_expect(!!(x), 0)
+#else
+#define IRAM_ATTR
+#define likely(x) x
+#define unlikely(x) x
+#endif
+
 /* ── Internal helpers ─────────────────────────────────────────────────────── */
 
 /* Reset parameter state (called on entry to ESC, CSI, DCS). */
-static void do_clear(vtparse_t *p)
+static inline void do_clear(vtparse_t *p)
 {
     p->intermediate = 0;
     p->prefix       = 0;
@@ -50,14 +60,14 @@ static inline void do_param(vtparse_t *p, uint8_t b)
 /* Store first intermediate byte; ignore subsequent ones (rare). */
 static inline void do_collect(vtparse_t *p, uint8_t b)
 {
-    if (!p->intermediate)
+    if (likely(!p->intermediate))
         p->intermediate = b;
 }
 
 /* Store first private-use parameter marker; ignore subsequent ones. */
 static inline void do_prefix(vtparse_t *p, uint8_t b)
 {
-    if (!p->prefix)
+    if (likely(!p->prefix))
         p->prefix = b;
 }
 
@@ -73,7 +83,7 @@ static inline void flush_print(vtparse_t *p)
 
 static inline void append_print(vtparse_t *p, uint32_t cp)
 {
-    if (p->print_len >= VTP_PRINT_BUF)
+    if (unlikely(p->print_len >= VTP_PRINT_BUF))
         flush_print(p);
     p->print_buf[p->print_len++] = cp;
 }
@@ -152,7 +162,7 @@ static inline void st_ground(vtparse_t *p, uint8_t b)
     if (b <= 0x1F) {
         flush_print(p);
         emit_c0(p, b);          /* C0 controls; ESC handled by "anywhere" */
-    } else if (b <= 0x7E) {
+    } else if (likely(b <= 0x7E)) {
         append_print(p, b);     /* printable ASCII */
     }
     /* 0x7F (DEL) → ignore */
@@ -363,7 +373,7 @@ static inline void st_sos_pm_apc(vtparse_t *p, uint8_t b)
  * Returns true on a valid lead; false if b should produce U+FFFD. */
 static inline bool utf8_start(vtparse_t *p, uint8_t b)
 {
-    if (b >= 0xF5) {
+    if (unlikely(b >= 0xF5)) {
         return false;       /* would exceed U+10FFFF */
     }
     if (b >= 0xF0) {
@@ -393,7 +403,7 @@ void vtparse_init(vtparse_t *p, const vt_callbacks_t *cb, void *user)
         p->params[i] = -1;
 }
 
-void vtparse_feed(vtparse_t *p, const uint8_t *data, size_t len)
+void IRAM_ATTR vtparse_feed(vtparse_t *p, const uint8_t *data, size_t len)
 {
     for (size_t i = 0; i < len; i++) {
         uint8_t b = data[i];
@@ -406,12 +416,12 @@ void vtparse_feed(vtparse_t *p, const uint8_t *data, size_t len)
                 if (--p->utf8_remain == 0) {
                     uint32_t cp = p->utf8_cp;
                     /* Reject surrogates and out-of-BMP (unsupported font). */
-                    if (cp > 0x10FFFFu ||
+                    if (unlikely(cp > 0x10FFFFu ||
                         (cp >= 0xD800u && cp <= 0xDFFFu) ||
-                        cp > 0xFFFFu) {
+                        cp > 0xFFFFu)) {
                         cp = 0xFFFDu;
                     }
-                    if (p->state == VTP_ST_GROUND)
+                    if (likely(p->state == VTP_ST_GROUND))
                         append_print(p, cp);
                 }
                 continue;

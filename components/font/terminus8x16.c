@@ -1,3 +1,13 @@
+/*
+ * 8x16 bitmap glyph data derived from the Terminus Font.
+ *
+ * Copyright (c) 2020 Dimitar Zhekov <dimitar.zhekov@gmail.com>,
+ * with Reserved Font Name "Terminus Font".
+ *
+ * Licensed under the SIL Open Font License, Version 1.1 — see the full text
+ * in components/font/LICENSE. This file is NOT covered by the repository's
+ * MIT license.
+ */
 #include "terminus8x16.h"
 #include <stddef.h>
 

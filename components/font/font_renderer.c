@@ -32,6 +32,17 @@ void font_init(void)
     uint8_t *data_buf = heap_caps_malloc(total, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     FontRange *range_buf = heap_caps_malloc(
         (size_t)terminus_num_ranges * sizeof(FontRange), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!data_buf || !range_buf) {
+        /* Fall back to flash-resident tables: renders fine except while the
+         * flash cache is disabled (e.g. during NVS writes). Better than a
+         * NULL dereference. */
+        ESP_LOGE(TAG, "No DRAM for font (%zu B) — using flash tables", total);
+        heap_caps_free(data_buf);
+        heap_caps_free(range_buf);
+        s_ranges     = terminus_ranges;
+        s_num_ranges = terminus_num_ranges;
+        return;
+    }
 
     uint8_t *dst = data_buf;
     for (int i = 0; i < terminus_num_ranges; i++) {

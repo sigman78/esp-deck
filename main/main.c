@@ -1,35 +1,40 @@
 /*
- * Cyberdeck SSH Terminal — Application Entry Point
+ * Cyberdeck SSH Terminal — device composition root.
  *
- * ESP32-S3 portable SSH terminal with BLE keyboard and 7" display.
- * State machine: BOOT → WIFI_WAIT → SSH_CONNECT → SESSION → (loop)
+ * Hardware/IDF initialization lives here. Everything user-facing (profile
+ * picker, pairing UI, session flow) lives in the cyberdeck_app shell.
  */
 
 #include <stdio.h>
 #include <string.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_system.h"
-#include "esp_log.h"
-#include "nvs_flash.h"
-#include "esp_netif.h"
+#include "esp_app_desc.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
+#include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_system.h"
+#include "nvs_flash.h"
 
+#include "ble_keyboard.h"
+#include "cyberdeck_app.h"
 #include "display.h"
 #include "font.h"
-#include "vterm.h"
 #include "input_hal.h"
-#include "wifi_manager.h"
+#include "splash.h"
 #include "ssh_client.h"
 #include "storage.h"
-#include "splash.h"
+#include "vterm.h"
+#include "wifi_manager.h"
 
 static const char *TAG = "cyberdeck";
 
-#define MAIN_MAX_PROFILES 8
-static conn_profile_t s_profiles[MAIN_MAX_PROFILES];
-static int            s_profile_count = 0;
+/* Disabled bool Kconfig options emit no #define at all, so guard it. */
+#ifndef CONFIG_SSH_AUTO_RECONNECT
+#define CONFIG_SSH_AUTO_RECONNECT 0
+#endif
 
 /* -------------------------------------------------------------------------
  * Heap diagnostic helper
@@ -56,135 +61,57 @@ static void init_nvs(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
-    ESP_LOGI(TAG, "NVS initialized");
 }
 
 static void init_network(void)
 {
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    ESP_LOGI(TAG, "Network stack initialized");
 }
 
 /* -------------------------------------------------------------------------
- * Application state machine
+ * BLE keyboard ops for the shell (device backend = ble_keyboard/NimBLE)
  * ---------------------------------------------------------------------- */
-typedef enum {
-    STATE_BOOT,
-    STATE_WIFI_WAIT,
-    STATE_SSH_CONNECT,
-    STATE_SESSION,
-    STATE_ERROR,
-} app_state_t;
+static int ble_ops_get_state(void) { return (int)ble_keyboard_get_state(); }
+
+static const cyberdeck_ble_ops_t s_ble_ops = {
+    .get_state        = ble_ops_get_state,
+    .enter_pairing    = ble_keyboard_enter_pairing,
+    .exit_pairing     = ble_keyboard_exit_pairing,
+    .get_scan_results = ble_keyboard_get_scan_results,
+    .select_device    = ble_keyboard_select_device,
+    .get_name         = ble_keyboard_get_connected_name,
+    .forget           = ble_keyboard_forget_all,
+};
+
+/* -------------------------------------------------------------------------
+ * Main task — pumps input into the shell
+ * ---------------------------------------------------------------------- */
+static uint64_t now_ms(void)
+{
+    return (uint64_t)xTaskGetTickCount() * portTICK_PERIOD_MS;
+}
 
 static void main_task(void *pvParameters)
 {
+    (void)pvParameters;
     ESP_LOGI(TAG, "Main task started");
 
-    app_state_t state = STATE_BOOT;
-    bool wifi_started = false;
-    TickType_t wifi_timeout_tick = 0;
-
     for (;;) {
-        switch (state) {
+        cyberdeck_app_tick(now_ms());
 
-        /* ── BOOT: show splash, then wait for WiFi ─────────────────── */
-        case STATE_BOOT:
-            //splash_show();
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            vterm_bench_report();
-            state = STATE_WIFI_WAIT;
-            break;
+        input_event_t ev;
+        if (!input_hal_read(&ev, 50))
+            continue;
 
-        /* ── WIFI_WAIT: kick WiFi once, poll until connected ────────── */
-        case STATE_WIFI_WAIT:
-            if (!wifi_started) {
-                splash_status_info("Connecting to WiFi...");
-                wifi_manager_connect();
-                wifi_started = true;
-                wifi_timeout_tick = xTaskGetTickCount() + pdMS_TO_TICKS(30000);
-            }
-            if (wifi_manager_is_connected()) {
-                splash_status_ok("WiFi connected");
-                state = STATE_SSH_CONNECT;
-            } else if (xTaskGetTickCount() >= wifi_timeout_tick) {
-                splash_status_fail("WiFi connection timeout");
-                state = STATE_ERROR;
-            } else {
-                vTaskDelay(pdMS_TO_TICKS(200));
-            }
-            break;
-
-        /* ── SSH_CONNECT: attempt connection, retry on failure ──────── */
-        case STATE_SSH_CONNECT: {
-            /* If WiFi dropped while we were here, go back to WIFI_WAIT */
-            if (!wifi_manager_is_connected()) {
-                ESP_LOGW(TAG, "WiFi lost, waiting for reconnect");
-                wifi_started = false;
-                state = STATE_WIFI_WAIT;
-                break;
-            }
-
-            ssh_config_t ssh_cfg = {
-                .host        = CONFIG_SSH_DEFAULT_HOST,
-                .port        = CONFIG_SSH_DEFAULT_PORT,
-                .username    = CONFIG_SSH_DEFAULT_USER,
-                .password    = CONFIG_SSH_DEFAULT_PASSWORD,
-                .private_key = NULL,
-            };
-            const conn_profile_t *prof =
-                storage_find_profile(s_profiles, s_profile_count, "default");
-            if (prof) {
-                ssh_cfg.host     = prof->host;
-                ssh_cfg.port     = prof->port;
-                ssh_cfg.username = prof->user;
-                ssh_cfg.password = (prof->auth == STORAGE_AUTH_PASSWORD)
-                                   ? prof->password : NULL;
-                /* key auth: TODO wire storage_get_key → private_key */
-                ESP_LOGI(TAG, "Using stored profile 'default': %s@%s:%u",
-                         ssh_cfg.username, ssh_cfg.host, (unsigned)ssh_cfg.port);
-            }
-
-            splash_status_info("Connecting to SSH server...");
-            if (ssh_client_connect(&ssh_cfg) == ESP_OK) {
-//                splash_status_ok("SSH connected");
-                vTaskDelay(pdMS_TO_TICKS(500));
-                /* Clear screen and hand off to SSH session */
-//                vterm_write("\e[2J\e[H", 7);
-//                vterm_flush();
-                state = STATE_SESSION;
-            } else {
-                splash_status_fail("SSH connection failed — retrying in 5 s...");
-                vTaskDelay(pdMS_TO_TICKS(5000));
-                /* stay in STATE_SSH_CONNECT */
-            }
-            break;
-        }
-
-        /* ── SESSION: forward keyboard input until remote exits ─────── */
-        case STATE_SESSION: {
-            input_event_t ev;
-            while (ssh_client_is_connected()) {
-                if (input_hal_read(&ev, 100))
-                    ssh_client_send(ev.buf, ev.len);
-            }
-            vterm_bench_report();
-#if CONFIG_SSH_AUTO_RECONNECT
-            ESP_LOGI(TAG, "SSH session ended, reconnecting...");
-            state = STATE_SSH_CONNECT;
-#else
-            splash_status_fail("SSH session ended");
-            state = STATE_ERROR;
-#endif
-            break;
-        }
-
-        /* ── ERROR: display message and halt ────────────────────────── */
-        case STATE_ERROR:
-            splash_status_fail("Fatal error — system halted");
-            for (;;) vTaskDelay(portMAX_DELAY);
-            break;
-        }
+        cyberdeck_input_t app_ev = {
+            .type = ev.type,
+            .len  = ev.len,
+            .x    = ev.x,
+            .y    = ev.y,
+        };
+        memcpy(app_ev.buf, ev.buf, sizeof(app_ev.buf));
+        cyberdeck_app_handle_input(&app_ev, now_ms());
     }
 }
 
@@ -200,53 +127,61 @@ void app_main(void)
 
     log_heap("boot");
     init_nvs();
-    log_heap("after nvs_init");
 
-    if (storage_init() != ESP_OK)
+    if (storage_init() != ESP_OK) {
         ESP_LOGW(TAG, "Storage init failed — using Kconfig defaults");
-    else
-        storage_load_profiles(s_profiles, &s_profile_count, MAIN_MAX_PROFILES);
-    log_heap("after storage_init");
+    }
 
     init_network();
     log_heap("after netif_init");
 
-    ESP_LOGI(TAG, "Initializing display...");
     display_init();
-    log_heap("after display_init");
-
-    ESP_LOGI(TAG, "Initializing font renderer...");
     font_init();
-    log_heap("after font_init");
-
-    ESP_LOGI(TAG, "Initializing vterm...");
     vterm_init(CONFIG_TERMINAL_WIDTH, CONFIG_TERMINAL_HEIGHT);
-    log_heap("after vterm_init");
+    splash_show();
+    log_heap("after display+vterm");
 
-    ESP_LOGI(TAG, "Initializing input HAL...");
-    if (input_hal_init() != ESP_OK)
-        ESP_LOGW(TAG, "Input HAL init failed (non-fatal)");
-    log_heap("after input_hal_init");
-
-    /* Try to allocate task stack from SPIRAM; fall back to internal DRAM. */
-#define MAIN_TASK_STACK  16384
-    StackType_t *task_stack = heap_caps_malloc(MAIN_TASK_STACK,
-                                               MALLOC_CAP_SPIRAM |
-                                               MALLOC_CAP_8BIT);
-    if (!task_stack) {
-        ESP_LOGW(TAG, "No SPIRAM for task stack, falling back to internal DRAM");
-        task_stack = heap_caps_malloc(MAIN_TASK_STACK,
-                                      MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (wifi_manager_init() != ESP_OK) {
+        ESP_LOGW(TAG, "WiFi init failed (non-fatal)");
     }
 
-    static StaticTask_t s_main_task_tcb;
+    if (input_hal_init() != ESP_OK) {
+        ESP_LOGW(TAG, "Input HAL init failed (non-fatal)");
+    }
+    /* Reconnect a bonded keyboard in the background from the moment we
+     * boot — pairing a new one is reachable from the shell ('b' / touch). */
+    ble_keyboard_reconnect_start();
 
+    ssh_client_init();
+    log_heap("after input+ssh init");
+
+    cyberdeck_app_config_t app_cfg = {
+        .boot_delay_ms      = 1500,
+        .ssh_retry_delay_ms = 5000,
+        .auto_reconnect     = CONFIG_SSH_AUTO_RECONNECT,
+        .version            = esp_app_get_description()->version,
+        .fallback_host      = CONFIG_SSH_DEFAULT_HOST,
+        .fallback_port      = CONFIG_SSH_DEFAULT_PORT,
+        .fallback_user      = CONFIG_SSH_DEFAULT_USER,
+        .fallback_password  = CONFIG_SSH_DEFAULT_PASSWORD,
+        .fallback_wifi_ssid     = CONFIG_WIFI_SSID,
+        .fallback_wifi_password = CONFIG_WIFI_PASSWORD,
+        .ble = &s_ble_ops,
+    };
+    ESP_ERROR_CHECK(cyberdeck_app_init(&app_cfg, now_ms()));
+
+    /* The shell writes profiles/known-hosts to flash from this task, so its
+     * stack must be internal DRAM (flash ops forbid external-RAM stacks). */
+#define MAIN_TASK_STACK 12288
+    static StaticTask_t s_main_task_tcb;
+    StackType_t *task_stack = heap_caps_malloc(MAIN_TASK_STACK,
+                                               MALLOC_CAP_INTERNAL |
+                                               MALLOC_CAP_8BIT);
     if (!task_stack) {
-        ESP_LOGE(TAG, "Cannot allocate task stack (%u B) — halting", MAIN_TASK_STACK);
+        ESP_LOGE(TAG, "Cannot allocate main task stack — halting");
         for (;;) vTaskDelay(portMAX_DELAY);
     }
 
-    ESP_LOGI(TAG, "Task stack @ %p (%u B)", task_stack, MAIN_TASK_STACK);
     xTaskCreateStaticPinnedToCore(
         main_task,
         "main_task",
@@ -255,9 +190,10 @@ void app_main(void)
         5,
         task_stack,
         &s_main_task_tcb,
-        1   /* Pin to core 1 */
+        1
     );
 #undef MAIN_TASK_STACK
 
+    log_heap("after shell init");
     ESP_LOGI(TAG, "System initialized");
 }

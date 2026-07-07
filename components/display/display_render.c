@@ -12,12 +12,37 @@
 #include <string.h>
 
 /* -------------------------------------------------------------------------
- * Cell buffer — registered once by terminal_init via display_set_text_buffer.
+ * Cell buffer — registered once by vterm_init via display_set_text_buffer.
  * Plain statics (DRAM on ESP32, regular BSS on host) so the ISR can reach them.
  * ---------------------------------------------------------------------- */
 static DRAM_ATTR const terminal_cell_t *s_cell_buf  = NULL;
 static DRAM_ATTR int                    s_cell_cols = 0;
 static DRAM_ATTR int                    s_cell_rows = 0;
+
+/* -------------------------------------------------------------------------
+ * Overlay buffer — optional second compositing layer.
+ * Written by the main task; read by the ISR.  Pointer written last so the ISR
+ * never sees a non-NULL pointer with stale cols/rows.
+ * ---------------------------------------------------------------------- */
+static DRAM_ATTR display_overlay_cell_t *s_overlay_buf  = NULL;
+static DRAM_ATTR int                     s_overlay_cols = 0;
+static DRAM_ATTR int                     s_overlay_rows = 0;
+static DRAM_ATTR color_t                 s_overlay_fg   = COLOR_BLACK;
+static DRAM_ATTR color_t                 s_overlay_bg   = COLOR_CYAN;
+
+/* Overlay accent palette (index 0 is a sentinel → use s_overlay_fg). Kept in
+ * DRAM so the bounce-buffer ISR can read it without touching flash. */
+/* Classic VGA bright-16 palette (the iconic DOS text-mode colors). */
+static DRAM_ATTR const color_t s_overlay_pal[OVERLAY_PAL_SIZE] = {
+    0,                        /* 0: default → replaced by s_overlay_fg */
+    RGB565( 85, 255,  85),    /* 1 green   (VGA bright green)   */
+    RGB565( 85, 255, 255),    /* 2 cyan    (VGA bright cyan)    */
+    RGB565(255,  85, 255),    /* 3 magenta (VGA bright magenta) */
+    RGB565(255, 255,  85),    /* 4 amber   (VGA yellow)         */
+    RGB565(255,  85,  85),    /* 5 red     (VGA bright red)     */
+    RGB565( 85,  85, 255),    /* 6 blue    (VGA bright blue)    */
+    RGB565(255, 255, 255),    /* 7 white   (VGA white)          */
+};
 
 /* -------------------------------------------------------------------------
  * Cursor state — updated by terminal via display_set_cursor().
@@ -42,6 +67,7 @@ static DRAM_ATTR struct {
     const uint8_t *glyph;   /* 16-byte bitmap in DRAM (terminus8x16)     */
     uint16_t       bg;      /* background colour RGB565                   */
     uint16_t       xorfg;   /* bg ^ fg — XOR in to flip bg→fg per bit    */
+    uint8_t        underline; /* draw fg bar on the last two scanlines    */
 } s_col_cache[RENDER_MAX_COLS];
 
 /* -------------------------------------------------------------------------
@@ -125,6 +151,104 @@ void display_set_cursor(int x, int y, cursor_mode_t mode)
     s_cursor_mode = mode;
 }
 
+void display_set_overlay_buffer(display_overlay_cell_t *buf, int cols, int rows)
+{
+    s_overlay_cols = cols;
+    s_overlay_rows = rows;
+    s_overlay_buf  = buf;   /* written last — atomic 32-bit store; ISR reads after */
+}
+
+void display_set_overlay_colors(color_t fg, color_t bg)
+{
+    s_overlay_fg = fg;
+    s_overlay_bg = bg;
+}
+
+void display_get_text_size(int *cols, int *rows)
+{
+    if (cols) *cols = s_cell_cols;
+    if (rows) *rows = s_cell_rows;
+}
+
+/* -------------------------------------------------------------------------
+ * Terminal BELL → visual bell. A speakerless alert: display_bell() arms a
+ * brief red "BEL" tag that flashes in the top-right corner, drawn over the top
+ * band by the ISR (so it works during a session with no overlay involved).
+ * ---------------------------------------------------------------------- */
+static DRAM_ATTR volatile int s_bell_frames = 0;   /* frames the tag stays up */
+
+#define BELL_TOTAL   40    /* 4 half-periods → exactly two on/off flashes */
+#define BELL_HALF    10    /* frames per on (or off) half at ~60 fps      */
+
+void display_bell(void) { s_bell_frames = BELL_TOTAL; }
+
+/* Fill s_col_cache with the resolved fg/bg/glyph for character row @p cr. */
+static IRAM_ATTR void build_row_cache(int cr)
+{
+    const terminal_cell_t *row_cells = s_cell_buf + cr * s_cell_cols;
+    const int ncols = s_cell_cols;
+    const display_overlay_cell_t *ov_row =
+        (s_overlay_buf && cr < s_overlay_rows)
+        ? (s_overlay_buf + cr * s_overlay_cols) : NULL;
+
+    for (int c = 0; c < ncols; c++) {
+        color_t fg, bg;
+        const uint8_t *glyph;
+        uint8_t underline = 0;
+
+        const uint8_t  ov_attrs = (ov_row && c < s_overlay_cols) ? ov_row[c].attrs : 0;
+        const uint16_t ov_cp    = (ov_row && c < s_overlay_cols) ? ov_row[c].cp    : 0;
+        const uint8_t  ov_color = (ov_row && c < s_overlay_cols) ? ov_row[c].color : 0;
+
+        if (ov_cp != 0) {
+            fg = ov_color ? s_overlay_pal[ov_color] : s_overlay_fg;
+            bg = s_overlay_bg;
+            if (ov_attrs & OVERLAY_ATTR_INVERSE) { color_t t = fg; fg = bg; bg = t; }
+            glyph = font_get_glyph(ov_cp);
+        } else {
+            const terminal_cell_t *cell = &row_cells[c];
+            fg = cell->fg_color;
+            bg = cell->bg_color;
+            if (cell->attrs & ATTR_REVERSE) { color_t t = fg; fg = bg; bg = t; }
+            underline = cell->attrs & ATTR_UNDERLINE;
+            glyph = font_get_glyph(cell->cp);
+            if (ov_attrs & OVERLAY_ATTR_DIM) {
+                fg = (color_t)((fg >> 1) & 0x7BEFu);
+                bg = (color_t)((bg >> 1) & 0x7BEFu);
+            }
+        }
+        s_col_cache[c].glyph     = glyph;
+        s_col_cache[c].bg        = bg;
+        s_col_cache[c].xorfg     = (uint16_t)(fg ^ bg);
+        s_col_cache[c].underline = underline;
+    }
+}
+
+/* Overlay a white bell on a red tag in the top-right of the top band. The bell
+ * is a hand-drawn 16x16 silhouette (bit 15 = leftmost column); @p dst points at
+ * the top band's first pixel. */
+static IRAM_ATTR void draw_bell_tag(color_t *dst)
+{
+    static const uint16_t bell[16] = {
+        0x0180, 0x0180, 0x03C0, 0x07E0, 0x07E0, 0x0FF0, 0x0FF0, 0x1FF8,
+        0x1FF8, 0x3FFC, 0x3FFC, 0x7FFE, 0x7FFE, 0x0000, 0x0180, 0x0180,
+    };
+    const color_t red   = 0xF800u;
+    const color_t white = 0xFFFFu;
+    const int tag_w  = 32;                          /* 4 cells wide          */
+    const int x0     = DISPLAY_WIDTH - tag_w;       /* hard top-right corner */
+    const int bell_x = x0 + (tag_w - 16) / 2;       /* centre the 16px bell  */
+
+    for (int row = 0; row < FONT_HEIGHT; row++) {
+        color_t *p = dst + row * DISPLAY_WIDTH + x0;
+        for (int i = 0; i < tag_w; i++) p[i] = red;         /* red background */
+        uint16_t bits = bell[row];
+        color_t *b = dst + row * DISPLAY_WIDTH + bell_x;
+        for (int col = 0; col < 16; col++)
+            if ((bits >> (15 - col)) & 1u) b[col] = white;  /* white bell     */
+    }
+}
+
 /**
  * Render one horizontal band (one character-row height) into dst.
  *
@@ -165,23 +289,10 @@ void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
         return;
     }
 
-    /* ------------------------------------------------------------------
-     * Build per-column cache for this character row.
-     * ansi_to_rgb565 and font_get_glyph are both IRAM_ATTR; their data
-     * is DRAM_ATTR — no Flash access.
-     * ------------------------------------------------------------------ */
-    const terminal_cell_t *row_cells = s_cell_buf + char_row * s_cell_cols;
+    /* Build the per-column cache for this character row (shared with the
+     * bell-shake path). */
+    build_row_cache(char_row);
     const int ncols = s_cell_cols;
-
-    for (int c = 0; c < ncols; c++) {
-        const terminal_cell_t *cell = &row_cells[c];
-        color_t fg = cell->fg_color;   /* already RGB565 */
-        color_t bg = cell->bg_color;
-        if (cell->attrs & ATTR_REVERSE) { color_t t = fg; fg = bg; bg = t; }
-        s_col_cache[c].glyph = font_get_glyph(cell->cp);
-        s_col_cache[c].bg    = bg;
-        s_col_cache[c].xorfg = (uint16_t)(fg ^ bg);
-    }
 
     /* ------------------------------------------------------------------
      * Render scanlines.
@@ -229,6 +340,24 @@ void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
     }
 
     /* ------------------------------------------------------------------
+     * Underline post-pass — force fg on the last two scanlines of any
+     * underlined column. Touches only flagged columns, off the hot loop.
+     * ------------------------------------------------------------------ */
+    if (num_scans >= 2) {
+        const int ul_first = num_scans - 2;
+        for (int c = 0; c < ncols; c++) {
+            if (!s_col_cache[c].underline) continue;
+            const uint16_t fg = (uint16_t)(s_col_cache[c].bg ^ s_col_cache[c].xorfg);
+            const uint32_t fg2 = (uint32_t)fg | ((uint32_t)fg << 16);
+            for (int n = ul_first; n < num_scans; n++) {
+                uint32_t *p = (uint32_t *)(dst_base + (unsigned)n * DISPLAY_WIDTH
+                                           + c * FONT_WIDTH);
+                p[0] = fg2; p[1] = fg2; p[2] = fg2; p[3] = fg2;
+            }
+        }
+    }
+
+    /* ------------------------------------------------------------------
      * Cursor overlay — XOR every pixel in the cursor region with
      * 0xFFFFFFFF, inverting all bits and guaranteeing contrast.
      * FONT_WIDTH=8 px × 2 B = 16 B = 4 × uint32_t per scanline.
@@ -259,6 +388,13 @@ void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
                 p[3] ^= 0xFFFFFFFFu;
             }
         }
+    }
+
+    /* Visual bell: flash the red bell tag twice over the top-right corner. */
+    if (char_row == 0 && s_bell_frames > 0) {
+        if (((BELL_TOTAL - s_bell_frames) / BELL_HALF) % 2 == 0)
+            draw_bell_tag(dst_base);
+        s_bell_frames--;
     }
 }
 

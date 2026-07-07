@@ -43,6 +43,13 @@ typedef struct {
     char            key_id[32];     /* Key identifier (auth == KEY)   */
 } conn_profile_t;
 
+#define STORAGE_WIFI_MAX 8
+
+typedef struct {
+    char ssid[33];                  /* 802.11 SSID (32 bytes + NUL)   */
+    char password[65];              /* WPA passphrase, "" = open net  */
+} wifi_profile_t;
+
 /* -------------------------------------------------------------------------
  * Lifecycle
  * ---------------------------------------------------------------------- */
@@ -97,6 +104,40 @@ const conn_profile_t *storage_find_profile(const conn_profile_t *profiles,
                                            const char *name);
 
 /* -------------------------------------------------------------------------
+ * WiFi profiles
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Load WiFi profiles from <mount_point>/wifi.ini, in file order.
+ * Order is the connect-preference order. Missing file: *count = 0, ESP_OK.
+ */
+esp_err_t storage_wifi_load(wifi_profile_t *out, int *count, int max);
+
+/**
+ * Save WiFi profiles to <mount_point>/wifi.ini (atomic replace).
+ */
+esp_err_t storage_wifi_save(const wifi_profile_t *profiles, int count);
+
+/* -------------------------------------------------------------------------
+ * Known SSH host keys (TOFU pinning)
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Look up the pinned host-key fingerprint for host:port.
+ *
+ * @param fp_out    Buffer for the hex SHA256 fingerprint (>= 65 bytes).
+ * @return ESP_OK if found, ESP_ERR_NOT_FOUND if the host is unknown.
+ */
+esp_err_t storage_known_host_get(const char *host, uint16_t port,
+                                 char *fp_out, size_t fp_len);
+
+/**
+ * Pin (add or replace) the fingerprint for host:port in known_hosts.ini.
+ */
+esp_err_t storage_known_host_set(const char *host, uint16_t port,
+                                 const char *fp_hex);
+
+/* -------------------------------------------------------------------------
  * SSH key blobs
  * ---------------------------------------------------------------------- */
 
@@ -133,6 +174,45 @@ esp_err_t   storage_platform_init(void);
 
 /** Mount-point string, e.g. "/littlefs" or "sim_storage". Valid forever. */
 const char *storage_platform_mount_point(void);
+
+/* -------------------------------------------------------------------------
+ * BLE paired device registry
+ * ---------------------------------------------------------------------- */
+
+#define STORAGE_BLE_MAX  8    /* maximum paired BLE devices stored */
+
+typedef struct {
+    uint8_t  addr[6];         /* BLE device address (little-endian) */
+    uint8_t  addr_type;       /* 0 = public, 1 = random */
+    char     name[64];        /* advertised device name, or "Unknown" */
+    uint32_t last_seen;       /* unix timestamp or 0 if unavailable */
+} ble_device_info_t;
+
+/**
+ * Add or update a paired BLE device record (matched by addr).
+ * Writes entire list back to <mount>/ble_devices.ini.
+ */
+esp_err_t storage_ble_save(const ble_device_info_t *dev);
+
+/**
+ * Load all paired BLE device records.
+ *
+ * @param out    Caller-allocated array of at least @p max entries.
+ * @param max    Maximum entries to write into @p out.
+ * @param count  Set to number of entries written.
+ * @return ESP_OK (missing file → count=0, not an error).
+ */
+esp_err_t storage_ble_list(ble_device_info_t *out, int max, int *count);
+
+/**
+ * Remove a paired device by address. No-op if address not found.
+ */
+esp_err_t storage_ble_remove(const uint8_t addr[6]);
+
+/**
+ * Delete ble_devices.ini entirely (factory reset BLE pairing list).
+ */
+esp_err_t storage_ble_clear(void);
 
 #ifdef __cplusplus
 }

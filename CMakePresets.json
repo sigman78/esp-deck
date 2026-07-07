@@ -10,12 +10,6 @@
       "cacheVariables": {
         "BUILD_SIMULATOR": "ON"
       }
-    },
-    {
-      "name": "tests",
-      "displayName": "Unit Tests",
-      "generator": "Ninja",
-      "binaryDir": "${sourceDir}/tests/terminal/build"
     }
   ]
 }

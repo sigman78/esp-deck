@@ -1,51 +1,42 @@
 /*
- * sim/main.c — PC simulator: SDL keyboard → SSH → vterm → SDL display
+ * sim/main.c — host composition root.
  *
- * Usage: cyberdeck_sim.exe [host [port [user [password]]]]
+ * SDL event pumping and host key translation live here; the shell
+ * (profile picker, session flow, menus) is the same cyberdeck_app code
+ * that runs on the device. BLE is not available on the host (ble = NULL);
+ * the SDL keyboard stands in for the BLE keyboard.
  *
- * Defaults: localhost 22 user ""
- * Override at compile time with -DCONFIG_SSH_DEFAULT_HOST etc.
+ * Controls: F12 = in-session menu, Alt+Enter = window scale,
+ *           right-click = touch long-press, left-click = tap.
  */
 
 #include <SDL2/SDL.h>
 #include <stdbool.h>
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 
+#include "cyberdeck_app.h"
 #include "display.h"
 #include "font.h"
-#include "vterm.h"
 #include "ssh_client.h"
-#include "wifi_manager.h"
 #include "storage.h"
+#include "vterm.h"
+#include "wifi_manager.h"
 
-#define SIM_COLS 100
-#define SIM_ROWS  30
-
-#ifndef CONFIG_SSH_DEFAULT_HOST
-#define CONFIG_SSH_DEFAULT_HOST "localhost"
+#ifndef CONFIG_TERMINAL_WIDTH
+#define CONFIG_TERMINAL_WIDTH  100
 #endif
-#ifndef CONFIG_SSH_DEFAULT_PORT
-#define CONFIG_SSH_DEFAULT_PORT 22
+#ifndef CONFIG_TERMINAL_HEIGHT
+#define CONFIG_TERMINAL_HEIGHT 30
 #endif
-#ifndef CONFIG_SSH_DEFAULT_USER
-#define CONFIG_SSH_DEFAULT_USER "user"
-#endif
-#ifndef CONFIG_SSH_DEFAULT_PASS
-#define CONFIG_SSH_DEFAULT_PASS ""
-#endif
-
-/* ---------- key translation ---------- */
 
 /*
  * Translate an SDL keydown event to a terminal escape sequence.
  * Returns NULL for printable characters (handled by SDL_TEXTINPUT).
- * Returns a static/literal string for control/special keys.
  */
 static const char *translate_key(SDL_Keycode sym, SDL_Keymod mod)
 {
-    /* Ctrl+letter → \x01..\x1a */
     if ((mod & KMOD_CTRL) && sym >= SDLK_a && sym <= SDLK_z) {
         static char ctrl_buf[2];
         ctrl_buf[0] = (char)(sym - SDLK_a + 1);
@@ -89,36 +80,27 @@ static const char *translate_key(SDL_Keycode sym, SDL_Keymod mod)
     }
 }
 
-/* ---------- main ---------- */
+static void send_key_bytes(const char *seq, size_t len, uint64_t now)
+{
+    if (!seq || len == 0 || len > 8) return;
+    cyberdeck_input_t ev = { .type = CYBERDECK_INPUT_KEY, .len = (uint8_t)len };
+    memcpy(ev.buf, seq, len);
+    cyberdeck_app_handle_input(&ev, now);
+}
 
 int main(int argc, char *argv[])
 {
-    /* Load profiles; priority: argv > stored "default" > Kconfig macros */
-    if (storage_init() != ESP_OK)
-        fprintf(stderr, "storage_init() failed — using defaults\n");
+    /* Optional argv override: host [port [user [password]]] becomes the
+     * "(default)" entry in the profile picker. */
+    const char *host = (argc > 1) ? argv[1] : "";
+    int         port = (argc > 2) ? atoi(argv[2]) : 22;
+    const char *user = (argc > 3) ? argv[3] : "user";
+    const char *pass = (argc > 4) ? argv[4] : "";
 
-    static conn_profile_t s_profiles[8];
-    int profile_count = 0;
-    storage_load_profiles(s_profiles, &profile_count, 8);
-    const conn_profile_t *def =
-        storage_find_profile(s_profiles, profile_count, "default");
+    if (storage_init() != ESP_OK) {
+        fprintf(stderr, "storage_init() failed\n");
+    }
 
-    const char *host     = (argc > 1) ? argv[1]
-                         : (def)      ? def->host
-                         :               CONFIG_SSH_DEFAULT_HOST;
-    int         port_i   = (argc > 2) ? atoi(argv[2])
-                         : (def)      ? (int)def->port
-                         :               CONFIG_SSH_DEFAULT_PORT;
-    const char *user     = (argc > 3) ? argv[3]
-                         : (def)      ? def->user
-                         :               CONFIG_SSH_DEFAULT_USER;
-    const char *password = (argc > 4) ? argv[4]
-                         : (def && def->auth == STORAGE_AUTH_PASSWORD)
-                                       ? def->password
-                         :               CONFIG_SSH_DEFAULT_PASS;
-    uint16_t    port     = (uint16_t)port_i;
-
-    /* ── SDL + display stack ── */
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
@@ -126,45 +108,37 @@ int main(int argc, char *argv[])
 
     font_init();
     display_init();
-    vterm_init(SIM_COLS, SIM_ROWS);
-
-    /* ── announce connection attempt ── */
-    char banner[128];
-    snprintf(banner, sizeof(banner),
-             "Connecting to %s:%d as %s ...\r\n", host, port, user);
-    vterm_write(banner, strlen(banner));
+    vterm_init(CONFIG_TERMINAL_WIDTH, CONFIG_TERMINAL_HEIGHT);
+    vterm_write("\x1b[2J\x1b[H", 7);
     display_render_frame();
 
-    /* ── wifi stub ── */
     wifi_manager_init();
-    wifi_manager_connect();
+    ssh_client_init();
 
-    /* ── SSH ── */
-    ssh_config_t cfg = {
-        .host        = host,
-        .port        = port,
-        .username    = user,
-        .password    = password,
-        .private_key = NULL,
+    cyberdeck_app_config_t app_cfg = {
+        .boot_delay_ms      = 1500,
+        .ssh_retry_delay_ms = 5000,
+        .auto_reconnect     = true,
+        .version            = "sim",
+        .fallback_host      = host,
+        .fallback_port      = (uint16_t)port,
+        .fallback_user      = user,
+        .fallback_password  = pass,
+        .fallback_wifi_ssid     = "SIM",
+        .fallback_wifi_password = "",
+        .ble = NULL,
     };
-
-    if (ssh_client_init() != ESP_OK) {
-        const char *err = "ssh_client_init() failed\r\n";
-        vterm_write(err, strlen(err));
-        display_render_frame();
-    } else if (ssh_client_connect(&cfg) != ESP_OK) {
-        char errmsg[128];
-        snprintf(errmsg, sizeof(errmsg),
-                 "SSH connect to %s:%d failed\r\n", host, port);
-        vterm_write(errmsg, strlen(errmsg));
-        display_render_frame();
-        /* Fall through to event loop so user can read the error */
+    if (cyberdeck_app_init(&app_cfg, SDL_GetTicks64()) != ESP_OK) {
+        fprintf(stderr, "cyberdeck_app_init() failed\n");
+        SDL_Quit();
+        return 1;
     }
 
-    /* ── event loop ── */
     bool running = true;
     while (running) {
-        bool gotInput = false;
+        bool got_input = false;
+        uint64_t now = SDL_GetTicks64();
+
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
             switch (ev.type) {
@@ -173,44 +147,46 @@ int main(int argc, char *argv[])
                 break;
 
             case SDL_KEYDOWN: {
-                /* Alt+Enter — toggle 1×/2× window scale, do not forward to SSH */
                 if ((ev.key.keysym.mod & KMOD_ALT) &&
                     (ev.key.keysym.sym == SDLK_RETURN ||
                      ev.key.keysym.sym == SDLK_KP_ENTER)) {
                     display_toggle_scale();
                     break;
                 }
-                /* SDL_TEXTINPUT handles printable chars; only process special/ctrl here */
                 const char *seq = translate_key(ev.key.keysym.sym,
                                                 ev.key.keysym.mod);
-                if (seq && ssh_client_is_connected()) {
-                    ssh_client_send((const uint8_t *)seq, strlen(seq));
-                }
-                gotInput = true;
+                if (seq) send_key_bytes(seq, strlen(seq), now);
+                got_input = true;
                 break;
             }
 
             case SDL_TEXTINPUT:
-                if (ssh_client_is_connected()) {
-                    ssh_client_send((const uint8_t *)ev.text.text,
-                                    strlen(ev.text.text));
-                }
-                gotInput = true;
+                send_key_bytes(ev.text.text, strlen(ev.text.text), now);
+                got_input = true;
                 break;
+
+            case SDL_MOUSEBUTTONDOWN: {
+                cyberdeck_input_t tev = {
+                    .type = (ev.button.button == SDL_BUTTON_RIGHT)
+                            ? CYBERDECK_INPUT_LONG_PRESS
+                            : CYBERDECK_INPUT_TAP,
+                    .x = (uint16_t)ev.button.x,
+                    .y = (uint16_t)ev.button.y,
+                };
+                cyberdeck_app_handle_input(&tev, now);
+                got_input = true;
+                break;
+            }
 
             default:
                 break;
             }
         }
 
-        if (!ssh_client_is_connected()) {
-            /* Short delay so the user can read any final output */
-            SDL_Delay(2000);
-            running = false;
-        }
-
+        cyberdeck_app_tick(SDL_GetTicks64());
         display_render_frame();
-        SDL_Delay(gotInput ? 1 : 16);
+
+        SDL_Delay(got_input ? 1 : 16);
     }
 
     ssh_client_disconnect();

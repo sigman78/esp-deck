@@ -6,6 +6,8 @@ idf_component_register(
     INCLUDE_DIRS
         "include"
     REQUIRES
+        cyberdeck_app
+        esp_app_format      # esp_app_desc.h (esp_app_get_description)
         nvs_flash
         storage
         esp_wifi

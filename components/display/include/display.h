@@ -50,6 +50,10 @@ typedef struct {
     uint8_t  attrs;     // Attribute flags (see ATTR_* below)
 } terminal_cell_t;
 
+/* tsm_cell_t is cast to terminal_cell_t by the vterm bridge; the layouts
+ * must stay byte-compatible (tsm uses the padding byte at offset 7). */
+_Static_assert(sizeof(terminal_cell_t) == 8, "terminal_cell_t must be 8 bytes");
+
 /**
  * Convert an ANSI-256 palette index to an RGB565 value.
  * Covers the full range: 0-15 named, 16-231 6×6×6 cube, 232-255 grayscale.
@@ -83,10 +87,58 @@ esp_lcd_panel_handle_t display_get_panel(void);
 #endif /* BUILD_SIMULATOR */
 
 /**
+ * Overlay cell — a second compositing layer rendered on top of the primary
+ * terminal buffer.  cp == 0 means "transparent" (primary cell shows through).
+ * All overlay cells share the same fg/bg colors set via
+ * display_set_overlay_colors(); OVERLAY_ATTR_INVERSE swaps them per cell
+ * (menu selection highlight).
+ *
+ * OVERLAY_ATTR_DIM on a TRANSPARENT cell (cp == 0) is a scrim: the primary
+ * terminal still shows through, but at ~50% brightness — used to dim the live
+ * session behind a modal so the modal pops.
+ */
+#define OVERLAY_ATTR_INVERSE  (1 << 0)
+#define OVERLAY_ATTR_DIM      (1 << 1)
+
+/* Per-cell accent color: index into the overlay palette. 0 = use the screen's
+ * default overlay fg (set via display_set_overlay_colors); 1..N pick a fixed
+ * accent so a single screen can mix colors without a per-screen repaint. */
+#define OVERLAY_COL_DEFAULT   0
+#define OVERLAY_COL_GREEN     1
+#define OVERLAY_COL_CYAN      2
+#define OVERLAY_COL_MAGENTA   3
+#define OVERLAY_COL_AMBER     4
+#define OVERLAY_COL_RED       5
+#define OVERLAY_COL_BLUE      6
+#define OVERLAY_COL_WHITE     7
+#define OVERLAY_PAL_SIZE      8
+
+typedef struct {
+    uint16_t cp;     /* BMP codepoint; 0 = transparent */
+    uint8_t  attrs;  /* OVERLAY_ATTR_* flags            */
+    uint8_t  color;  /* OVERLAY_COL_* accent palette index */
+} display_overlay_cell_t;
+
+/** Register (or clear) the overlay buffer.  Pass NULL to disable the overlay.
+ *  buf must reside in DRAM (DRAM_ATTR / static DRAM).
+ *  cols/rows must match the registered terminal buffer dimensions. */
+void display_set_overlay_buffer(display_overlay_cell_t *buf, int cols, int rows);
+
+/** Set the fg/bg RGB565 colors used for all non-transparent overlay cells. */
+void display_set_overlay_colors(color_t fg, color_t bg);
+
+/** Query the currently registered terminal buffer dimensions (0,0 if not set). */
+void display_get_text_size(int *cols, int *rows);
+
+/** Trigger the visual bell: a brief decaying vertical screen shake (a speaker-
+ *  less substitute for the terminal BEL). Safe to call from any task. */
+void display_bell(void);
+
+/**
  * Register the terminal cell buffer so the display ISR can render from it.
  *
- * Call once after terminal_init(). The pointer must remain valid for the
- * lifetime of the display (never free the terminal buffer).
+ * Call once after vterm_init(). The pointer must remain valid for the
+ * lifetime of the display (never free the cell buffer).
  *
  * @param buf   Pointer to cols*rows terminal_cell_t array (must be in DRAM)
  * @param cols  Number of character columns
