@@ -82,16 +82,16 @@ flagged in red and blocks the connection before any credentials are sent.
 
 ## First-time setup
 
-The build depends on git submodules (`libssh2`, `esp_littlefs`) plus two small
-local patches to `libssh2` — a RAM diet and a simulator CMake shim. After
-cloning, run:
+After cloning, fetch the one git submodule (`esp_littlefs`):
 
 ```bash
-./tools/setup.sh        # submodule init + apply docs/patches/* — idempotent
+./tools/setup.sh        # git submodule update --init --recursive
 ```
 
-On Windows run it from Git Bash. It is safe to re-run: patches already applied
-are skipped. The patch sources live in `docs/patches/`.
+`libssh2` is **not** a submodule — CMake clones it (pinned SHA) and applies the
+RAM-diet patch automatically on the first configure, for both the device and
+simulator builds. See `components/libssh2_esp/` (the vendored wrapper +
+`patches/`).
 
 ## Build — device (ESP32-S3)
 
@@ -151,7 +151,7 @@ MIT-compatible); their notices must be preserved when redistributing:
 | Component | License |
 |-----------|---------|
 | Terminus bitmap font (`components/font/`) | **SIL OFL 1.1** — [`components/font/LICENSE`](components/font/LICENSE) |
-| `libssh2` + `libssh2_esp` wrapper (submodule) | BSD-3-Clause |
+| `libssh2` (CMake-fetched) + vendored `libssh2_esp` wrapper | BSD-3-Clause |
 | `esp_littlefs` (submodule) / `littlefs` core | MIT / BSD-3-Clause |
 | `esp_lcd_touch_gt911`, `esp_lcd_touch`, `qrcode` (managed, fetched at build) | Apache-2.0 |
 | ESP-IDF + mbedTLS | Apache-2.0 |

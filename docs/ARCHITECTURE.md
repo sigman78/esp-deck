@@ -53,11 +53,12 @@ components/
   input/             BLE HID keyboard, GT911 touch, USB-serial
   terminal/          legacy low-level TUI — unused by the shell (see note)
   esp_littlefs/      vendored submodule
-  libssh2_esp/       vendored submodule (mbedTLS on device, WinCNG in sim)
+  libssh2_esp/       vendored wrapper; libssh2 cloned+patched by CMake at
+                     configure time (mbedTLS on device, WinCNG in sim)
 idfsim/              host-compilable ESP-IDF stubs (esp_err, heap_caps, ...)
 tests/               Unity suites (tsm: vtparse + termstate; terminal)
 cmake/               cyberdeck_component_register() — IDF/sim dual registration
-docs/                this file + libssh2 build patches
+docs/                this document
 ```
 
 > **Note on `components/terminal`.** An early low-level "DOS-style" text output
