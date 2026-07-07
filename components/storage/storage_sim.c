@@ -76,3 +76,41 @@ esp_err_t storage_platform_init(void)
     ESP_LOGI(TAG, "Sim storage ready at '%s'", s_mount);
     return ESP_OK;
 }
+
+/* -------------------------------------------------------------------------
+ * BLE device registry — in-memory stub (the simulator has no BLE).
+ * ---------------------------------------------------------------------- */
+static ble_device_info_t s_ble[STORAGE_BLE_MAX];
+static int               s_ble_count = 0;
+
+esp_err_t storage_ble_list(ble_device_info_t *out, int max, int *count)
+{
+    if (!out || !count || max <= 0) return ESP_ERR_INVALID_ARG;
+    int n = s_ble_count > max ? max : s_ble_count;
+    if (n > 0) memcpy(out, s_ble, (size_t)n * sizeof(ble_device_info_t));
+    *count = n;
+    return ESP_OK;
+}
+
+esp_err_t storage_ble_save(const ble_device_info_t *dev)
+{
+    if (!dev) return ESP_ERR_INVALID_ARG;
+    for (int i = 0; i < s_ble_count; i++)
+        if (memcmp(s_ble[i].addr, dev->addr, 6) == 0) { s_ble[i] = *dev; return ESP_OK; }
+    if (s_ble_count < STORAGE_BLE_MAX) s_ble[s_ble_count++] = *dev;
+    return ESP_OK;
+}
+
+esp_err_t storage_ble_remove(const uint8_t addr[6])
+{
+    for (int i = 0; i < s_ble_count; i++)
+        if (memcmp(s_ble[i].addr, addr, 6) == 0) {
+            memmove(&s_ble[i], &s_ble[i + 1],
+                    sizeof(ble_device_info_t) * (s_ble_count - i - 1));
+            s_ble_count--;
+            break;
+        }
+    return ESP_OK;
+}
+
+esp_err_t storage_ble_clear(void) { s_ble_count = 0; return ESP_OK; }
