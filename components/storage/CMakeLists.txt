@@ -5,7 +5,7 @@ cyberdeck_component_register(
     SRCS_DEV     storage_dev.c
     SRCS_SIM     storage_sim.c
     INCLUDE_DIRS include
-    REQUIRES_DEV esp_littlefs nvs_flash
+    REQUIRES_DEV nvs_flash          # littlefs auto-required via idf_component.yml
 )
 
 # Seed the device littlefs partition from sim_storage/ (gitignored — holds

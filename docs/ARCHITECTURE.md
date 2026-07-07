@@ -52,7 +52,6 @@ components/
   storage/           INI profiles, known-hosts, BLE registry, key blobs
   input/             BLE HID keyboard, GT911 touch, USB-serial
   terminal/          legacy low-level TUI — unused by the shell (see note)
-  esp_littlefs/      vendored submodule
   libssh2_esp/       vendored wrapper; libssh2 cloned+patched by CMake at
                      configure time (mbedTLS on device, WinCNG in sim)
 idfsim/              host-compilable ESP-IDF stubs (esp_err, heap_caps, ...)

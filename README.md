@@ -82,16 +82,15 @@ flagged in red and blocks the connection before any credentials are sent.
 
 ## First-time setup
 
-After cloning, fetch the one git submodule (`esp_littlefs`):
+None — there are **no git submodules**. Just clone and build. Dependencies are
+fetched on the first configure:
 
-```bash
-./tools/setup.sh        # git submodule update --init --recursive
-```
+- `libssh2` — cloned (pinned SHA) and patched by CMake for both builds; see
+  `components/libssh2_esp/` (vendored wrapper + `patches/`).
+- `esp_littlefs` (`joltwallet/littlefs`), `esp_lcd_touch_gt911`, `qrcode` —
+  pulled by the ESP-IDF component manager (device build).
 
-`libssh2` is **not** a submodule — CMake clones it (pinned SHA) and applies the
-RAM-diet patch automatically on the first configure, for both the device and
-simulator builds. See `components/libssh2_esp/` (the vendored wrapper +
-`patches/`).
+The first build therefore needs network access.
 
 ## Build — device (ESP32-S3)
 
@@ -152,7 +151,7 @@ MIT-compatible); their notices must be preserved when redistributing:
 |-----------|---------|
 | Terminus bitmap font (`components/font/`) | **SIL OFL 1.1** — [`components/font/LICENSE`](components/font/LICENSE) |
 | `libssh2` (CMake-fetched) + vendored `libssh2_esp` wrapper | BSD-3-Clause |
-| `esp_littlefs` (submodule) / `littlefs` core | MIT / BSD-3-Clause |
+| `esp_littlefs` (`joltwallet/littlefs`, managed component) / `littlefs` core | MIT / BSD-3-Clause |
 | `esp_lcd_touch_gt911`, `esp_lcd_touch`, `qrcode` (managed, fetched at build) | Apache-2.0 |
 | ESP-IDF + mbedTLS | Apache-2.0 |
 | Unity (tests) | MIT |
