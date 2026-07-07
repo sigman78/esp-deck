@@ -20,6 +20,7 @@
 
 #include "esp_log.h"
 #include "esp_hidh.h"
+#include "esp_timer.h"
 
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -63,6 +64,49 @@ static char    s_connected_name[64] = "";   /* name of the live device, "" = non
 
 /* Previous HID report keys — for rollover diffing (emit only new keys) */
 static uint8_t s_prev_keys[6];
+
+/* Typematic auto-repeat: HID keyboards report state changes only, so the host
+ * (us) must repeat a held key. The most-recently-pressed key repeats. */
+#define KBD_REPEAT_DELAY_US   (400 * 1000)   /* hold time before repeat kicks in */
+#define KBD_REPEAT_PERIOD_US  ( 40 * 1000)   /* ~25 chars/sec while held          */
+static esp_timer_handle_t s_repeat_timer = NULL;
+static uint8_t s_repeat_kc  = 0;             /* keycode being repeated (0 = none) */
+static uint8_t s_repeat_buf[INPUT_EVENT_MAX_LEN];
+static uint8_t s_repeat_len = 0;
+
+/* Re-emit the held key, then re-arm at the repeat cadence. */
+static void repeat_timer_cb(void *arg)
+{
+    (void)arg;
+    if (s_repeat_kc == 0 || s_repeat_len == 0) return;
+    input_event_t ev = { .type = INPUT_EVENT_KEY, .len = s_repeat_len };
+    for (uint8_t j = 0; j < s_repeat_len; j++) ev.buf[j] = s_repeat_buf[j];
+    input_hal_post_event(&ev);
+    esp_timer_start_once(s_repeat_timer, KBD_REPEAT_PERIOD_US);
+}
+
+/* Start repeating @p kc (translated bytes in buf/len) after the initial delay. */
+static void repeat_arm(uint8_t kc, const uint8_t *buf, uint8_t len)
+{
+    if (!s_repeat_timer) {
+        const esp_timer_create_args_t a = {
+            .callback = repeat_timer_cb, .name = "kbd_rpt",
+        };
+        if (esp_timer_create(&a, &s_repeat_timer) != ESP_OK) return;
+    }
+    esp_timer_stop(s_repeat_timer);           /* harmless if not running */
+    s_repeat_kc  = kc;
+    s_repeat_len = len;
+    memcpy(s_repeat_buf, buf, len);
+    esp_timer_start_once(s_repeat_timer, KBD_REPEAT_DELAY_US);
+}
+
+static void repeat_stop(void)
+{
+    if (s_repeat_timer) esp_timer_stop(s_repeat_timer);
+    s_repeat_kc  = 0;
+    s_repeat_len = 0;
+}
 
 /* Global GAP event listener — drives link encryption/bonding, which esp_hidh's
  * NimBLE backend does not do on its own. */
@@ -494,6 +538,7 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
         memcpy(s_connected_bda, bda, 6);
         s_connected_dev = data->open.dev;
         memset(s_prev_keys, 0, sizeof(s_prev_keys));
+        repeat_stop();
         s_state = BLE_CONNECTED;
 
         /* Save/update the registry record. Prefer the peer's IDENTITY
@@ -545,6 +590,7 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
         s_connected_dev = NULL;
         s_connected_name[0] = '\0';
         memset(s_prev_keys, 0, sizeof(s_prev_keys));
+        repeat_stop();
         s_state = (s_registry_count > 0) ? BLE_RECONNECT : BLE_IDLE;
         ble_gap_disc_cancel();
         if (s_state == BLE_RECONNECT)
@@ -584,7 +630,18 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
             input_event_t ev = { .type = INPUT_EVENT_KEY, .len = len };
             for (uint8_t j = 0; j < len; j++) ev.buf[j] = buf[j];
             input_hal_post_event(&ev);
+
+            repeat_arm(kc, buf, len);   /* newest key press takes over repeat */
         }
+
+        /* Stop repeating once the held key is released (gone from the report). */
+        if (s_repeat_kc != 0) {
+            bool still_held = false;
+            for (uint8_t j = 0; j < nk; j++)
+                if (new_keys[j] == s_repeat_kc) { still_held = true; break; }
+            if (!still_held) repeat_stop();
+        }
+
         memcpy(s_prev_keys, new_keys, sizeof(s_prev_keys));
         break;
     }
