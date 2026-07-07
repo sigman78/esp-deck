@@ -81,6 +81,7 @@ static const cyberdeck_ble_ops_t s_ble_ops = {
     .get_scan_results = ble_keyboard_get_scan_results,
     .select_device    = ble_keyboard_select_device,
     .get_name         = ble_keyboard_get_connected_name,
+    .forget           = ble_keyboard_forget_all,
 };
 
 /* -------------------------------------------------------------------------

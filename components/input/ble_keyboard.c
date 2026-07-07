@@ -320,6 +320,24 @@ void ble_keyboard_forget_device(const uint8_t addr[6])
     }
 }
 
+void ble_keyboard_forget_all(void)
+{
+    ESP_LOGW(TAG, "Forgetting ALL bonded devices");
+    ble_gap_disc_cancel();
+    if (s_connected_dev) {
+        esp_hidh_dev_close(s_connected_dev);
+        s_connected_dev = NULL;
+    }
+    s_connected_name[0] = '\0';
+
+    /* Wipe every NimBLE bond (NVS) and our own registry — the clean recovery
+     * from a corrupt/stale bond store. Next pairing starts from scratch. */
+    ble_store_clear();
+    storage_ble_clear();
+    storage_ble_list(s_registry, STORAGE_BLE_MAX, &s_registry_count);   /* -> 0 */
+    s_state = BLE_IDLE;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Scan helper                                                        */
 /* ------------------------------------------------------------------ */
@@ -754,5 +772,6 @@ void        ble_keyboard_reconnect_start(void)                         {}
 int         ble_keyboard_get_scan_results(ble_device_info_t *o, int m) { (void)o; (void)m; return 0; }
 void        ble_keyboard_select_device(const uint8_t a[6], uint8_t t)  { (void)a; (void)t; }
 void        ble_keyboard_forget_device(const uint8_t a[6])             { (void)a; }
+void        ble_keyboard_forget_all(void)                              {}
 
 #endif

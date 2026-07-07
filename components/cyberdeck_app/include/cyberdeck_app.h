@@ -40,6 +40,7 @@ typedef struct {
     int  (*get_scan_results)(ble_device_info_t *out, int max);
     void (*select_device)(const uint8_t addr[6], uint8_t addr_type);
     const char *(*get_name)(void);   /* connected device name, "" if none */
+    void (*forget)(void);            /* wipe all bonds (recover a bad store) */
 } cyberdeck_ble_ops_t;
 
 /* ---- configuration ------------------------------------------------------ */

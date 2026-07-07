@@ -69,3 +69,7 @@ void ble_keyboard_select_device(const uint8_t addr[6], uint8_t addr_type);
  * Remove @p addr from the storage registry and (if connected) disconnect.
  */
 void ble_keyboard_forget_device(const uint8_t addr[6]);
+
+/** Wipe ALL bonds (NimBLE NVS + registry). Clean recovery from a corrupt or
+ *  stale bond store; the next pairing starts from scratch. */
+void ble_keyboard_forget_all(void);

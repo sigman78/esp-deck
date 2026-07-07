@@ -522,7 +522,7 @@ static void render_home(void)
  * tile, which is always the last slot). */
 static int pairing_ndev(const tilegrid_t *g)
 {
-    return g->count - 1;
+    return g->count - 2;   /* last two tiles are "Forget bonds" + "Cancel" */
 }
 
 static void render_pairing(void)
@@ -539,11 +539,12 @@ static void render_pairing(void)
                           : "scanning for keyboards...", 0);
     draw_rule_scan(3, s.anim_frame);
 
-    /* Devices + one Cancel tile; cap devices so Cancel always fits. */
-    tilegrid_t g = picker_grid(1);            /* start with room for Cancel */
+    /* Devices, then a "Forget bonds" tile and a Cancel tile (always last two).
+     * Cap devices so both special tiles fit on the page. */
+    tilegrid_t g = picker_grid(0);
     int cap  = g.ncols * g.nrows;
-    int ndev = s.ndevs > cap - 1 ? cap - 1 : s.ndevs;
-    g.count  = ndev + 1;
+    int ndev = s.ndevs > cap - 2 ? cap - 2 : s.ndevs;
+    g.count  = ndev + 2;
     s.grid   = g;
     if (s.pair_sel >= g.count) s.pair_sel = g.count - 1;
 
@@ -554,9 +555,12 @@ static void render_pairing(void)
                 s.devs[i].addr_type ? "random addr" : "public addr",
                 i == s.pair_sel);
     }
-    ui_pen(OVERLAY_COL_RED);
+    ui_pen(OVERLAY_COL_AMBER);
     ui_tile(tile_x(&g, ndev), tile_y(&g, ndev), g.tw, g.th,
-            "Cancel", "", ndev == s.pair_sel);
+            "Forget bonds", "clear + re-pair", ndev == s.pair_sel);
+    ui_pen(OVERLAY_COL_RED);
+    ui_tile(tile_x(&g, ndev + 1), tile_y(&g, ndev + 1), g.tw, g.th,
+            "Cancel", "", (ndev + 1) == s.pair_sel);
     ui_pen(OVERLAY_COL_DEFAULT);
 
     draw_rule(ui_rows() - 2);
@@ -743,6 +747,23 @@ static void exit_pairing(uint64_t now)
         ui_hide();
     } else {
         enter_home(now);
+    }
+}
+
+/* Act on a PAIRING tile: a device (pair it), "Forget bonds", or "Cancel". */
+static void pairing_select(int slot, uint64_t now)
+{
+    int nd = pairing_ndev(&s.grid);
+    if (slot < nd && s.cfg.ble) {                 /* a discovered device */
+        s.cfg.ble->select_device(s.devs[slot].addr, s.devs[slot].addr_type);
+        toast(now, "pairing %.32s...", s.devs[slot].name);
+        exit_pairing(now);
+    } else if (slot == nd) {                       /* Forget bonds */
+        if (s.cfg.ble && s.cfg.ble->forget) s.cfg.ble->forget();
+        toast(now, "bonds cleared — re-scanning");
+        enter_pairing(now);                        /* restart the scan fresh */
+    } else {                                       /* Cancel */
+        exit_pairing(now);
     }
 }
 
@@ -1094,14 +1115,7 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
         s.pair_last_activity = now;
         if (ev->type == CYBERDECK_INPUT_TAP) {
             int slot = tile_hit(&s.grid, ev->x, ev->y);
-            if (slot < 0) break;                       /* gutter: ignore, keep scanning */
-            if (slot < pairing_ndev(&s.grid) && s.cfg.ble) {
-                s.cfg.ble->select_device(s.devs[slot].addr, s.devs[slot].addr_type);
-                toast(now, "pairing %.32s...", s.devs[slot].name);
-                exit_pairing(now);
-            } else {                                   /* Cancel tile */
-                exit_pairing(now);
-            }
+            if (slot >= 0) pairing_select(slot, now);   /* gutter tap: ignore */
             break;
         }
         switch (k) {
@@ -1111,14 +1125,7 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
             break;
         }
         case K_ENTER:
-            if (s.pair_sel < pairing_ndev(&s.grid) && s.cfg.ble) {
-                s.cfg.ble->select_device(s.devs[s.pair_sel].addr,
-                                         s.devs[s.pair_sel].addr_type);
-                toast(now, "pairing %.32s...", s.devs[s.pair_sel].name);
-                exit_pairing(now);   /* backend continues async */
-            } else {
-                exit_pairing(now);   /* Cancel tile focused */
-            }
+            pairing_select(s.pair_sel, now);
             break;
         case K_ESC:
             exit_pairing(now);
