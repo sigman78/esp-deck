@@ -26,8 +26,8 @@ static char s_pop[16]     = "";
 static char s_qr[192]     = "";
 static char s_got_ssid[33] = "";
 static char s_got_pass[65] = "";
-static bool s_ap_netif  = false;   /* AP netif created once, then reused */
-static bool s_handler   = false;   /* prov event handler registered      */
+static esp_netif_t *s_ap_netif = NULL;   /* SoftAP netif, destroyed on stop */
+static bool s_handler   = false;         /* prov event handler registered   */
 
 /* Bit-packed QR module matrix (RAM-frugal: ~253 B vs a byte-per-module). */
 #define QR_MAX 45
@@ -135,8 +135,8 @@ esp_err_t wifi_provision_start(void)
     if (wifi_manager_init() != ESP_OK) return ESP_FAIL;
     wifi_manager_disconnect();
 
-    /* SoftAP scheme needs an AP netif; create it once. */
-    if (!s_ap_netif) { esp_netif_create_default_wifi_ap(); s_ap_netif = true; }
+    /* SoftAP scheme needs an AP netif; create it for the session. */
+    if (!s_ap_netif) s_ap_netif = esp_netif_create_default_wifi_ap();
 
     if (!s_handler) {
         esp_err_t e = esp_event_handler_register(WIFI_PROV_EVENT, ESP_EVENT_ANY_ID,
@@ -192,12 +192,22 @@ void wifi_provision_stop(void)
                                      &prov_event_handler);
         s_handler = false;
     }
-    esp_wifi_set_mode(WIFI_MODE_STA);   /* drop the AP, back to plain STA */
+    esp_wifi_set_mode(WIFI_MODE_STA);   /* drop the AP radio, back to plain STA */
+
+    /* Destroy the AP netif — otherwise it lingers as 192.168.4.1 and lwip keeps
+     * routing/DNS through it, so outbound TCP (SSH) times out until a reboot.
+     * Then re-assert the STA netif as the default route. */
+    if (s_ap_netif) {
+        esp_netif_destroy_default_wifi(s_ap_netif);
+        s_ap_netif = NULL;
+    }
+    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (sta) esp_netif_set_default_netif(sta);
 
     s_state   = WIFI_PROV_ST_IDLE;
     s_qr_size = 0;
     s_qr[0] = s_service[0] = s_pop[0] = '\0';
-    ESP_LOGI(TAG, "Provisioning stopped");
+    ESP_LOGI(TAG, "Provisioning stopped, AP netif removed");
 }
 
 int         wifi_provision_state(void)         { return s_state; }
