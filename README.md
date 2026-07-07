@@ -80,6 +80,19 @@ Host keys are trust-on-first-use: the first connect shows the server's
 SHA256 fingerprint and pins it in `known_hosts.ini`; a later mismatch is
 flagged in red and blocks the connection before any credentials are sent.
 
+## First-time setup
+
+The build depends on git submodules (`libssh2`, `esp_littlefs`) plus two small
+local patches to `libssh2` — a RAM diet and a simulator CMake shim. After
+cloning, run:
+
+```bash
+./tools/setup.sh        # submodule init + apply docs/patches/* — idempotent
+```
+
+On Windows run it from Git Bash. It is safe to re-run: patches already applied
+are skipped. The patch sources live in `docs/patches/`.
+
 ## Build — device (ESP32-S3)
 
 Requires ESP-IDF **v5.1+** (RGB LCD support); tested on v5.5.2.
