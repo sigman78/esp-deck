@@ -103,6 +103,7 @@ static struct {
     /* menu */
     int  menu_sel;
     int  menu_page;        /* 0 = main menu, 1 = config submenu */
+    bool menu_from_home;   /* config opened from HOME (no session) */
     char menu_msg[48];     /* last config action result, shown in the submenu */
 
     /* toast (SESSION only; UI states draw status inline) */
@@ -471,13 +472,13 @@ static void render_home(void)
 
     draw_rule_scan(3, s.anim_frame);
 
-    /* Tiles: one per profile, plus a trailing "pair keyboard" tile. */
-    tilegrid_t g = picker_grid(s.profile_count + 1);
+    /* Tiles: one per profile, then trailing "pair keyboard" + "config" tiles. */
+    tilegrid_t g = picker_grid(s.profile_count + 2);
     s.grid = g;
     if (s.sel >= g.count) s.sel = g.count ? g.count - 1 : 0;
-    if (s.profile_count + 1 > g.ncols * g.nrows)
+    if (s.profile_count + 2 > g.ncols * g.nrows)
         ESP_LOGW(TAG, "%d profiles exceed one page; showing first %d",
-                 s.profile_count, g.count - 1);
+                 s.profile_count, g.count - 2);
 
     for (int i = 0; i < g.count; i++) {
         int cx = tile_x(&g, i), cy = tile_y(&g, i);
@@ -490,10 +491,14 @@ static void render_home(void)
                      p->auth == STORAGE_AUTH_KEY ? "  [key]" : "");
             ui_pen(OVERLAY_COL_GREEN);
             ui_tile(cx, cy, g.tw, g.th, p->name, body, sel);
-        } else {
+        } else if (i == s.profile_count) {
             ui_pen(OVERLAY_COL_CYAN);
             ui_tile(cx, cy, g.tw, g.th, "+ Pair keyboard",
                     s.cfg.ble ? "tap or long-press" : "(no BLE)", sel);
+        } else {
+            ui_pen(OVERLAY_COL_BLUE);
+            ui_tile(cx, cy, g.tw, g.th, "Configuration",
+                    "wifi / keyboard", sel);
         }
     }
     ui_pen(OVERLAY_COL_DEFAULT);
@@ -676,16 +681,15 @@ static const uint8_t  main_cols[]  = {
 };
 #define MAIN_COUNT ((int)(sizeof(main_items) / sizeof(main_items[0])))
 
-/* Page 1 — the configuration submenu. */
+/* Page 1 — the configuration submenu (reachable from HOME and in-session). */
 static const char    *config_items[] = {
-    "WiFi reconnect", "WiFi disconnect", "Reload profiles",
-    "Forget keyboard", "Back",
+    "WiFi reconnect", "WiFi disconnect", "Forget keyboard", "Back",
 };
 static const uint8_t  config_cols[]   = {
-    OVERLAY_COL_GREEN, OVERLAY_COL_AMBER, OVERLAY_COL_CYAN,
-    OVERLAY_COL_RED,   OVERLAY_COL_BLUE,
+    OVERLAY_COL_GREEN, OVERLAY_COL_AMBER, OVERLAY_COL_RED, OVERLAY_COL_BLUE,
 };
 #define CONFIG_COUNT ((int)(sizeof(config_items) / sizeof(config_items[0])))
+#define CONFIG_FORGET_KBD 2   /* index of "Forget keyboard" (needs BLE) */
 
 static void render_menu(void)
 {
@@ -709,7 +713,8 @@ static void render_menu(void)
 
     for (int i = 0; i < count; i++) {
         /* "Pair/Forget keyboard" need BLE; grey them out when absent. */
-        bool dim = !s.cfg.ble && ((!cfg && i == 3) || (cfg && i == 3));
+        bool dim = !s.cfg.ble &&
+                   ((!cfg && i == 3) || (cfg && i == CONFIG_FORGET_KBD));
         ui_pen(cols[i]);
         ui_tile(tile_x(&g, i), tile_y(&g, i), g.tw, g.th,
                 items[i], dim ? "(unavailable)" : "", i == s.menu_sel);
@@ -801,6 +806,14 @@ static void menu_open_config(void)
     render_menu();
 }
 
+/* Open the config submenu directly from HOME (no session behind it). */
+static void home_open_config(void)
+{
+    s.menu_from_home = true;
+    s.state          = ST_MENU;
+    menu_open_config();
+}
+
 static void menu_activate(uint64_t now)
 {
     if (s.menu_page == 0) {                   /* ---- main menu ---- */
@@ -833,18 +846,15 @@ static void menu_activate(uint64_t now)
         wifi_manager_disconnect();
         snprintf(s.menu_msg, sizeof(s.menu_msg), "wifi disconnected");
         break;
-    case 2:                                   /* Reload profiles */
-        load_profiles();
-        snprintf(s.menu_msg, sizeof(s.menu_msg), "%d profile(s) loaded", s.profile_count);
-        break;
-    case 3:                                   /* Forget keyboard */
+    case CONFIG_FORGET_KBD:                   /* Forget keyboard */
         if (s.cfg.ble && s.cfg.ble->forget) {
             s.cfg.ble->forget();
             snprintf(s.menu_msg, sizeof(s.menu_msg), "keyboard bonds cleared");
         }
         break;
-    case 4:                                   /* Back to main menu */
-        s.menu_page   = 0;
+    case 3:                                   /* Back */
+        if (s.menu_from_home) { enter_home(now); return; }
+        s.menu_page   = 0;                    /* in-session: back to main menu */
         s.menu_sel    = 0;
         s.menu_msg[0] = '\0';
         break;
@@ -1084,7 +1094,8 @@ void cyberdeck_app_tick(uint64_t now)
         break;
 
     case ST_MENU:
-        if (!ssh_client_is_connected()) {
+        /* A menu opened from HOME has no session to monitor. */
+        if (!s.menu_from_home && !ssh_client_is_connected()) {
             toast(now, "session ended");
             enter_home(now);
         }
@@ -1103,9 +1114,10 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
     if (s.state == ST_SESSION) {
         if (ev->type == CYBERDECK_INPUT_LONG_PRESS ||
             (ev->type == CYBERDECK_INPUT_KEY && is_f12(ev))) {
-            s.menu_sel    = 0;
-            s.menu_page   = 0;
-            s.menu_msg[0] = '\0';
+            s.menu_sel       = 0;
+            s.menu_page      = 0;
+            s.menu_from_home = false;
+            s.menu_msg[0]    = '\0';
             s.state = ST_MENU;
             render_menu();
             return;
@@ -1134,8 +1146,10 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
         if (ev->type == CYBERDECK_INPUT_TAP) {
             int slot = tile_hit(&s.grid, ev->x, ev->y);
             if (slot < 0) break;                     /* gutter/margin: ignore */
-            if (slot >= s.profile_count) {           /* the "pair keyboard" tile */
+            if (slot == s.profile_count) {           /* "pair keyboard" tile */
                 if (s.cfg.ble) enter_pairing(now);
+            } else if (slot == s.profile_count + 1) {/* "configuration" tile */
+                home_open_config();
             } else if (s.sel != slot) {              /* first tap: select + show */
                 s.sel = slot;
                 render_home();
@@ -1154,8 +1168,10 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
             break;
         }
         case K_ENTER:
-            if (s.sel >= s.profile_count) {          /* pair tile focused */
+            if (s.sel == s.profile_count) {          /* pair tile focused */
                 if (s.cfg.ble) enter_pairing(now);
+            } else if (s.sel == s.profile_count + 1) {/* config tile focused */
+                home_open_config();
             } else if (s.profile_count > 0) {
                 if (!wifi_manager_is_connected()) {
                     toast(now, "WiFi not connected yet");
@@ -1242,7 +1258,9 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
 
     case ST_MENU:
         if (k == K_ESC || (ev->type == CYBERDECK_INPUT_KEY && is_f12(ev))) {
-            if (s.menu_page == 1) {            /* config: step back to main menu */
+            if (s.menu_page == 1 && s.menu_from_home) {   /* config over HOME */
+                enter_home(now);
+            } else if (s.menu_page == 1) {     /* config: step back to main menu */
                 s.menu_page = 0; s.menu_sel = 0; render_menu();
             } else {
                 s.state = ST_SESSION;
@@ -1253,7 +1271,9 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
         if (ev->type == CYBERDECK_INPUT_TAP) {
             int slot = tile_hit(&s.grid, ev->x, ev->y);
             if (slot < 0) {                    /* tap outside the menu */
-                if (s.menu_page == 1) {        /* config: back to main menu */
+                if (s.menu_page == 1 && s.menu_from_home) {
+                    enter_home(now);
+                } else if (s.menu_page == 1) { /* config: back to main menu */
                     s.menu_page = 0; s.menu_sel = 0; render_menu();
                 } else {                       /* main: resume session */
                     s.state = ST_SESSION;
