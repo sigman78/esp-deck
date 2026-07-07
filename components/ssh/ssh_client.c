@@ -29,6 +29,10 @@
 #include <string.h>
 #include <stdio.h>
 
+#ifndef SHUT_RDWR          /* Winsock spells it SD_BOTH; both are 2 */
+#define SHUT_RDWR 2
+#endif
+
 static const char *TAG = "ssh_client";
 
 /* -------------------------------------------------------------------------
@@ -97,6 +101,17 @@ static bool              s_libssh2_initialized = false;
 #define SSH_READ_STACK_BYTES 8192
 static StaticTask_t      s_read_task_tcb;
 static StackType_t      *s_read_task_stack = NULL;
+
+/* Async connect worker — runs the blocking ssh_client_connect() off the UI
+ * task so the shell stays responsive. PSRAM stack (crypto handshake is heavy;
+ * no flash writes, only key-file reads, so external RAM is fine). */
+#define SSH_CONNECT_STACK_BYTES 12288
+static StaticTask_t      s_connect_tcb;
+static StackType_t      *s_connect_stack = NULL;
+static TaskHandle_t      s_connect_task  = NULL;
+static ssh_config_t      s_pending_cfg;             /* shallow copy; strings owned by caller */
+static volatile int      s_connect_phase = 0;       /* 0 idle, 1 pending, 2 done */
+static volatile esp_err_t s_connect_result = ESP_FAIL;
 
 /*
  * Serializes all libssh2 session/channel calls. libssh2 is not thread-safe
@@ -569,6 +584,57 @@ auth_done:
 
     ESP_LOGI(TAG, "SSH session ready — libssh2 heap: %zu B", s_alloc_bytes);
     return ESP_OK;
+}
+
+/* =========================================================================
+ * Async connect — run the blocking connect on a worker task
+ * ====================================================================== */
+static void ssh_connect_worker(void *arg)
+{
+    (void)arg;
+    s_connect_result = ssh_client_connect(&s_pending_cfg);
+    s_connect_task   = NULL;
+    s_connect_phase  = 2;   /* done — publish result last */
+    vTaskDelete(NULL);
+}
+
+esp_err_t ssh_client_connect_start(const ssh_config_t *config)
+{
+    if (!config) return ESP_ERR_INVALID_ARG;
+    if (s_connect_phase == 1) return ESP_ERR_INVALID_STATE;
+
+    s_pending_cfg    = *config;     /* shallow: caller keeps the strings alive */
+    s_connect_result = ESP_FAIL;
+    s_connect_phase  = 1;
+
+    if (!s_connect_stack)
+        s_connect_stack = heap_caps_malloc(SSH_CONNECT_STACK_BYTES,
+                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_connect_stack) { s_connect_phase = 0; return ESP_ERR_NO_MEM; }
+
+    s_connect_task = xTaskCreateStaticPinnedToCore(
+        ssh_connect_worker, "ssh_conn",
+        SSH_CONNECT_STACK_BYTES / sizeof(StackType_t), NULL, 5,
+        s_connect_stack, &s_connect_tcb, 0);
+    if (!s_connect_task) { s_connect_phase = 0; return ESP_FAIL; }
+    return ESP_OK;
+}
+
+bool ssh_client_connect_pending(void) { return s_connect_phase == 1; }
+bool ssh_client_connect_ready(void)   { return s_connect_phase == 2; }
+
+esp_err_t ssh_client_connect_take_result(void)
+{
+    esp_err_t r = s_connect_result;
+    s_connect_phase = 0;
+    return r;
+}
+
+void ssh_client_connect_cancel(void)
+{
+    /* Unblock a stalled socket read/write without closing the fd (the worker's
+     * ssh_cleanup() owns the close). No effect if still resolving DNS. */
+    if (s_sock >= 0) shutdown(s_sock, SHUT_RDWR);
 }
 
 esp_err_t ssh_client_disconnect(void)

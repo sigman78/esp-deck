@@ -49,6 +49,29 @@ esp_err_t ssh_client_init(void);
 esp_err_t ssh_client_connect(const ssh_config_t *config);
 
 /**
+ * Asynchronous connect: run ssh_client_connect() on a worker task so the UI
+ * stays live during DNS/TCP/handshake/auth. The caller MUST keep the strings
+ * referenced by @p config alive until the result is taken (the struct is
+ * shallow-copied). Returns ESP_OK once the worker is launched, or
+ * ESP_ERR_INVALID_STATE if a connect is already in flight.
+ */
+esp_err_t ssh_client_connect_start(const ssh_config_t *config);
+
+/** True while an async connect is still running. */
+bool ssh_client_connect_pending(void);
+
+/** True once the async connect has finished (result available). */
+bool ssh_client_connect_ready(void);
+
+/** Take the async connect result (same codes as ssh_client_connect) and reset
+ *  the async state. Call once, after ssh_client_connect_ready() is true. */
+esp_err_t ssh_client_connect_take_result(void);
+
+/** Best-effort abort of an in-flight async connect (unblocks a stalled
+ *  handshake; the worker still finishes and reports an error). */
+void ssh_client_connect_cancel(void);
+
+/**
  * Disconnect from SSH server
  */
 esp_err_t ssh_client_disconnect(void);

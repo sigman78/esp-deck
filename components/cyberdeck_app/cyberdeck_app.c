@@ -84,6 +84,8 @@ static struct {
     /* connecting */
     int      connect_idx;           /* profile being connected            */
     bool     connect_armed;         /* render one frame, then connect     */
+    bool     connecting;            /* async connect worker is running    */
+    bool     connect_cancelled;     /* user aborted the in-flight connect */
     uint64_t connect_at;            /* not before (auto-reconnect delay)  */
     char     pinned_fp[65];         /* fp to pass as expected_fp, "" = none */
 
@@ -630,7 +632,7 @@ static void render_connecting(const char *msg)
     ui_pen(OVERLAY_COL_BLUE);
     ui_puts(ui_cols() - 12, 0, "// SSH DECK", 0);
     ui_pen(OVERLAY_COL_DEFAULT);
-    draw_rule(3);
+    draw_rule_scan(3, s.anim_frame);
 
     const conn_profile_t *p = &s.profiles[s.connect_idx];
     int cy = ui_rows() / 2;
@@ -644,16 +646,17 @@ static void render_connecting(const char *msg)
     ui_pen(OVERLAY_COL_DEFAULT);
     ui_puts(lx, cy - 1, line, 0);
 
-    /* Cyberpunk "activity" bar: ░▒▓█▓▒░ repeating gradient. */
+    /* Activity bar: ░▒▓█▓▒░ gradient scrolling with the animation frame. */
     static const uint16_t grad[7] = {
         UI_SHADE1, UI_SHADE2, UI_SHADE3, UI_BLOCK, UI_SHADE3, UI_SHADE2, UI_SHADE1
     };
     int bw = 42, bx = (ui_cols() - bw) / 2;
-    ui_pen(OVERLAY_COL_CYAN);
+    ui_pen(s.connect_cancelled ? OVERLAY_COL_AMBER : OVERLAY_COL_CYAN);
     for (int i = 0; i < bw; i++)
-        ui_putch(bx + i, cy + 1, grad[i % 7], 0);
+        ui_putch(bx + i, cy + 1, grad[(i + s.anim_frame) % 7], 0);
     ui_pen(OVERLAY_COL_DEFAULT);
 
+    ui_puts((ui_cols() - 20) / 2, ui_rows() - 1, "tap or Esc to cancel", 0);
     ui_no_cursor();
     ui_present();
 }
@@ -807,29 +810,25 @@ static void enter_session(uint64_t now)
     render_session_toast(now);
 }
 
-static void do_connect(uint64_t now)
+/* Kick off the connect on a worker task (non-blocking) so the shell keeps
+ * ticking — the "Connecting" bar animates and a tap/ESC can cancel. */
+static void do_connect_start(uint64_t now)
 {
-    static char key_path[160];
-    static char pub_path[160];
+    static char key_path[160];   /* referenced by the worker's cfg copy — must */
+    static char pub_path[160];   /* outlive the connect; function-static is ok */
     const conn_profile_t *p = &s.profiles[s.connect_idx];
 
     ssh_config_t cfg = {
         .host        = p->host,
         .port        = p->port,
         .username    = p->user,
-        .password    = NULL,
-        .private_key = NULL,
         .expected_fp = s.pinned_fp[0] ? s.pinned_fp : NULL,
     };
     if (p->auth == STORAGE_AUTH_KEY) {
         snprintf(key_path, sizeof(key_path), "%s/keys/%s.pem",
                  storage_platform_mount_point(), p->key_id);
         cfg.private_key = key_path;
-        /* For a key profile the password field carries the key's passphrase
-         * (empty = unencrypted key). */
         cfg.passphrase  = p->password[0] ? p->password : NULL;
-        /* Pass a matching public key if the user dropped one next to the
-         * private key — required for ECDSA (RSA derives its own). */
         snprintf(pub_path, sizeof(pub_path), "%s/keys/%s.pub",
                  storage_platform_mount_point(), p->key_id);
         FILE *pf = fopen(pub_path, "r");
@@ -838,8 +837,27 @@ static void do_connect(uint64_t now)
         cfg.password = p->password;
     }
 
-    esp_err_t err = ssh_client_connect(&cfg);
+    if (ssh_client_connect_start(&cfg) != ESP_OK) {
+        toast(now, "connect busy — try again");
+        enter_home(now);
+        return;
+    }
+    s.connecting        = true;
+    s.connect_cancelled = false;
+    s.next_anim         = 0;
+    render_connecting("Connecting to");
+}
 
+/* Handle the async connect result once the worker finishes. */
+static void do_connect_finish(uint64_t now, esp_err_t err)
+{
+    if (s.connect_cancelled) {
+        if (err == ESP_OK) ssh_client_disconnect();   /* it connected as we cancelled */
+        s.connect_cancelled = false;
+        toast(now, "cancelled");
+        enter_home(now);
+        return;
+    }
     switch (err) {
     case ESP_OK:
         enter_session(now);
@@ -955,7 +973,15 @@ void cyberdeck_app_tick(uint64_t now)
     case ST_CONNECTING:
         if (s.connect_armed && now >= s.connect_at) {
             s.connect_armed = false;
-            do_connect(now);   /* synchronous; seconds on a bad network */
+            do_connect_start(now);           /* launches worker; returns at once */
+        } else if (s.connecting) {
+            if (ssh_client_connect_ready()) {
+                s.connecting = false;
+                do_connect_finish(now, ssh_client_connect_take_result());
+            } else if (now >= s.next_anim) {  /* keep the bar alive while it runs */
+                s.next_anim = now + ANIM_PERIOD_MS;
+                render_connecting(s.connect_cancelled ? "Cancelling" : "Connecting to");
+            }
         }
         break;
 
@@ -1129,10 +1155,17 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
         break;
 
     case ST_CONNECTING:
-        /* Only the armed wait is cancellable; the blocking connect isn't. */
-        if (k == K_ESC && s.connect_armed) {
-            s.connect_armed = false;
-            enter_home(now);
+        /* ESC (keyboard) or any tap/long-press (touch) cancels. */
+        if (k == K_ESC || ev->type == CYBERDECK_INPUT_TAP ||
+            ev->type == CYBERDECK_INPUT_LONG_PRESS) {
+            if (s.connect_armed) {                  /* still in the pre-delay wait */
+                s.connect_armed = false;
+                enter_home(now);
+            } else if (s.connecting && !s.connect_cancelled) {
+                s.connect_cancelled = true;
+                ssh_client_connect_cancel();        /* best-effort unblock */
+                render_connecting("Cancelling");
+            }
         }
         break;
 
