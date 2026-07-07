@@ -101,7 +101,9 @@ static struct {
     uint64_t pair_last_activity;
 
     /* menu */
-    int menu_sel;
+    int  menu_sel;
+    int  menu_page;        /* 0 = main menu, 1 = config submenu */
+    char menu_msg[48];     /* last config action result, shown in the submenu */
 
     /* toast (SESSION only; UI states draw status inline) */
     char     toast[64];
@@ -665,36 +667,59 @@ static void render_connecting(const char *msg)
     ui_present();
 }
 
-static const char *menu_items[] = {
-    "Resume session",
-    "Disconnect",
-    "Disconnect + profiles",
-    "Pair keyboard",
+/* Page 0 — the main in-session menu. */
+static const char    *main_items[] = {
+    "Resume session", "Disconnect", "Configuration >", "Pair keyboard",
 };
-#define MENU_COUNT ((int)(sizeof(menu_items) / sizeof(menu_items[0])))
+static const uint8_t  main_cols[]  = {
+    OVERLAY_COL_GREEN, OVERLAY_COL_AMBER, OVERLAY_COL_BLUE, OVERLAY_COL_CYAN,
+};
+#define MAIN_COUNT ((int)(sizeof(main_items) / sizeof(main_items[0])))
+
+/* Page 1 — the configuration submenu. */
+static const char    *config_items[] = {
+    "WiFi reconnect", "WiFi disconnect", "Reload profiles",
+    "Forget keyboard", "Back",
+};
+static const uint8_t  config_cols[]   = {
+    OVERLAY_COL_GREEN, OVERLAY_COL_AMBER, OVERLAY_COL_CYAN,
+    OVERLAY_COL_RED,   OVERLAY_COL_BLUE,
+};
+#define CONFIG_COUNT ((int)(sizeof(config_items) / sizeof(config_items[0])))
 
 static void render_menu(void)
 {
     ui_colors(UI_FG, UI_BG);
     ui_dim();   /* dim the live session behind the menu so it pops */
 
+    const bool     cfg   = s.menu_page == 1;
+    const char   **items = cfg ? config_items : main_items;
+    const uint8_t *cols  = cfg ? config_cols  : main_cols;
+    const int      count = cfg ? CONFIG_COUNT  : MAIN_COUNT;
+
     tilegrid_t g = { .tw = 40, .th = 4, .gx = 0, .gy = 1,
-                     .ncols = 1, .nrows = MENU_COUNT, .count = MENU_COUNT };
+                     .ncols = 1, .nrows = count, .count = count };
     g.x0 = (ui_cols() - g.tw) / 2;
-    g.y0 = (ui_rows() - (MENU_COUNT * g.th + (MENU_COUNT - 1) * g.gy)) / 2;
+    g.y0 = (ui_rows() - (count * g.th + (count - 1) * g.gy)) / 2;
     s.grid = g;
 
-    static const uint8_t menu_col[MENU_COUNT] = {
-        OVERLAY_COL_GREEN,   /* resume            */
-        OVERLAY_COL_AMBER,   /* disconnect        */
-        OVERLAY_COL_AMBER,   /* disconnect+profile */
-        OVERLAY_COL_CYAN,    /* pair keyboard     */
-    };
-    for (int i = 0; i < MENU_COUNT; i++) {
-        bool dim = (i == 3 && !s.cfg.ble);   /* no BLE on this platform */
-        ui_pen(menu_col[i]);
+    ui_pen(OVERLAY_COL_MAGENTA);
+    ui_puts(g.x0, g.y0 - 2, cfg ? "CONFIGURATION" : "MENU", 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
+
+    for (int i = 0; i < count; i++) {
+        /* "Pair/Forget keyboard" need BLE; grey them out when absent. */
+        bool dim = !s.cfg.ble && ((!cfg && i == 3) || (cfg && i == 3));
+        ui_pen(cols[i]);
         ui_tile(tile_x(&g, i), tile_y(&g, i), g.tw, g.th,
-                menu_items[i], dim ? "(unavailable)" : "", i == s.menu_sel);
+                items[i], dim ? "(unavailable)" : "", i == s.menu_sel);
+    }
+
+    if (cfg && s.menu_msg[0]) {
+        ui_pen(OVERLAY_COL_AMBER);
+        ui_puts((ui_cols() - (int)strlen(s.menu_msg)) / 2, ui_rows() - 1,
+                s.menu_msg, 0);
+        ui_pen(OVERLAY_COL_DEFAULT);
     }
     ui_pen(OVERLAY_COL_DEFAULT);
     ui_no_cursor();
@@ -768,26 +793,63 @@ static void pairing_select(int slot, uint64_t now)
 }
 
 /* Run the in-session menu action for the current selection. */
+static void menu_open_config(void)
+{
+    s.menu_page   = 1;
+    s.menu_sel    = 0;
+    s.menu_msg[0] = '\0';
+    render_menu();
+}
+
 static void menu_activate(uint64_t now)
 {
+    if (s.menu_page == 0) {                   /* ---- main menu ---- */
+        switch (s.menu_sel) {
+        case 0:                                   /* resume session */
+            s.state = ST_SESSION;
+            ui_hide();
+            break;
+        case 1:                                   /* disconnect */
+            ssh_client_disconnect();
+            enter_home(now);
+            break;
+        case 2:                                   /* open config submenu */
+            menu_open_config();
+            break;
+        case 3:                                   /* pair keyboard (session lives on) */
+            if (s.cfg.ble) enter_pairing(now);
+            break;
+        }
+        return;
+    }
+
+    /* ---- configuration submenu (stays open; shows a result line) ---- */
     switch (s.menu_sel) {
-    case 0:                                   /* resume session */
-        s.state = ST_SESSION;
-        ui_hide();
+    case 0:                                   /* WiFi reconnect */
+        kick_wifi();
+        snprintf(s.menu_msg, sizeof(s.menu_msg), "wifi reconnecting...");
         break;
-    case 1:                                   /* disconnect */
-        ssh_client_disconnect();
-        enter_home(now);
+    case 1:                                   /* WiFi disconnect */
+        wifi_manager_disconnect();
+        snprintf(s.menu_msg, sizeof(s.menu_msg), "wifi disconnected");
         break;
-    case 2:                                   /* disconnect + reload profiles */
-        ssh_client_disconnect();
+    case 2:                                   /* Reload profiles */
         load_profiles();
-        enter_home(now);
+        snprintf(s.menu_msg, sizeof(s.menu_msg), "%d profile(s) loaded", s.profile_count);
         break;
-    case 3:                                   /* pair keyboard (session lives on) */
-        if (s.cfg.ble) enter_pairing(now);
+    case 3:                                   /* Forget keyboard */
+        if (s.cfg.ble && s.cfg.ble->forget) {
+            s.cfg.ble->forget();
+            snprintf(s.menu_msg, sizeof(s.menu_msg), "keyboard bonds cleared");
+        }
+        break;
+    case 4:                                   /* Back to main menu */
+        s.menu_page   = 0;
+        s.menu_sel    = 0;
+        s.menu_msg[0] = '\0';
         break;
     }
+    render_menu();
 }
 
 /* Arm a connect to profile idx: one frame of "Connecting", then do it. */
@@ -1041,7 +1103,9 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
     if (s.state == ST_SESSION) {
         if (ev->type == CYBERDECK_INPUT_LONG_PRESS ||
             (ev->type == CYBERDECK_INPUT_KEY && is_f12(ev))) {
-            s.menu_sel = 0;
+            s.menu_sel    = 0;
+            s.menu_page   = 0;
+            s.menu_msg[0] = '\0';
             s.state = ST_MENU;
             render_menu();
             return;
@@ -1178,15 +1242,23 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
 
     case ST_MENU:
         if (k == K_ESC || (ev->type == CYBERDECK_INPUT_KEY && is_f12(ev))) {
-            s.state = ST_SESSION;
-            ui_hide();
+            if (s.menu_page == 1) {            /* config: step back to main menu */
+                s.menu_page = 0; s.menu_sel = 0; render_menu();
+            } else {
+                s.state = ST_SESSION;
+                ui_hide();
+            }
             break;
         }
         if (ev->type == CYBERDECK_INPUT_TAP) {
             int slot = tile_hit(&s.grid, ev->x, ev->y);
-            if (slot < 0) {                    /* tap outside the menu = resume */
-                s.state = ST_SESSION;
-                ui_hide();
+            if (slot < 0) {                    /* tap outside the menu */
+                if (s.menu_page == 1) {        /* config: back to main menu */
+                    s.menu_page = 0; s.menu_sel = 0; render_menu();
+                } else {                       /* main: resume session */
+                    s.state = ST_SESSION;
+                    ui_hide();
+                }
             } else {
                 s.menu_sel = slot;
                 menu_activate(now);            /* same as pressing Enter */
