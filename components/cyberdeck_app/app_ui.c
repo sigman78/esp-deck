@@ -93,8 +93,9 @@ void ui_clear(void)
 void ui_dim(void)
 {
     /* Transparent scrim: every cell stays see-through (cp==0) but flagged DIM,
-     * so the renderer shows the terminal behind at ~50% brightness. Draw
-     * opaque chrome on top afterwards. */
+     * so the renderer fades the terminal behind it (50% halving by default, or a
+     * dithered checkerboard if OVERLAY_DIM_DITHER is set in display_render.c).
+     * Draw opaque chrome on top afterwards. */
     s_pen = OVERLAY_COL_DEFAULT;
     if (!s_draw) return;
     for (int i = 0; i < s_cols * s_rows; i++) {

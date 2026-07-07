@@ -76,8 +76,9 @@ void ui_pen(uint8_t color);
 /** Clear the whole overlay to transparent. */
 void ui_clear(void);
 
-/** Transparent DIM scrim: session shows through at ~50% brightness. Draw
- *  opaque chrome (tiles) on top afterwards. Use for modals over a session. */
+/** Transparent DIM scrim: fades the session behind it (50% halving by default;
+ *  optionally a dithered checkerboard via OVERLAY_DIM_DITHER). Draw opaque
+ *  chrome (tiles) on top afterwards. For modals over a session. */
 void ui_dim(void);
 
 /** Put one codepoint; attrs = 0 or OVERLAY_ATTR_INVERSE. */
