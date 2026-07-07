@@ -36,6 +36,15 @@ esp_err_t wifi_manager_connect(const wifi_profile_t *profiles, int count);
 /** Intentional disconnect — stops auto-retry, state returns to IDLE. */
 esp_err_t wifi_manager_disconnect(void);
 
+/**
+ * Adopt a connection established outside the manager (e.g. by the provisioning
+ * manager). Loads @p profiles as the new preference list and resumes
+ * auto-reconnect. If the link is already up (state CONNECTED) it is kept as-is
+ * — no disruptive reconnect; otherwise a normal connect is started.
+ */
+esp_err_t wifi_manager_adopt(const wifi_profile_t *profiles, int count,
+                             const char *ssid);
+
 wifi_mgr_state_t wifi_manager_get_state(void);
 bool             wifi_manager_is_connected(void);
 const char      *wifi_manager_get_ip(void);

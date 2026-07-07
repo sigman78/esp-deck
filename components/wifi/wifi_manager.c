@@ -174,6 +174,32 @@ esp_err_t wifi_manager_disconnect(void)
     return esp_wifi_disconnect();
 }
 
+esp_err_t wifi_manager_adopt(const wifi_profile_t *profiles, int count,
+                             const char *ssid)
+{
+    if (!profiles || count <= 0) return ESP_ERR_INVALID_ARG;
+    if (count > STORAGE_WIFI_MAX) count = STORAGE_WIFI_MAX;
+
+    esp_err_t err = wifi_manager_init();
+    if (err != ESP_OK) return err;
+
+    memcpy(s_profiles, profiles, sizeof(wifi_profile_t) * count);
+    s_profile_count = count;
+    s_profile_idx   = 0;
+    s_cycle_fails   = 0;
+    s_intentional   = false;           /* resume auto-reconnect on drops */
+    if (ssid && ssid[0]) snprintf(s_ssid, sizeof(s_ssid), "%s", ssid);
+
+    if (s_state == WIFI_MGR_CONNECTED)
+        return ESP_OK;                 /* provisioning already connected us */
+
+    /* Not (yet) associated — do a normal connect. */
+    s_state = WIFI_MGR_CONNECTING;
+    if (!s_started) { s_started = true; return esp_wifi_start(); }
+    try_current_profile();
+    return ESP_OK;
+}
+
 wifi_mgr_state_t wifi_manager_get_state(void) { return s_state; }
 bool wifi_manager_is_connected(void) { return s_state == WIFI_MGR_CONNECTED; }
 const char *wifi_manager_get_ip(void)   { return s_ip; }

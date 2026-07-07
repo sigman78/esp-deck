@@ -49,6 +49,15 @@ esp_err_t wifi_manager_disconnect(void)
     return ESP_OK;
 }
 
+esp_err_t wifi_manager_adopt(const wifi_profile_t *profiles, int count,
+                             const char *ssid)
+{
+    if (!profiles || count <= 0) return ESP_ERR_INVALID_ARG;
+    snprintf(s_ssid, sizeof(s_ssid), "%s", ssid && ssid[0] ? ssid : profiles[0].ssid);
+    s_state = WIFI_MGR_CONNECTED;
+    return ESP_OK;
+}
+
 wifi_mgr_state_t wifi_manager_get_state(void) { return s_state; }
 bool wifi_manager_is_connected(void) { return s_state == WIFI_MGR_CONNECTED; }
 const char *wifi_manager_get_ip(void)   { return "127.0.0.1"; }

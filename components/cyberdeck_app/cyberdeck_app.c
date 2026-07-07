@@ -1239,9 +1239,18 @@ void cyberdeck_app_tick(uint64_t now)
                 s.prov_done_at = now + 2500;   /* let the phone read the ack  */
                 render_wifiprov();
             } else if (now >= s.prov_done_at) {
+                char ssid[33];
+                snprintf(ssid, sizeof(ssid), "%s", wifi_provision_ssid());
                 wifi_provision_stop();
-                kick_wifi();                   /* reconnect with the new creds */
-                toast(now, "wifi saved - connecting");
+                /* The provisioning manager already associated + got an IP;
+                 * adopt that link instead of forcing a redundant reconnect
+                 * (which produced no GOT_IP and hung at "connecting..."). */
+                wifi_profile_t nets[STORAGE_WIFI_MAX];
+                int n = 0;
+                storage_wifi_load(nets, &n, STORAGE_WIFI_MAX);
+                if (n > 0) wifi_manager_adopt(nets, n, ssid);
+                else       kick_wifi();
+                toast(now, "wifi '%.18s' connected", ssid);
                 enter_home(now);
             }
         } else if (now >= s.next_anim) {
