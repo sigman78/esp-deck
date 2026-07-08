@@ -63,11 +63,26 @@ static DRAM_ATTR bool          s_cursor_visible = true;
  * ---------------------------------------------------------------------- */
 #define RENDER_MAX_COLS  (DISPLAY_WIDTH / FONT_WIDTH)   /* 100 */
 
+/* Overlay DIM scrim style (the shade drawn behind a modal):
+ *   0 = halved   — every pixel at 50% brightness (default). Done per-cell in
+ *       build_row_cache with zero extra per-band work — the cheapest ISR path.
+ *   1 = dithered — checkerboard: alternate pixels kept at full brightness, the
+ *       rest blacked. A crisper look, but NOT an ISR win — it adds a per-band
+ *       post-pass over scrim columns plus a fixed flag-check every frame, so it
+ *       is off by default. Set to 1 (e.g. from the build system) to enable; the
+ *       dither code compiles out completely when 0. */
+#ifndef OVERLAY_DIM_DITHER
+#define OVERLAY_DIM_DITHER 0
+#endif
+
 static DRAM_ATTR struct {
     const uint8_t *glyph;   /* 16-byte bitmap in DRAM (terminus8x16)     */
     uint16_t       bg;      /* background colour RGB565                   */
     uint16_t       xorfg;   /* bg ^ fg — XOR in to flip bg→fg per bit    */
     uint8_t        underline; /* draw fg bar on the last two scanlines    */
+#if OVERLAY_DIM_DITHER
+    uint8_t        dim;     /* overlay DIM scrim → checkerboard this column */
+#endif
 } s_col_cache[RENDER_MAX_COLS];
 
 /* -------------------------------------------------------------------------
@@ -195,6 +210,9 @@ static IRAM_ATTR void build_row_cache(int cr)
         color_t fg, bg;
         const uint8_t *glyph;
         uint8_t underline = 0;
+#if OVERLAY_DIM_DITHER
+        uint8_t dim = 0;
+#endif
 
         const uint8_t  ov_attrs = (ov_row && c < s_overlay_cols) ? ov_row[c].attrs : 0;
         const uint16_t ov_cp    = (ov_row && c < s_overlay_cols) ? ov_row[c].cp    : 0;
@@ -213,14 +231,21 @@ static IRAM_ATTR void build_row_cache(int cr)
             underline = cell->attrs & ATTR_UNDERLINE;
             glyph = font_get_glyph(cell->cp);
             if (ov_attrs & OVERLAY_ATTR_DIM) {
+#if OVERLAY_DIM_DITHER
+                dim = 1;   /* full colour; checkerboarded in the post-pass */
+#else
                 fg = (color_t)((fg >> 1) & 0x7BEFu);
                 bg = (color_t)((bg >> 1) & 0x7BEFu);
+#endif
             }
         }
         s_col_cache[c].glyph     = glyph;
         s_col_cache[c].bg        = bg;
         s_col_cache[c].xorfg     = (uint16_t)(fg ^ bg);
         s_col_cache[c].underline = underline;
+#if OVERLAY_DIM_DITHER
+        s_col_cache[c].dim       = dim;
+#endif
     }
 }
 
@@ -356,6 +381,26 @@ void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
             }
         }
     }
+
+#if OVERLAY_DIM_DITHER
+    /* ------------------------------------------------------------------
+     * Dithered dim post-pass — for overlay DIM (scrim) columns, black out a
+     * checkerboard of pixels, leaving the rest at full brightness. FONT_WIDTH
+     * and FONT_HEIGHT are even, so the pattern stays screen-aligned and the
+     * parity reduces to the band scanline (n): even n blacks the odd pixels
+     * (high half of each packed pair), odd n blacks the even pixels. Cheap:
+     * 4 word-ANDs per scanline, only on flagged columns.
+     * ------------------------------------------------------------------ */
+    for (int c = 0; c < ncols; c++) {
+        if (!s_col_cache[c].dim) continue;
+        for (int n = 0; n < num_scans; n++) {
+            const uint32_t m = (n & 1) ? 0xFFFF0000u : 0x0000FFFFu;
+            uint32_t *p = (uint32_t *)(dst_base + (unsigned)n * DISPLAY_WIDTH
+                                       + c * FONT_WIDTH);
+            p[0] &= m; p[1] &= m; p[2] &= m; p[3] &= m;
+        }
+    }
+#endif
 
     /* ------------------------------------------------------------------
      * Cursor overlay — XOR every pixel in the cursor region with
