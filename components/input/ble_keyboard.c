@@ -603,17 +603,27 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
             dev.addr_type = desc.peer_id_addr.type;
         }
 
+        /* Name priority: live GATT Device Name (authoritative, and the only
+         * source a boot-time reconnect has — also heals registry records
+         * poisoned with "Unknown HID" by older firmware) > pairing-scan ADV
+         * name > stored registry name > placeholder. */
+        const char *gatt_name = esp_hidh_dev_name_get(data->open.dev);
+        if (gatt_name && gatt_name[0])
+            snprintf(dev.name, sizeof(dev.name), "%s", gatt_name);
+
         bool found = false;
         for (int i = 0; i < s_scan_count && !found; i++) {
             if (memcmp(s_scan_results[i].addr, bda, 6) == 0) {
                 if (!have_desc) dev.addr_type = s_scan_results[i].addr_type;
-                memcpy(dev.name, s_scan_results[i].name, sizeof(dev.name));
+                if (dev.name[0] == '\0')
+                    memcpy(dev.name, s_scan_results[i].name, sizeof(dev.name));
                 found = true;
             }
         }
         for (int i = 0; i < s_registry_count && !found; i++) {
             if (memcmp(s_registry[i].addr, dev.addr, 6) == 0) {
-                memcpy(dev.name, s_registry[i].name, sizeof(dev.name));
+                if (dev.name[0] == '\0')
+                    memcpy(dev.name, s_registry[i].name, sizeof(dev.name));
                 if (!have_desc) dev.addr_type = s_registry[i].addr_type;
                 found = true;
             }
