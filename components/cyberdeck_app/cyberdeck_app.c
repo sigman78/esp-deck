@@ -1285,16 +1285,34 @@ static void render_menu(void)
         title = d.title; items = d.items; cols = d.cols; count = d.count;
     }
 
-    tilegrid_t g = { .tw = 40, .th = 4, .gx = 0, .gy = 1,
-                     .ncols = 1, .nrows = count, .count = count };
-    g.x0 = (ui_cols() - g.tw) / 2;
-    g.y0 = (ui_rows() - (count * g.th + (count - 1) * g.gy)) / 2;
+    /* The delete picker can hold up to 8 profiles + Back — too many for one
+     * centered column (it would run off-screen), so lay it out on the same
+     * multi-column grid HOME uses. Everything below is grid-agnostic (tile_x/
+     * tile_y/tile_nav/tile_hit). */
+    const bool picker = (sc == MS_DELPROFILE);
+    tilegrid_t g;
+    int title_row, ly, chrome_x;
+    if (picker) {
+        g = picker_grid(count);
+        title_row = 2;
+        ly        = ui_rows() - 3;
+        chrome_x  = (ui_cols() - 40) / 2;   /* center chrome over the screen */
+    } else {
+        g = (tilegrid_t){ .tw = 40, .th = 4, .gx = 0, .gy = 1,
+                          .ncols = 1, .nrows = count, .count = count };
+        g.x0 = (ui_cols() - g.tw) / 2;
+        g.y0 = (ui_rows() - (count * g.th + (count - 1) * g.gy)) / 2;
+        title_row = g.y0 - 2;
+        ly        = g.y0 + count * g.th + (count - 1) * g.gy + 1;
+        chrome_x  = g.x0;
+    }
     s.grid = g;
+    if (s.menu_sel >= g.count) s.menu_sel = g.count ? g.count - 1 : 0;
 
-    /* Title as a magenta lozenge, centered over the tile column. */
+    /* Title as a magenta lozenge, centered over the chrome column. */
     int tl = (int)strlen(title);
     ui_pen(OVERLAY_COL_MAGENTA);
-    ui_chip(g.x0 + (g.tw - tl - 4) / 2, g.y0 - 2, UI_RHALF, title, UI_LHALF);
+    ui_chip(chrome_x + (40 - tl - 4) / 2, title_row, UI_RHALF, title, UI_LHALF);
 
     /* Wall clock, top-right, ticking live (menu re-renders every frame). */
     char clk[8];
@@ -1304,7 +1322,7 @@ static void render_menu(void)
     }
     ui_pen(OVERLAY_COL_DEFAULT);
 
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < g.count; i++) {
         bool dim   = menu_item_dim(sc, i);
         const char *confirm = menu_confirm(sc, i);
         bool armed = (i == s.menu_sel) && s.menu_armed && confirm;
@@ -1323,25 +1341,24 @@ static void render_menu(void)
         }
     }
 
-    /* Esc legend + action result under the tile column. */
-    int ly = g.y0 + count * g.th + (count - 1) * g.gy + 1;
+    /* Esc legend + action result under the tile area. */
     const char *legend = root ? "Esc/F12 = resume \xB7 tap outside = close"
                        : sc == MS_CONFIG
                            ? (s.menu_from_home ? "Esc = back to home"
                                                : "Esc = back to menu")
                            : "Esc = back";
     ui_pen(OVERLAY_COL_DEFAULT);
-    ui_puts(g.x0 + (g.tw - (int)strlen(legend)) / 2, ly, legend, 0);
+    ui_puts(chrome_x + (40 - (int)strlen(legend)) / 2, ly, legend, 0);
 
-    /* Empty-picker hint. */
-    if (sc == MS_DELPROFILE && s.stored_count == 0) {
+    /* Empty-picker hint, just above the (Back-only) grid. */
+    if (picker && s.stored_count == 0) {
         const char *m = "no stored profiles";
         ui_pen(OVERLAY_COL_DEFAULT);
-        ui_puts(g.x0 + (g.tw - (int)strlen(m)) / 2, g.y0 - 1, m, 0);
+        ui_puts(chrome_x + (40 - (int)strlen(m)) / 2, title_row + 1, m, 0);
     }
 
     if (s.menu_msg[0]) {               /* action feedback */
-        int mx = g.x0 + (g.tw - ((int)strlen(s.menu_msg) + 2)) / 2;
+        int mx = chrome_x + (40 - ((int)strlen(s.menu_msg) + 2)) / 2;
         ui_pen(OVERLAY_COL_AMBER);
         ui_putch(mx, ly + 1, UI_DIAMOND, 0);
         ui_puts(mx + 2, ly + 1, s.menu_msg, 0);
@@ -2652,8 +2669,16 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
         }
         if (ev->type == CYBERDECK_INPUT_TAP) {
             int slot = tile_hit(&s.grid, ev->x, ev->y);
-            if (slot < 0) menu_back(now);      /* tap outside: back one level */
-            else { s.menu_sel = slot; menu_activate(now); }  /* == Enter */
+            if (slot < 0) { menu_back(now); break; }   /* tap outside: back */
+            /* Tapping a DIFFERENT tile than the armed one must disarm first, or
+             * the stale arm fires this tile's destructive action unconfirmed
+             * (the keyboard-nav path already disarms on move). */
+            if (slot != s.menu_sel && s.menu_armed) {
+                s.menu_armed = false;
+                menu_clear_note();
+            }
+            s.menu_sel = slot;
+            menu_activate(now);                        /* == Enter */
             break;
         }
         switch (k) {

@@ -431,6 +431,10 @@ static esp_err_t handle_save(httpd_req_t *req, char *body)
 
     esp_err_t ae = append_profile(&pf);
     if (ae == ESP_ERR_NOT_FINISHED) {
+        /* List full => this was a brand-new name, so the key we just wrote has
+         * no referencing profile. Reclaim it (a same-name REPLACE can't hit the
+         * capacity cap, so we never delete a key an existing profile still uses). */
+        if (want_key && pf.key_id[0]) storage_delete_key(pf.key_id);
         set_err("profile list full");
         httpd_resp_set_status(req, "507 Insufficient Storage");
         return ok_page(req, "&#10007; List full",
@@ -498,14 +502,11 @@ static esp_err_t post_save(httpd_req_t *req)
     }
     body[got] = '\0';
 
-    esp_err_t e;
-    if (s_lock && xSemaphoreTake(s_lock, pdMS_TO_TICKS(5000)) == pdTRUE) {
-        e = handle_save(req, body);
-        xSemaphoreGive(s_lock);
-    } else {
-        httpd_resp_set_status(req, "503 Service Unavailable");
-        e = ok_page(req, "&#10007; Busy", "Another save is in progress.");
-    }
+    /* esp_http_server processes requests on a single worker task, so handle_save
+     * never runs concurrently — no outer lock needed (and holding s_lock here
+     * would self-deadlock, since set_err()/the success path re-take it). s_lock
+     * guards only the s_last/s_err strings shared with the render task. */
+    esp_err_t e = handle_save(req, body);
     free(body);
     return e;
 }
