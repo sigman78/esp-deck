@@ -19,6 +19,7 @@
 #include "freertos/task.h"
 
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_hidh.h"
 #include "esp_timer.h"
 
@@ -290,6 +291,11 @@ void ble_keyboard_exit_pairing(void)
  * esp_hid_host example does. */
 typedef struct { uint8_t addr[6]; uint8_t addr_type; } hid_open_req_t;
 
+#define HID_OPEN_STACK 5120
+static StaticTask_t  s_hid_open_tcb;
+static StackType_t  *s_hid_open_stack;   /* PSRAM; no flash writes here */
+static volatile bool s_hid_open_live;
+
 static void hid_open_task(void *arg)
 {
     hid_open_req_t req = *(hid_open_req_t *)arg;
@@ -305,12 +311,14 @@ static void hid_open_task(void *arg)
         if (s_state == BLE_RECONNECT)
             start_scan(CONFIG_INPUT_BLE_SCAN_DURATION * 1000);
     }
+    s_hid_open_live = false;
     vTaskDelete(NULL);
 }
 
 static void open_device_async(const uint8_t addr[6], uint8_t addr_type)
 {
     if (s_state == BLE_CONNECTING) return;   /* one attempt at a time */
+    if (s_hid_open_live) return;             /* previous task still exiting */
     ble_gap_disc_cancel();
     s_state = BLE_CONNECTING;
 
@@ -318,11 +326,23 @@ static void open_device_async(const uint8_t addr[6], uint8_t addr_type)
     if (!req) { ESP_LOGE(TAG, "open req alloc failed"); return; }
     memcpy(req->addr, addr, 6);
     req->addr_type = addr_type;
-    if (xTaskCreate(hid_open_task, "hid_open", 5120, req, 6, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "hid_open task create failed (low internal heap?)");
+
+    /* Static task with a PSRAM stack: the old 5 KB internal-heap alloc here
+     * failed exactly when internal DRAM was tightest (connect time, NimBLE
+     * buffers in flight) — one cause of "keyboard just stops connecting". */
+    if (!s_hid_open_stack)
+        s_hid_open_stack = heap_caps_malloc(HID_OPEN_STACK,
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_hid_open_stack) {
+        ESP_LOGE(TAG, "hid_open stack alloc failed");
         free(req);
         s_state = (s_registry_count > 0) ? BLE_RECONNECT : BLE_IDLE;
+        return;
     }
+    s_hid_open_live = true;
+    xTaskCreateStatic(hid_open_task, "hid_open",
+                      HID_OPEN_STACK / sizeof(StackType_t),
+                      req, 6, s_hid_open_stack, &s_hid_open_tcb);
 }
 
 void ble_keyboard_select_device(const uint8_t addr[6], uint8_t addr_type)
