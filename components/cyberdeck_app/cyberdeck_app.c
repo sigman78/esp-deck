@@ -30,6 +30,7 @@
 #include "vterm.h"
 #include "wifi_manager.h"
 #include "wifi_provision.h"
+#include "ssh_import.h"
 
 #ifndef BUILD_SIMULATOR
 #include "esp_heap_caps.h"   /* free-RAM stats in the header */
@@ -49,6 +50,7 @@ typedef enum {
     ST_MENU,        /* in-session overlay menu                       */
     ST_WIFIPROV,    /* SoftAP WiFi onboarding (modal)                */
     ST_PROFILE,     /* on-device profile editor (modal)              */
+    ST_SSHIMPORT,   /* SoftAP + HTTP SSH-profile import (modal)      */
 } app_state_t;
 
 #define MAX_PROFILES     (8 + 1)          /* stored + synthesized fallback */
@@ -133,6 +135,9 @@ static struct {
 
     /* wifi provisioning */
     uint64_t prov_done_at; /* when to finish after CRED_SUCCESS (0 = not set) */
+
+    /* ssh-profile import over WiFi */
+    int      import_seen;  /* ssh_import_count() already acknowledged on screen */
 
     /* toast (SESSION only; UI states draw status inline) */
     char     toast[64];
@@ -1147,15 +1152,16 @@ static const uint8_t  main_cols[]  = {
 /* Page 1 — the configuration submenu (reachable from HOME and in-session). */
 static const char    *config_items[] = {
     "WiFi reconnect", "WiFi disconnect", "WiFi setup (phone)",
-    "Forget keyboard", "Back",
+    "Import SSH profile", "Forget keyboard", "Back",
 };
 static const uint8_t  config_cols[]   = {
     OVERLAY_COL_GREEN, OVERLAY_COL_AMBER, OVERLAY_COL_CYAN,
-    OVERLAY_COL_RED,   OVERLAY_COL_BLUE,
+    OVERLAY_COL_MAGENTA, OVERLAY_COL_RED, OVERLAY_COL_BLUE,
 };
 #define CONFIG_COUNT ((int)(sizeof(config_items) / sizeof(config_items[0])))
 #define CONFIG_WIFI_SETUP 2   /* index of "WiFi setup" */
-#define CONFIG_FORGET_KBD 3   /* index of "Forget keyboard" (needs BLE) */
+#define CONFIG_IMPORT     3   /* index of "Import SSH profile" */
+#define CONFIG_FORGET_KBD 4   /* index of "Forget keyboard" (needs BLE) */
 
 static void render_menu(void)
 {
@@ -1528,6 +1534,128 @@ static void enter_wifiprov(uint64_t now)
     render_wifiprov(now);
 }
 
+/* Full-screen SoftAP + HTTP SSH-profile import modal. */
+static void render_sshimport(uint64_t now)
+{
+    (void)now;
+    ui_colors(UI_FG, UI_BG);
+    ui_clear();
+    ui_fill(0, 0, ui_cols(), ui_rows(), 0);
+
+    draw_titlebar(2, "SSH IMPORT", s.anim_frame);
+    ui_pen(OVERLAY_COL_BLUE);
+    ui_puts(ui_cols() - 10, 0, "// SoftAP", 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
+    draw_rule_scan(3, s.anim_frame);
+
+    /* Numbered onboarding steps on the left. */
+    ui_pen(OVERLAY_COL_CYAN);  ui_puts(4, 6, "1", 0);
+    ui_pen(OVERLAY_COL_DEFAULT); ui_puts(6, 6, "Join this WiFi network:", 0);
+    ui_pen(OVERLAY_COL_GREEN);
+    ui_printf(30, 6, OVERLAY_ATTR_INVERSE, " %s ", ssh_import_service_name());
+    ui_pen(OVERLAY_COL_DEFAULT);
+
+    ui_pen(OVERLAY_COL_CYAN);  ui_puts(4, 8, "2", 0);
+    ui_pen(OVERLAY_COL_DEFAULT); ui_puts(6, 8, "WiFi password / proof code:", 0);
+    ui_pen(OVERLAY_COL_AMBER);
+    ui_printf(34, 8, OVERLAY_ATTR_INVERSE, " %s ", ssh_import_pop());
+    ui_pen(OVERLAY_COL_DEFAULT);
+
+    ui_pen(OVERLAY_COL_CYAN);  ui_puts(4, 10, "3", 0);
+    ui_pen(OVERLAY_COL_DEFAULT); ui_puts(6, 10, "Open in a browser:", 0);
+    ui_pen(OVERLAY_COL_WHITE);
+    ui_printf(25, 10, OVERLAY_ATTR_INVERSE, " %s ", ssh_import_url());
+    ui_pen(OVERLAY_COL_DEFAULT);
+
+    ui_pen(OVERLAY_COL_CYAN);  ui_puts(4, 12, "4", 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
+    ui_puts(6, 12, "Fill the form + Save. Repeat for more.", 0);
+
+    /* WiFi-join QR (right side): scan to join the AP directly. */
+    int qsz = ssh_import_qr_size();
+    if (qsz > 0) {
+        const int QZ = 2;
+        int span  = qsz + 2 * QZ;
+        int crows = (span + 1) / 2;
+        int qx = ui_cols() - span - 2;
+        int qy = 6;
+        ui_pen(OVERLAY_COL_WHITE);
+        for (int cr = 0; cr < crows; cr++) {
+            for (int cc = 0; cc < span; cc++) {
+                bool top = ssh_import_qr_module(cc - QZ, 2 * cr - QZ);
+                bool bot = ssh_import_qr_module(cc - QZ, 2 * cr - QZ + 1);
+                uint16_t g = (top && bot) ? UI_BLOCK
+                           : top ? 0x2580u
+                           : bot ? 0x2584u
+                           : ' ';
+                ui_putch(qx + cc, qy + cr, g, OVERLAY_ATTR_INVERSE);
+            }
+        }
+        ui_pen(OVERLAY_COL_CYAN);
+        const char *ql = "scan to join";
+        ui_puts(qx + (span - (int)strlen(ql)) / 2, qy + crows, ql, 0);
+        ui_pen(OVERLAY_COL_DEFAULT);
+    }
+
+    /* Status: running import count / last name, or a waiting spinner. */
+    int cnt = ssh_import_count();
+    const char *err = ssh_import_err();
+    if (err && err[0]) {
+        ui_pen(OVERLAY_COL_RED);
+        ui_putch(4, 15, UI_DIAMOND, 0);
+        ui_printf(6, 15, 0, "rejected: %s", err);
+        ui_pen(OVERLAY_COL_DEFAULT);
+    } else if (cnt > 0) {
+        ui_pen(OVERLAY_COL_GREEN);
+        ui_putch(4, 15, UI_LED_ON, 0);
+        ui_printf(6, 15, 0, "imported '%s'  (%d saved)", ssh_import_last(), cnt);
+        ui_pen(OVERLAY_COL_DEFAULT);
+    } else {
+        ui_pen(OVERLAY_COL_GREEN);
+        ui_putch(4, 15, spinner_glyph(s.anim_frame), 0);
+        ui_pen(OVERLAY_COL_DEFAULT);
+        ui_puts(6, 15, "waiting for a browser...", 0);
+    }
+
+    /* Live RAM readout — watch internal DRAM while the AP + httpd run. */
+    char ram[48];
+    ram_stats(ram, sizeof(ram));
+    ui_pen(OVERLAY_COL_BLUE);
+    ui_putch(4, 17, UI_DIAMOND, 0);
+    ui_printf(6, 17, 0, "RAM  %s", ram);
+    ui_pen(OVERLAY_COL_DEFAULT);
+
+    draw_footer(cnt > 0 ? "tap or Esc when done - profiles are saved"
+                        : "tap or Esc to cancel");
+    ui_no_cursor();
+    ui_present();
+}
+
+static void enter_sshimport(uint64_t now)
+{
+    if (ssh_import_start() != ESP_OK) {
+        toast(now, "import unavailable");
+        enter_home(now);
+        return;
+    }
+    s.import_seen = 0;
+    s.next_anim   = 0;
+    s.state       = ST_SSHIMPORT;
+    render_sshimport(now);
+}
+
+/* Tear down the import AP, un-park wifi, refresh the profile list, go home. */
+static void exit_sshimport(uint64_t now)
+{
+    int cnt = ssh_import_count();
+    ssh_import_stop();
+    kick_wifi();            /* resume STA auto-reconnect */
+    load_profiles();        /* surface freshly imported profiles on HOME */
+    if (cnt > 0) toast(now, "imported %d profile(s)", cnt);
+    else         toast(now, "import cancelled");
+    enter_home(now);
+}
+
 /* Post an action-feedback line under the menu tiles.
  * @p ms: lifetime; 0 = sticky (lives until explicitly cleared).
  * @p live_wifi: keep rewriting it from wifi_status_str() while shown. */
@@ -1621,6 +1749,9 @@ static void menu_activate(uint64_t now)
         break;
     case CONFIG_WIFI_SETUP:                    /* WiFi onboarding via phone */
         enter_wifiprov(now);
+        return;                                /* leaves the menu entirely */
+    case CONFIG_IMPORT:                        /* import SSH profile over WiFi */
+        enter_sshimport(now);
         return;                                /* leaves the menu entirely */
     case CONFIG_FORGET_KBD:                   /* Forget keyboard (2-step) */
         if (s.cfg.ble && s.cfg.ble->forget) {
@@ -2014,6 +2145,19 @@ void cyberdeck_app_tick(uint64_t now)
         }
         break;
 
+    case ST_SSHIMPORT:
+        /* A submission lands on the httpd task; re-render on its count bump so
+         * the confirmation appears immediately, plus the usual anim tick. */
+        if (ssh_import_count() != s.import_seen) {
+            s.import_seen = ssh_import_count();
+            s.next_anim   = now + ANIM_PERIOD_MS;
+            render_sshimport(now);
+        } else if (now >= s.next_anim) {
+            s.next_anim = now + ANIM_PERIOD_MS;
+            render_sshimport(now);
+        }
+        break;
+
     default:
         break;
     }
@@ -2334,6 +2478,15 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
         }
         break;
     }
+
+    case ST_SSHIMPORT:
+        /* Esc / tap / long-press finishes the session (any imports are already
+         * on flash). There is no destructive in-flight state to protect. */
+        if (k == K_ESC || ev->type == CYBERDECK_INPUT_TAP ||
+            ev->type == CYBERDECK_INPUT_LONG_PRESS) {
+            exit_sshimport(now);
+        }
+        break;
 
     case ST_PROFILE: {
         if (k == K_ESC) { enter_home(now); break; }
