@@ -1,11 +1,10 @@
 /*
  * ssh_import — device implementation.
  *
- * Temporary WPA2 SoftAP + esp_http_server. Serves a one-page form; a POST
- * stores an optional private key blob and appends a connection profile to
- * profiles.ini. See ssh_import.h for the security rationale (WPA2 passphrase
- * doubles as the proof-of-possession, so the pasted key rides an encrypted
- * link and plain HTTP is acceptable).
+ * esp_http_server serving a one-page form; a POST stores an optional private
+ * key blob and appends a connection profile to profiles.ini. Two transports
+ * (see ssh_import.h): SOFTAP (own WPA2 AP, random passphrase = PoP) and WEB
+ * (server on the existing STA/LAN IP). The proof code is random per session.
  */
 
 #include "ssh_import.h"
@@ -16,6 +15,7 @@
 #include "esp_netif.h"
 #include "esp_http_server.h"
 #include "esp_heap_caps.h"
+#include "esp_random.h"
 #include "esp_log.h"
 
 #include "freertos/FreeRTOS.h"
@@ -30,10 +30,15 @@
 
 static const char *TAG = "ssh_import";
 
+/* Body cap; the private-key decode buffer is sized to match so a key field
+ * can never be silently truncated within an accepted body. */
+#define BODY_MAX 16384
+
 static volatile int s_state = SSH_IMPORT_ST_IDLE;
+static volatile int s_mode  = SSH_IMPORT_SOFTAP;
 static char s_service[32] = "";
 static char s_pop[16]     = "";
-static char s_url[24]     = "";
+static char s_url[40]     = "";
 static char s_last[32]    = "";
 static char s_err[64]     = "";
 static volatile int s_count = 0;
@@ -81,7 +86,9 @@ bool ssh_import_qr_module(int x, int y)
 
 /* ------------------------------------------------------------- HTML form */
 
-/* Split at the hidden PoP value so we never printf %-laden CSS. */
+/* The proof-code field is emitted between HEAD and TAIL: hidden+prefilled in
+ * SOFTAP (the WPA2 join already proved possession), visible+required in WEB
+ * (the typed code is the only gate). */
 static const char FORM_HEAD[] =
     "<!doctype html><html><head><meta charset=utf-8>"
     "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
@@ -98,7 +105,7 @@ static const char FORM_HEAD[] =
     ".seg{display:flex;gap:8px;margin-top:4px}"
     ".seg label{flex:1;margin:0;text-align:center;border:1px solid #2a2;border-radius:6px;"
     "padding:10px;cursor:pointer}"
-    ".seg input{display:none}.seg input:checked+span{color:#0b0f0b}"
+    ".seg input{display:none}"
     ".seg label:has(input:checked){background:#5f5;color:#0b0f0b}"
     "button{width:100%;margin-top:18px;background:#5f5;color:#0b0f0b;border:0;border-radius:6px;"
     "padding:14px;font:inherit;font-weight:bold;cursor:pointer}"
@@ -106,11 +113,13 @@ static const char FORM_HEAD[] =
     ".hide{display:none}"
     "</style></head><body><div class=c>"
     "<h1>&#9654; ADD SSH PROFILE</h1>"
-    "<form method=post action=/save accept-charset=utf-8>"
-    "<input type=hidden name=pop value=\"";
+    "<form method=post action=/save accept-charset=utf-8>";
+
+static const char FORM_POP_WEB[] =
+    "<label>Proof code <span class=hint>(shown on the deck)</span></label>"
+    "<input name=pop required maxlength=8 autocomplete=off placeholder=\"8 hex\">";
 
 static const char FORM_TAIL[] =
-    "\">"
     "<label>Profile name</label><input name=name maxlength=31 required "
     "placeholder=\"e.g. homelab\">"
     "<div class=row><div><label>Host</label>"
@@ -171,11 +180,13 @@ static int hexval(int c)
     return -1;
 }
 
-/* URL-decode src[..slen) into dst (NUL-terminated, capped at dcap). */
-static void url_decode(const char *src, int slen, char *dst, int dcap)
+/* URL-decode src[..slen) into dst (NUL-terminated, capped at dcap). Returns
+ * true if the whole input fit; false if it was truncated at the cap. */
+static bool url_decode(const char *src, int slen, char *dst, int dcap)
 {
     int o = 0;
-    for (int i = 0; i < slen && o < dcap - 1; i++) {
+    for (int i = 0; i < slen; i++) {
+        if (o >= dcap - 1) { dst[o] = '\0'; return false; }
         char c = src[i];
         if (c == '+') {
             dst[o++] = ' ';
@@ -188,29 +199,38 @@ static void url_decode(const char *src, int slen, char *dst, int dcap)
         }
     }
     dst[o] = '\0';
+    return true;
 }
 
 /* Extract field @p name from a form-urlencoded @p body into @p out.
- * Returns the decoded length, or -1 if the field is absent. */
+ * Returns 1 if present and fully decoded, 0 if absent, -1 if truncated. */
 static int form_field(const char *body, const char *name, char *out, int cap)
 {
     int nlen = (int)strlen(name);
     const char *p = body;
     while (p && *p) {
-        /* p sits at the start of a "key=value" pair */
         if (strncmp(p, name, nlen) == 0 && p[nlen] == '=') {
             const char *v = p + nlen + 1;
             const char *e = strchr(v, '&');
             int vlen = e ? (int)(e - v) : (int)strlen(v);
-            url_decode(v, vlen, out, cap);
-            return (int)strlen(out);
+            return url_decode(v, vlen, out, cap) ? 1 : -1;
         }
         const char *amp = strchr(p, '&');
         if (!amp) break;
         p = amp + 1;
     }
     out[0] = '\0';
-    return -1;
+    return 0;
+}
+
+/* True if @p s holds a control char (< 0x20). profiles.ini is line-oriented,
+ * so a newline in any field would forge a new key/section line — reject it.
+ * (The PEM key blob is exempt: it is stored in its own file, not the INI.) */
+static bool has_ctrl(const char *s)
+{
+    for (; *s; s++)
+        if ((unsigned char)*s < 0x20) return true;
+    return false;
 }
 
 /* Fold a profile name into a filesystem-safe key id (alnum/-/_ only). */
@@ -227,7 +247,9 @@ static void sanitize_key_id(const char *name, char *out, int cap)
 
 static void set_err(const char *msg)
 {
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
     snprintf(s_err, sizeof(s_err), "%s", msg);
+    if (s_lock) xSemaphoreGive(s_lock);
     ESP_LOGW(TAG, "reject: %s", msg);
 }
 
@@ -243,12 +265,36 @@ static void write_pubkey(const char *key_id, const char *pub, int len)
     fclose(f);
 }
 
-/* Append (or replace by name) @p pf in profiles.ini. Mirrors the on-device
- * editor's capacity convention (cyberdeck_app.c): store at most PROFILE_MAX. */
 #define IMPORT_PROFILE_MAX 8
+
+/* Ensure @p key_id does not collide with a DIFFERENT profile's key (a
+ * many-to-one sanitize would otherwise overwrite an unrelated .pem). Appends a
+ * numeric suffix until unique among the loaded set. */
+static void unique_key_id(const conn_profile_t *list, int n, const char *name,
+                          char *key_id, int cap)
+{
+    char base[32];
+    snprintf(base, sizeof(base), "%s", key_id);
+    for (int suffix = 1; suffix < 100; suffix++) {
+        bool clash = false;
+        for (int i = 0; i < n; i++) {
+            if (strcmp(list[i].name, name) == 0) continue;   /* same profile: ok */
+            if (list[i].auth == STORAGE_AUTH_KEY &&
+                strcmp(list[i].key_id, key_id) == 0) { clash = true; break; }
+        }
+        if (!clash) return;
+        snprintf(key_id, cap, "%.24s_%d", base, suffix + 1);
+    }
+}
+
+/* Append (or replace by name) @p pf in profiles.ini. Returns ESP_ERR_NOT_FINISHED
+ * when the list is already at capacity and @p pf is a new name. */
 static esp_err_t append_profile(const conn_profile_t *pf)
 {
-    conn_profile_t list[IMPORT_PROFILE_MAX + 1];
+    conn_profile_t *list = heap_caps_malloc(sizeof(conn_profile_t) *
+                                            (IMPORT_PROFILE_MAX + 1),
+                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!list) return ESP_ERR_NO_MEM;
     int n = 0;
     storage_load_profiles(list, &n, IMPORT_PROFILE_MAX);
 
@@ -257,16 +303,17 @@ static esp_err_t append_profile(const conn_profile_t *pf)
         if (strcmp(list[i].name, pf->name) == 0) { slot = i; break; }
 
     if (slot < 0) {
-        if (n >= IMPORT_PROFILE_MAX) return ESP_ERR_NO_MEM;   /* list full */
+        if (n >= IMPORT_PROFILE_MAX) { free(list); return ESP_ERR_NOT_FINISHED; }
         slot = n++;
     }
-    list[slot] = *pf;                                         /* replace or add */
-    return storage_save_profiles(list, n);
+    list[slot] = *pf;
+    esp_err_t e = storage_save_profiles(list, n);
+    free(list);
+    return e;
 }
 
 static esp_err_t handle_save(httpd_req_t *req, char *body)
 {
-    /* Field buffers. Keep host/user/name bounded to conn_profile_t sizes. */
     char pop[16], name[40], host[80], user[40], port[8], auth[16];
     char password[128], passphrase[128];
 
@@ -285,14 +332,22 @@ static esp_err_t handle_save(httpd_req_t *req, char *body)
     form_field(body, "password",   password,   sizeof(password));
     form_field(body, "passphrase", passphrase, sizeof(passphrase));
 
-    /* Validate. */
     if (!name[0] || !host[0] || !user[0]) {
         set_err("name, host and user are required");
         httpd_resp_set_status(req, "400 Bad Request");
         return ok_page(req, "&#10007; Missing fields",
                        "Name, host and username are required.");
     }
-    if (strpbrk(name, "[]")) {           /* INI section-header safety */
+    /* INI-safety: no control chars (would forge a line) in any INI field, and
+     * no [ ] in the name (would forge a section header). */
+    if (has_ctrl(name) || has_ctrl(host) || has_ctrl(user) ||
+        has_ctrl(password) || has_ctrl(passphrase)) {
+        set_err("control characters not allowed");
+        httpd_resp_set_status(req, "400 Bad Request");
+        return ok_page(req, "&#10007; Bad input",
+                       "Fields cannot contain control characters.");
+    }
+    if (strpbrk(name, "[]")) {
         set_err("name cannot contain [ or ]");
         httpd_resp_set_status(req, "400 Bad Request");
         return ok_page(req, "&#10007; Bad name", "Name cannot contain [ or ].");
@@ -312,18 +367,22 @@ static esp_err_t handle_save(httpd_req_t *req, char *body)
 
     bool want_key = (strcmp(auth, "key") == 0);
     if (want_key) {
-        /* Key PEM lives at the end of the body (largest field); parse it
-         * from the raw body so we don't need a huge stack buffer. */
-        char *key    = heap_caps_malloc(8192, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        char *pubkey = heap_caps_malloc(2048, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        char *key    = heap_caps_malloc(BODY_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        char *pubkey = heap_caps_malloc(4096,     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!key || !pubkey) {
             free(key); free(pubkey);
             set_err("out of memory for key");
             httpd_resp_set_status(req, "500 Internal Server Error");
             return ok_page(req, "&#10007; Out of memory", "Try a smaller key.");
         }
-        form_field(body, "key",    key,    8192);
-        form_field(body, "pubkey", pubkey, 2048);
+        int kr = form_field(body, "key",    key,    BODY_MAX);
+        int pr = form_field(body, "pubkey", pubkey, 4096);
+        if (kr < 0 || pr < 0) {          /* decoded value hit the buffer cap */
+            free(key); free(pubkey);
+            set_err("key too large");
+            httpd_resp_set_status(req, "413 Payload Too Large");
+            return ok_page(req, "&#10007; Key too large", "The key did not fit.");
+        }
 
         if (!strstr(key, "PRIVATE KEY")) {
             free(key); free(pubkey);
@@ -339,8 +398,18 @@ static esp_err_t handle_save(httpd_req_t *req, char *body)
             free(key); free(pubkey);
             set_err("name has no usable characters");
             httpd_resp_set_status(req, "400 Bad Request");
-            return ok_page(req, "&#10007; Bad name",
-                           "Name needs a letter or digit.");
+            return ok_page(req, "&#10007; Bad name", "Name needs a letter or digit.");
+        }
+
+        /* Resolve key-id collisions against OTHER profiles before writing. */
+        conn_profile_t *set = heap_caps_malloc(sizeof(conn_profile_t) *
+                                               (IMPORT_PROFILE_MAX + 1),
+                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (set) {
+            int sn = 0;
+            storage_load_profiles(set, &sn, IMPORT_PROFILE_MAX);
+            unique_key_id(set, sn, name, key_id, sizeof(key_id));
+            free(set);
         }
 
         esp_err_t e = storage_set_key(key_id, key, strlen(key));
@@ -361,7 +430,7 @@ static esp_err_t handle_save(httpd_req_t *req, char *body)
     }
 
     esp_err_t ae = append_profile(&pf);
-    if (ae == ESP_ERR_NO_MEM) {
+    if (ae == ESP_ERR_NOT_FINISHED) {
         set_err("profile list full");
         httpd_resp_set_status(req, "507 Insufficient Storage");
         return ok_page(req, "&#10007; List full",
@@ -373,11 +442,12 @@ static esp_err_t handle_save(httpd_req_t *req, char *body)
         return ok_page(req, "&#10007; Save failed", "Could not write profiles.");
     }
 
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
     s_err[0] = '\0';
     snprintf(s_last, sizeof(s_last), "%s", pf.name);
-    s_count++;
-    ESP_LOGI(TAG, "imported profile '%s' (%s)", pf.name,
-             want_key ? "key" : "password");
+    if (s_lock) xSemaphoreGive(s_lock);
+    s_count++;                                   /* publish after s_last is set */
+    ESP_LOGI(TAG, "imported profile '%s' (%s)", pf.name, want_key ? "key" : "password");
 
     char sub[80];
     snprintf(sub, sizeof(sub), "%s @ %s:%d saved to the deck.", pf.user, pf.host, portn);
@@ -390,7 +460,13 @@ static esp_err_t get_form(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
     httpd_resp_sendstr_chunk(req, FORM_HEAD);
-    httpd_resp_sendstr_chunk(req, s_pop);
+    if (s_mode == SSH_IMPORT_WEB) {
+        httpd_resp_sendstr_chunk(req, FORM_POP_WEB);    /* visible, user types it */
+    } else {
+        httpd_resp_sendstr_chunk(req, "<input type=hidden name=pop value=\"");
+        httpd_resp_sendstr_chunk(req, s_pop);           /* prefilled: WPA2 gated */
+        httpd_resp_sendstr_chunk(req, "\">");
+    }
     httpd_resp_sendstr_chunk(req, FORM_TAIL);
     httpd_resp_sendstr_chunk(req, NULL);
     return ESP_OK;
@@ -399,7 +475,11 @@ static esp_err_t get_form(httpd_req_t *req)
 static esp_err_t post_save(httpd_req_t *req)
 {
     int total = req->content_len;
-    if (total <= 0 || total > 16384) {
+    if (total <= 0) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        return ok_page(req, "&#10007; Empty", "No form data received.");
+    }
+    if (total > BODY_MAX) {
         httpd_resp_set_status(req, "413 Payload Too Large");
         return ok_page(req, "&#10007; Too large", "Payload exceeds 16 KB.");
     }
@@ -418,7 +498,7 @@ static esp_err_t post_save(httpd_req_t *req)
     }
     body[got] = '\0';
 
-    esp_err_t e = ESP_FAIL;
+    esp_err_t e;
     if (s_lock && xSemaphoreTake(s_lock, pdMS_TO_TICKS(5000)) == pdTRUE) {
         e = handle_save(req, body);
         xSemaphoreGive(s_lock);
@@ -450,63 +530,83 @@ static esp_err_t start_httpd(void)
 
 /* -------------------------------------------------------------- lifecycle */
 
-esp_err_t ssh_import_start(void)
+/* 8 random hex chars = a fresh per-session proof code (also a valid WPA2 key).
+ * Not MAC-derived: MAC bytes leak in the SSID + AP beacon, which would let a
+ * passive listener reconstruct the PSK and decrypt the SoftAP link. */
+static void gen_code(void)
 {
-    if (s_state != SSH_IMPORT_ST_IDLE) return ESP_ERR_INVALID_STATE;
+    uint32_t r = esp_random();
+    snprintf(s_pop, sizeof(s_pop), "%08lX", (unsigned long)r);
+}
 
-    if (wifi_manager_init() != ESP_OK) { s_state = SSH_IMPORT_ST_ERROR; return ESP_FAIL; }
+static esp_err_t start_softap(void)
+{
     wifi_manager_disconnect();          /* park STA retry loop for the session */
-
     if (!s_ap_netif) s_ap_netif = esp_netif_create_default_wifi_ap();
-    if (!s_lock)     s_lock     = xSemaphoreCreateMutex();
 
     uint8_t mac[6] = { 0 };
     esp_wifi_get_mac(WIFI_IF_STA, mac);
     snprintf(s_service, sizeof(s_service), "DECK-SETUP-%02X%02X", mac[4], mac[5]);
-    snprintf(s_pop,     sizeof(s_pop),     "%02X%02X%02X%02X",
-             mac[0], mac[3], mac[4], mac[5]);   /* 8 hex chars = valid WPA2 key */
     snprintf(s_url,     sizeof(s_url),     "http://192.168.4.1");
-    s_last[0] = s_err[0] = '\0';
-    s_count = 0;
 
     wifi_config_t ap = { 0 };
     snprintf((char *)ap.ap.ssid, sizeof(ap.ap.ssid), "%s", s_service);
-    ap.ap.ssid_len       = (uint8_t)strlen(s_service);
+    ap.ap.ssid_len         = (uint8_t)strlen(s_service);
     snprintf((char *)ap.ap.password, sizeof(ap.ap.password), "%s", s_pop);
-    ap.ap.channel        = 1;
-    ap.ap.max_connection = 1;
-    ap.ap.authmode       = WIFI_AUTH_WPA2_PSK;
+    ap.ap.channel          = 1;
+    ap.ap.max_connection   = 1;
+    ap.ap.authmode         = WIFI_AUTH_WPA2_PSK;
     ap.ap.pmf_cfg.required = false;
 
     esp_err_t e = esp_wifi_set_mode(WIFI_MODE_AP);
     if (e == ESP_OK) e = esp_wifi_set_config(WIFI_IF_AP, &ap);
-    if (e == ESP_OK) {
-        esp_err_t se = esp_wifi_start();   /* no-op+OK if the driver is already up */
-        if (se != ESP_OK && se != ESP_ERR_WIFI_NOT_INIT)
-            ESP_LOGW(TAG, "esp_wifi_start: %s", esp_err_to_name(se));
+    if (e == ESP_OK) e = esp_wifi_start();       /* propagate: no live AP = fail */
+    if (e != ESP_OK) { ESP_LOGE(TAG, "SoftAP up: %s", esp_err_to_name(e)); return e; }
+
+    char qr[96];
+    snprintf(qr, sizeof(qr), "WIFI:T:WPA;S:%s;P:%s;;", s_service, s_pop);
+    generate_qr(qr);
+    ESP_LOGI(TAG, "import AP up: join '%s' (key '%s'), open %s",
+             s_service, s_pop, s_url);
+    return ESP_OK;
+}
+
+static esp_err_t start_web(void)
+{
+    const char *ip = wifi_manager_get_ip();
+    if (!ip || !ip[0]) {
+        ESP_LOGW(TAG, "web import needs an active WiFi (STA) link");
+        return ESP_ERR_INVALID_STATE;
     }
-    if (e != ESP_OK) {
-        ESP_LOGE(TAG, "SoftAP up failed: %s", esp_err_to_name(e));
-        ssh_import_stop();
-        s_state = SSH_IMPORT_ST_ERROR;
-        return e;
-    }
+    s_service[0] = '\0';                 /* no SSID in web mode */
+    snprintf(s_url, sizeof(s_url), "http://%s", ip);
+    generate_qr(s_url);                  /* URL QR (handy for a phone too) */
+    ESP_LOGI(TAG, "web import up: open %s (code %s)", s_url, s_pop);
+    return ESP_OK;
+}
+
+esp_err_t ssh_import_start(ssh_import_mode_t mode)
+{
+    if (s_state != SSH_IMPORT_ST_IDLE) return ESP_ERR_INVALID_STATE;
+
+    if (wifi_manager_init() != ESP_OK) return ESP_FAIL;
+    if (!s_lock) s_lock = xSemaphoreCreateMutex();
+
+    s_mode = mode;
+    s_last[0] = s_err[0] = '\0';
+    s_count = 0;
+    gen_code();
+
+    esp_err_t e = (mode == SSH_IMPORT_WEB) ? start_web() : start_softap();
+    if (e != ESP_OK) { ssh_import_stop(); return e; }   /* stop() leaves IDLE */
 
     if (start_httpd() != ESP_OK) {
         ESP_LOGE(TAG, "httpd start failed");
         ssh_import_stop();
-        s_state = SSH_IMPORT_ST_ERROR;
         return ESP_FAIL;
     }
 
-    /* Standard WiFi-join QR: scanning it connects the phone to the AP. */
-    char qr[96];
-    snprintf(qr, sizeof(qr), "WIFI:T:WPA;S:%s;P:%s;;", s_service, s_pop);
-    generate_qr(qr);
-
     s_state = SSH_IMPORT_ST_ACTIVE;
-    ESP_LOGI(TAG, "import AP up: join '%s' (key '%s'), open %s",
-             s_service, s_pop, s_url);
     return ESP_OK;
 }
 
@@ -514,24 +614,46 @@ void ssh_import_stop(void)
 {
     if (s_httpd) { httpd_stop(s_httpd); s_httpd = NULL; }
 
-    esp_wifi_set_mode(WIFI_MODE_STA);      /* drop the AP radio, back to STA */
-    if (s_ap_netif) {
-        esp_netif_destroy_default_wifi(s_ap_netif);
-        s_ap_netif = NULL;
+    if (s_mode == SSH_IMPORT_SOFTAP) {
+        esp_wifi_set_mode(WIFI_MODE_STA);   /* drop the AP radio, back to STA */
+        if (s_ap_netif) {
+            esp_netif_destroy_default_wifi(s_ap_netif);
+            s_ap_netif = NULL;
+        }
+        esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+        if (sta) esp_netif_set_default_netif(sta);
     }
-    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    if (sta) esp_netif_set_default_netif(sta);
+    /* WEB mode never touched the STA link — nothing to restore. */
 
     s_state   = SSH_IMPORT_ST_IDLE;
     s_qr_size = 0;
-    s_service[0] = s_pop[0] = s_url[0] = '\0';
-    ESP_LOGI(TAG, "import AP stopped");
+    s_service[0] = s_url[0] = '\0';
+    ESP_LOGI(TAG, "import stopped");
 }
 
 int         ssh_import_state(void)        { return s_state; }
+int         ssh_import_mode(void)         { return s_mode; }
 const char *ssh_import_service_name(void) { return s_service; }
 const char *ssh_import_pop(void)          { return s_pop; }
 const char *ssh_import_url(void)          { return s_url; }
-const char *ssh_import_last(void)         { return s_last; }
-const char *ssh_import_err(void)          { return s_err; }
 int         ssh_import_count(void)        { return s_count; }
+
+/* Status strings are written by the httpd task under s_lock; copy under the
+ * same lock into a small static so the render task never reads a torn string. */
+const char *ssh_import_last(void)
+{
+    static char snap[32];
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
+    snprintf(snap, sizeof(snap), "%s", s_last);
+    if (s_lock) xSemaphoreGive(s_lock);
+    return snap;
+}
+
+const char *ssh_import_err(void)
+{
+    static char snap[64];
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
+    snprintf(snap, sizeof(snap), "%s", s_err);
+    if (s_lock) xSemaphoreGive(s_lock);
+    return snap;
+}
