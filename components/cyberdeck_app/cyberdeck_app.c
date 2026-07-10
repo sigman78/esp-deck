@@ -150,6 +150,7 @@ static struct {
     char     pf_port[6];            /* port as text (parsed on save)   */
     int      pf_field;              /* focused field (see pf_field_t)   */
     int      pf_cursor;             /* caret within the focused field   */
+    char     pf_err[40];            /* inline validation error, "" = ok */
 
     uint64_t boot_until;
     uint64_t next_home_refresh;
@@ -452,6 +453,17 @@ static void draw_footer_lim(const char *hint, int limit)
 }
 
 static void draw_footer(const char *hint) { draw_footer_lim(hint, -1); }
+
+/* Standard modal header: animated titlebar chip, a right-aligned "// tag"
+ * in blue, and the comet rule on row 3. Shared by CONNECTING / NEW PROFILE. */
+static void draw_screen_header(const char *title, const char *tag)
+{
+    draw_titlebar(2, title, s.anim_frame);
+    ui_pen(OVERLAY_COL_BLUE);
+    ui_puts(ui_cols() - (int)strlen(tag) - 1, 0, tag, 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
+    draw_rule_scan(3, s.anim_frame);
+}
 
 /* Free-RAM summary for the header. */
 static void ram_stats(char *buf, size_t sz)
@@ -932,11 +944,7 @@ static void render_connecting(const char *msg, uint64_t now)
     ui_clear();
     ui_fill(0, 0, ui_cols(), ui_rows(), 0);
 
-    draw_titlebar(2, "CONNECTING", s.anim_frame);
-    ui_pen(OVERLAY_COL_BLUE);
-    ui_puts(ui_cols() - 12, 0, "// SSH DECK", 0);
-    ui_pen(OVERLAY_COL_DEFAULT);
-    draw_rule_scan(3, s.anim_frame);
+    draw_screen_header("CONNECTING", "// SSH DECK");
 
     const conn_profile_t *p = &s.profiles[s.connect_idx];
     int cy = ui_rows() / 2;
@@ -1029,11 +1037,7 @@ static void render_profile(void)
     ui_clear();
     ui_fill(0, 0, ui_cols(), ui_rows(), 0);
 
-    draw_titlebar(2, "NEW PROFILE", s.anim_frame);
-    ui_pen(OVERLAY_COL_BLUE);
-    ui_puts(ui_cols() - 12, 0, "// SSH DECK", 0);
-    ui_pen(OVERLAY_COL_DEFAULT);
-    draw_rule_scan(3, s.anim_frame);
+    draw_screen_header("NEW PROFILE", "// SSH DECK");
 
     for (int i = 0; i < PF_TEXT_COUNT; i++) {
         const char *label; int max; bool numeric, mask;
@@ -1042,11 +1046,22 @@ static void render_profile(void)
         bool focused = (s.pf_field == i);
         ui_pen(focused ? OVERLAY_COL_CYAN : OVERLAY_COL_DEFAULT);
         ui_puts(PF_X0, row, label, 0);
-        ui_field(PF_FX, row, PF_FW, buf, s.pf_cursor, focused, mask);
+        /* Only the focused field's caret drives scrolling (ui_field ignores
+         * the caret when unfocused); pass 0 for the rest to be explicit. */
+        ui_field(PF_FX, row, PF_FW, buf, focused ? s.pf_cursor : 0,
+                 focused, mask);
     }
     ui_pen(OVERLAY_COL_DEFAULT);
     ui_puts(PF_X0, PF_Y0 + PF_TEXT_COUNT * 2,
             "auth: password (key setup coming soon)", 0);
+
+    /* Inline validation error — a modal has no toast strip, so a failed
+     * Save must report here or it looks dead. Persists until the next edit. */
+    if (s.pf_err[0]) {
+        ui_pen(OVERLAY_COL_RED);
+        ui_puts(PF_X0, PF_Y0 + PF_TEXT_COUNT * 2 + 1, s.pf_err, 0);
+        ui_pen(OVERLAY_COL_DEFAULT);
+    }
 
     /* Save / Cancel buttons — a 2-wide tile grid stashed for touch. */
     tilegrid_t bg = { .y0 = PF_Y0 + PF_TEXT_COUNT * 2 + 2, .tw = 20, .th = 3,
@@ -1072,27 +1087,32 @@ static void enter_profile(uint64_t now)
     snprintf(s.pf_port, sizeof(s.pf_port), "22");
     s.pf_field  = PF_NAME;
     s.pf_cursor = 0;
+    s.pf_err[0] = '\0';
     s.state     = ST_PROFILE;
     (void)now;
     render_profile();
 }
 
 /* Validate the draft and append it to profiles.ini. Returns "" on success or
- * a short reason to toast on failure. */
+ * a short reason to show inline on failure. */
 static const char *profile_commit(void)
 {
     if (s.pf_draft.name[0] == '\0') return "name required";
+    /* A '[' or ']' in the name breaks the INI section header on save and
+     * silently corrupts the file on reload (the malformed section is skipped
+     * and the next profile's keys clobber the prior one). Reject them. */
+    if (strpbrk(s.pf_draft.name, "[]")) return "name: no [ or ]";
     if (s.pf_draft.host[0] == '\0') return "host required";
     if (s.pf_draft.user[0] == '\0') return "user required";
     long port = strtol(s.pf_port, NULL, 10);
     if (port < 1 || port > 65535)   return "bad port";
-    if (s.profile_count >= MAX_PROFILES - 1) return "profile list full";
 
     s.pf_draft.port = (uint16_t)port;
     s.pf_draft.auth = STORAGE_AUTH_PASSWORD;
 
-    /* Load the on-flash set (s.profiles may hold the synthesized fallback),
-     * append, and persist. */
+    /* Load the authoritative on-flash set (s.profiles may hold the synthesized
+     * "(default)" fallback, which is NOT on flash), append, and persist. This
+     * capacity check is the only one — s.profile_count is not authoritative. */
     conn_profile_t set[MAX_PROFILES];
     int n = 0;
     if (storage_load_profiles(set, &n, MAX_PROFILES - 1) != ESP_OK) n = 0;
@@ -2332,19 +2352,22 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
             switch (k) {
             case K_LEFT:  pf_focus(PF_SAVE);   render_profile(); break;
             case K_RIGHT: pf_focus(PF_CANCEL); render_profile(); break;
-            case K_UP: case K_TAB:
-                pf_focus(s.pf_field == PF_SAVE ? PF_PASS : PF_SAVE);
-                render_profile(); break;
-            case K_DOWN:
-                pf_focus(s.pf_field == PF_SAVE ? PF_CANCEL : PF_NAME);
-                render_profile(); break;
+            case K_UP:                              /* backward through ring */
+                pf_focus(s.pf_field - 1); render_profile(); break;
+            case K_DOWN: case K_TAB:                /* forward (Cancel wraps) */
+                pf_focus(s.pf_field + 1); render_profile(); break;
             case K_ENTER:
                 if (s.pf_field == PF_CANCEL) { enter_home(now); break; }
                 else {
                     const char *err = profile_commit();
-                    if (err[0]) { toast(now, "%s", err); render_profile(); }
-                    else { load_profiles(); toast(now, "profile saved");
-                           enter_home(now); }
+                    if (err[0]) {   /* inline — a modal has no toast strip */
+                        snprintf(s.pf_err, sizeof(s.pf_err), "%s", err);
+                        render_profile();
+                    } else {
+                        load_profiles();
+                        toast(now, "profile saved");
+                        enter_home(now);
+                    }
                 }
                 break;
             default: break;
@@ -2359,10 +2382,14 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
         switch (k) {
         case K_CHAR:
             if (numeric && !(ch >= '0' && ch <= '9')) break;
+            /* Section-header metacharacters can't go in the name (they
+             * corrupt profiles.ini on reload); block them at the source. */
+            if (s.pf_field == PF_NAME && (ch == '[' || ch == ']')) break;
             if (len < max) {
                 memmove(buf + s.pf_cursor + 1, buf + s.pf_cursor,
                         len - s.pf_cursor + 1);
                 buf[s.pf_cursor++] = ch;
+                s.pf_err[0] = '\0';              /* an edit clears the error */
                 render_profile();
             }
             break;
@@ -2371,6 +2398,7 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
                 memmove(buf + s.pf_cursor - 1, buf + s.pf_cursor,
                         len - s.pf_cursor + 1);
                 s.pf_cursor--;
+                s.pf_err[0] = '\0';
                 render_profile();
             }
             break;

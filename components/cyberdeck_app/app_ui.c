@@ -233,9 +233,11 @@ void ui_field(int col, int row, int width, const char *text,
     if (cursor < 0)   cursor = 0;
     if (cursor > len) cursor = len;
 
-    /* Scroll so the cursor stays visible in a fixed-width window. */
+    /* Scroll so the caret stays visible — but ONLY for the focused field.
+     * An unfocused field always shows from its start, else every repaint
+     * scrolls it by the (focused) field's caret and hides its head. */
     int start = 0;
-    if (cursor > inner - 1) start = cursor - (inner - 1);
+    if (focused && cursor > inner - 1) start = cursor - (inner - 1);
 
     uint8_t in = focused ? OVERLAY_ATTR_INVERSE : 0;
     ui_putch(col, row, '[', 0);
