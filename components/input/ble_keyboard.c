@@ -43,6 +43,10 @@ static const char *TAG = "ble_kbd";
 static volatile ble_state_t s_state          = BLE_IDLE;
 static volatile bool        s_nimble_synced  = false;
 
+/* Consecutive failed opens drive exponential backoff (1s..30s): a persistent
+ * failure must not become a battery-burning 1 Hz scan->connect->fail loop. */
+static volatile uint8_t s_open_fail_count;
+
 /* Protects s_scan_results / s_scan_count between NimBLE task and app task */
 static portMUX_TYPE s_scan_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -249,6 +253,14 @@ void ble_keyboard_enter_pairing(void)
         ESP_LOGW(TAG, "enter_pairing: NimBLE not yet synced");
         return;
     }
+    if (s_state == BLE_CONNECTING) {
+        /* An open is in flight on hid_open_task; scanning now would fight
+         * it for the single GAP procedure slot and the state machine.
+         * The UI keeps showing "connecting..." — retry the menu after. */
+        ESP_LOGW(TAG, "enter_pairing: connect in flight, try again shortly");
+        return;
+    }
+    s_open_fail_count = 0;             /* fresh user action, fresh backoff */
     ESP_LOGI(TAG, "Entering pairing mode");
     ble_gap_disc_cancel();
     taskENTER_CRITICAL(&s_scan_mux);
@@ -305,8 +317,14 @@ static void hid_open_task(void *arg)
                                             req.addr_type);
     if (!dev) {
         /* The NimBLE backend posts no OPEN event on failure — recover here so
-         * we don't get wedged in BLE_CONNECTING forever. */
-        ESP_LOGW(TAG, "connect failed; resuming scan");
+         * we don't get wedged in BLE_CONNECTING forever. Back off before
+         * rescanning: 1s, 2s, 4s ... capped at 30s. */
+        if (s_open_fail_count < 8) s_open_fail_count++;
+        uint32_t backoff_ms = 1000u << (s_open_fail_count - 1);
+        if (backoff_ms > 30000u) backoff_ms = 30000u;
+        ESP_LOGW(TAG, "connect failed (streak %u); rescan in %lu ms",
+                 (unsigned)s_open_fail_count, (unsigned long)backoff_ms);
+        vTaskDelay(pdMS_TO_TICKS(backoff_ms));
         s_state = (s_registry_count > 0) ? BLE_RECONNECT : BLE_IDLE;
         if (s_state == BLE_RECONNECT)
             start_scan(CONFIG_INPUT_BLE_SCAN_DURATION * 1000);
@@ -319,9 +337,9 @@ static void open_device_async(const uint8_t addr[6], uint8_t addr_type)
 {
     if (s_state == BLE_CONNECTING) return;   /* one attempt at a time */
     if (s_hid_open_live) return;             /* previous task still exiting */
-    ble_gap_disc_cancel();
-    s_state = BLE_CONNECTING;
 
+    /* All fallible steps BEFORE committing state — an early return must
+     * never leave the machine stuck in BLE_CONNECTING with no task alive. */
     hid_open_req_t *req = malloc(sizeof(*req));
     if (!req) { ESP_LOGE(TAG, "open req alloc failed"); return; }
     memcpy(req->addr, addr, 6);
@@ -336,9 +354,11 @@ static void open_device_async(const uint8_t addr[6], uint8_t addr_type)
     if (!s_hid_open_stack) {
         ESP_LOGE(TAG, "hid_open stack alloc failed");
         free(req);
-        s_state = (s_registry_count > 0) ? BLE_RECONNECT : BLE_IDLE;
         return;
     }
+
+    ble_gap_disc_cancel();
+    s_state         = BLE_CONNECTING;
     s_hid_open_live = true;
     xTaskCreateStatic(hid_open_task, "hid_open",
                       HID_OPEN_STACK / sizeof(StackType_t),
@@ -554,6 +574,7 @@ static void hidh_callback(void *handler_args, esp_event_base_t base,
             start_scan(CONFIG_INPUT_BLE_SCAN_DURATION * 1000);
             break;
         }
+        s_open_fail_count = 0;         /* successful open resets the backoff */
         log_addr("Connected:", bda);
         memcpy(s_connected_bda, bda, 6);
         s_connected_dev = data->open.dev;
