@@ -21,6 +21,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "esp_log.h"
 #include "ssh_client.h"
@@ -132,6 +133,7 @@ static struct {
     uint64_t session_start;         /* enter_session() time, for NO CARRIER */
     uint64_t last_input;            /* any key/touch; drives the screensaver */
     bool     saver_on;              /* rain actually on screen (not derived) */
+    uint64_t saver_since;           /* when the rain went up (wake grace)    */
     uint8_t  kon_idx;               /* Konami sequence progress (HOME)       */
 
     uint64_t boot_until;
@@ -363,6 +365,23 @@ static uint16_t braille_noise(uint32_t h)
     return (uint16_t)(0x2801 + h % 255u);
 }
 
+/* Wall-clock "HH:MM" once real time exists: wifi_manager's one-shot NTP
+ * fetch on device (0 until synced — no RTC battery), host clock in the
+ * simulator. TZ comes from CONFIG_CYBERDECK_TZ via localtime. */
+static bool clock_str(char *buf, size_t sz)
+{
+    time_t t = wifi_manager_time();
+    if (t == 0) return false;
+    struct tm tm;
+#ifdef _WIN32
+    if (localtime_s(&tm, &t) != 0) return false;  /* UCRT: no localtime_r */
+#else
+    if (!localtime_r(&t, &tm)) return false;
+#endif
+    snprintf(buf, sz, "%02d:%02d", tm.tm_hour, tm.tm_min);
+    return true;
+}
+
 /* Title chip framed by a shade gradient: ░▒▓█ TEXT █▓▒░, drawn at cell x0 on
  * row 0. The flanking blocks glow: a cyan "spark" travels through them each
  * frame for a subtle animated shimmer. Its total width is strlen(text)+10. */
@@ -435,11 +454,12 @@ static void ram_stats(char *buf, size_t sz)
  * at column 9), so callers can append glyphs without layout knowledge. */
 static int draw_status_led(int row, bool on, const char *label, const char *value)
 {
-    /* A live link gets a heartbeat: the dot contracts to • twice per
-     * ~1.6 s cycle (lub-dub). Off stays a steady hollow ○. */
+    /* A live link gets a heartbeat: the dot contracts to ∙ (U+2219, a
+     * genuinely smaller bitmap — U+2022 is byte-identical to ● in this
+     * font!) twice per ~1.6 s cycle. Off stays a steady hollow ○. */
     uint32_t ph = s.anim_frame & 15;
     uint16_t cp = !on ? UI_LED_OFF
-                : (ph == 0 || ph == 2) ? UI_BULLET : UI_LED_ON;
+                : (ph == 0 || ph == 2) ? 0x2219 : UI_LED_ON;
     ui_pen(on ? OVERLAY_COL_GREEN : OVERLAY_COL_RED);
     ui_putch(2, row, cp, 0);
     ui_pen(OVERLAY_COL_DEFAULT);
@@ -622,6 +642,11 @@ static void render_home(void)
     snprintf(ver, sizeof(ver), "// %s", s.cfg.version ? s.cfg.version : "?");
     ui_pen(OVERLAY_COL_BLUE);
     ui_puts(ui_cols() - (int)strlen(ver) - 1, 1, ver, 0);
+
+    /* Wall clock under the version once SNTP delivers real time. */
+    char clk[8];
+    if (clock_str(clk, sizeof(clk)))
+        ui_puts(ui_cols() - (int)strlen(clk) - 1, 2, clk, 0);
     ui_pen(OVERLAY_COL_DEFAULT);
 
     draw_rule_scan(3, s.anim_frame);
@@ -987,6 +1012,14 @@ static void render_menu(void)
     int tl = (int)strlen(title);
     ui_pen(OVERLAY_COL_MAGENTA);
     ui_chip(g.x0 + (g.tw - tl - 4) / 2, g.y0 - 2, UI_RHALF, title, UI_LHALF);
+
+    /* Wall clock in the screen's top-right corner, over the dim scrim
+     * (the menu re-renders every frame, so it ticks live). */
+    char clk[8];
+    if (clock_str(clk, sizeof(clk))) {
+        ui_pen(OVERLAY_COL_BLUE);
+        ui_puts(ui_cols() - (int)strlen(clk) - 1, 0, clk, 0);
+    }
     ui_pen(OVERLAY_COL_DEFAULT);
 
     for (int i = 0; i < count; i++) {
@@ -1000,8 +1033,9 @@ static void render_menu(void)
                 dim ? "(unavailable)" : "", i == s.menu_sel);
         if (i == s.menu_sel) {
             /* Pulsing selection marker over ui_tile's static ▶ — the menu
-             * ticks at 10 fps now, so a still marker reads as a freeze. */
-            static const uint16_t pulse[3] = { UI_PLAY, UI_ARROW, UI_VBAR };
+             * ticks at 10 fps now, so a still marker reads as a freeze.
+             * (UI_ARROW ► is byte-identical to ▶ in Terminus; ◆ is not.) */
+            static const uint16_t pulse[3] = { UI_PLAY, UI_DIAMOND, UI_VBAR };
             ui_putch(tile_x(&g, i) + 1, tile_y(&g, i) + 1,
                      pulse[(s.anim_frame / 3) % 3], OVERLAY_ATTR_INVERSE);
         }
@@ -1116,6 +1150,17 @@ static void render_saver(void)
                                          + (uint32_t)y * 17u
                                          + (s.anim_frame >> 1)), 0);
         }
+    }
+
+    /* The time floats through the rain, hopping to a fresh spot every 10 s
+     * — useful at a glance, and no fixed pixels for the LCD to memorize. */
+    char clk[8];
+    if (clock_str(clk, sizeof(clk))) {
+        uint32_t h = (s.anim_frame / 100) * 2654435761u;
+        int cx = 2 + (int)(h % (uint32_t)(ui_cols() - 12));
+        int cy = 1 + (int)((h >> 10) % (uint32_t)(ui_rows() - 2));
+        ui_pen(OVERLAY_COL_WHITE);
+        ui_chip(cx, cy, 0, clk, 0);
     }
     ui_pen(OVERLAY_COL_DEFAULT);
     ui_no_cursor();
@@ -1315,12 +1360,14 @@ static void enter_wifiprov(uint64_t now)
     render_wifiprov(now);
 }
 
-/* Post an auto-expiring action-feedback line under the menu tiles.
+/* Post an action-feedback line under the menu tiles.
+ * @p ms: lifetime; 0 = sticky (lives until explicitly cleared).
  * @p live_wifi: keep rewriting it from wifi_status_str() while shown. */
-static void menu_note(uint64_t now, bool live_wifi, const char *text)
+static void menu_note(uint64_t now, uint32_t ms, bool live_wifi,
+                      const char *text)
 {
     snprintf(s.menu_msg, sizeof(s.menu_msg), "%s", text);
-    s.menu_msg_until = now + MENU_MSG_MS;
+    s.menu_msg_until = ms ? now + ms : 0;
     s.menu_msg_wifi  = live_wifi;
 }
 
@@ -1383,7 +1430,7 @@ static void menu_activate(uint64_t now)
             if (s.cfg.ble) {
                 enter_pairing(now);
             } else {                              /* was a silent no-op */
-                menu_note(now, false, "no BLE keyboard support");
+                menu_note(now, MENU_MSG_MS, false, "no BLE keyboard support");
                 render_menu();
             }
             break;
@@ -1396,13 +1443,13 @@ static void menu_activate(uint64_t now)
     case 0:                                   /* WiFi reconnect */
         kick_wifi();
         /* Live note: the tick rewrites it from wifi_status_str() each
-         * frame, so there is exactly one wording source for the state. */
-        menu_note(now, true, "wifi: ...");
-        s.menu_msg_until = now + 10000;   /* long enough to watch it land */
+         * frame (one wording source) and extends its life while the
+         * reconnect is still in flight. */
+        menu_note(now, MENU_MSG_MS, true, "wifi: ...");
         break;
     case 1:                                   /* WiFi disconnect */
         wifi_manager_disconnect();
-        menu_note(now, false, "wifi disconnected");
+        menu_note(now, MENU_MSG_MS, false, "wifi disconnected");
         break;
     case CONFIG_WIFI_SETUP:                    /* WiFi onboarding via phone */
         enter_wifiprov(now);
@@ -1411,18 +1458,15 @@ static void menu_activate(uint64_t now)
         if (s.cfg.ble && s.cfg.ble->forget) {
             if (!s.menu_forget_armed) {
                 s.menu_forget_armed = true;
-                /* Sticky (no expiry): the message IS the armed state. */
-                snprintf(s.menu_msg, sizeof(s.menu_msg),
-                         "activate again to confirm");
-                s.menu_msg_until = 0;
-                s.menu_msg_wifi  = false;
+                /* Sticky (ms=0): the message IS the armed state. */
+                menu_note(now, 0, false, "activate again to confirm");
             } else {
                 s.menu_forget_armed = false;
                 s.cfg.ble->forget();
-                menu_note(now, false, "keyboard bonds cleared");
+                menu_note(now, MENU_MSG_MS, false, "keyboard bonds cleared");
             }
         } else {                                  /* was a silent no-op */
-            menu_note(now, false, "no BLE keyboard support");
+            menu_note(now, MENU_MSG_MS, false, "no BLE keyboard support");
         }
         break;
     case CONFIG_COUNT - 1:                     /* Back */
@@ -1651,8 +1695,11 @@ void cyberdeck_app_tick(uint64_t now)
         if (now - s.last_input > SAVER_IDLE_MS) {
             if (now >= s.next_anim) {          /* idle: let it rain */
                 s.next_anim = now + ANIM_PERIOD_MS;
-                s.saver_on  = true;            /* input handling keys off
+                if (!s.saver_on) {
+                    s.saver_on    = true;      /* input handling keys off
                                                 * what is actually on screen */
+                    s.saver_since = now;
+                }
                 render_saver();
             }
             break;
@@ -1746,9 +1793,15 @@ void cyberdeck_app_tick(uint64_t now)
          * UP/LINK clocks tick. */
         if (now >= s.next_anim) {
             s.next_anim = now + ANIM_PERIOD_MS;
-            if (s.menu_msg[0] && s.menu_msg_wifi)
+            if (s.menu_msg[0] && s.menu_msg_wifi) {
                 snprintf(s.menu_msg, sizeof(s.menu_msg), "wifi: %s",
                          wifi_status_str());
+                /* Still in flight? Keep the note alive — expiring mid-
+                 * reconnect reads as the action silently dying. */
+                wifi_mgr_state_t ws = wifi_manager_get_state();
+                if (ws == WIFI_MGR_CONNECTING || ws == WIFI_MGR_LOST)
+                    s.menu_msg_until = now + MENU_MSG_MS;
+            }
             if (s.menu_msg[0] && s.menu_msg_until && now >= s.menu_msg_until)
                 menu_clear_note();
             render_menu();
@@ -1796,14 +1849,18 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
     if (!ev || s.halted) return;
 
     /* Any input feeds the idle timer. Only input arriving while the rain
-     * is ACTUALLY on screen is swallowed as a wake — a tap on a still-
-     * visible HOME must always act, even right at the idle threshold. */
+     * is ACTUALLY on screen is swallowed as a wake — and only once the
+     * rain has been up for a moment: the main loop ticks before it drains
+     * input, so a keypress aimed at a HOME that was visible milliseconds
+     * ago must still act, not vanish into a wake. */
     s.last_input = now;
     if (s.saver_on) {
         s.saver_on = false;
         if (s.toast[0] && now >= s.toast_until) s.toast[0] = '\0';
         render_home();
-        return;
+        if (now - s.saver_since >= 1000)
+            return;                    /* true wake: swallow the input */
+        /* else: rain just went up — fall through and act on the event */
     }
 
     /* ---- SESSION: forward everything except the menu triggers ---- */

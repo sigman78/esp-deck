@@ -6,7 +6,9 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -67,6 +69,9 @@ static void init_network(void)
 {
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
+    /* Timezone for the on-screen clock; SNTP itself starts on link-up. */
+    setenv("TZ", CONFIG_CYBERDECK_TZ, 1);
+    tzset();
 }
 
 /* -------------------------------------------------------------------------
