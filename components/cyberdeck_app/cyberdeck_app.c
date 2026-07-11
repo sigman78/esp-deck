@@ -1438,8 +1438,8 @@ static const uint8_t k_clk_font[11][7] = {
 #define CLK_ADV  ((CLK_FW + 1) * CLK_SX)     /* char advance incl. 1-px gap */
 #define CLK_W    (5 * CLK_ADV - CLK_SX)      /* "HH:MM" = 68 cells wide     */
 #define CLK_H    (7 * CLK_SY)                /* 14 cells tall               */
-#define CLK_CYCLE 200                        /* frames per fill/hop cycle   */
-#define CLK_WASH  20                         /* of which: wash-away sweep   */
+#define CLK_CYCLE 300                        /* frames per paint/wash cycle */
+#define CLK_WASH  100                        /* of which: rain washes off   */
 
 typedef struct {
     int     ox, oy;        /* top-left cell of the clock block  */
@@ -1463,14 +1463,14 @@ static bool clk_mask(const clk_geom_t *g, int x, int y)
  * time spans half the panel as bold 6x7 digits that start invisible —
  * black cells the rain refuses to enter. Each rain head that strikes a
  * digit pixel glints and settles as a wet blue cell that stays lit, so the
- * time is painted out of nothing over ~10 s and holds until the last 2 s
- * of the cycle, when a cyan rinse line sweeps down the block washing the
- * paint away — the rain pours through the washed rows — and the next cycle
- * starts invisible at a fresh spot. A head landing on the top edge of a
- * stroke throws a three-frame splash (impact, bounce, droplets scattering
- * sideways). The colon blinks at 1 Hz and nothing
- * stays put longer than 20 s, so the LCD never holds a static image; any
- * input wakes HOME. Falls back to the old floating chip until SNTP
+ * time is painted out of nothing over ~10 s and holds; the cycle's last
+ * 10 s the same rain takes it back — each head that strikes a painted cell
+ * scrubs it black and the rain pours through the scrubbed holes, so the
+ * clock dissolves drop by drop into the storm before the next cycle starts
+ * invisible at a fresh spot. A head landing on the top edge of a stroke
+ * throws a three-frame splash (impact, bounce, droplets scattering
+ * sideways). The colon blinks at 1 Hz and nothing stays put longer than
+ * 30 s, so the LCD never holds a static image; any input wakes HOME. Falls back to the old floating chip until SNTP
  * delivers real time. Cost: ~1.3 KB of static tables, zero heap. */
 static void render_saver(void)
 {
@@ -1493,7 +1493,7 @@ static void render_saver(void)
     bool have_clk = clock_str(clk, sizeof(clk));
     bool big = have_clk && ui_cols() >= CLK_W + 4 && H >= CLK_H + 4;
     if (big) {
-        /* Hop to a fresh spot every 20 s (2-cell margin all around).
+        /* Hop to a fresh spot every 30 s (2-cell margin all around).
          * hop+1: cycle 0 must hash like any other, not pin the corner. */
         uint32_t hop = s.anim_frame / CLK_CYCLE;
         if (hop != hop_seen) {
@@ -1509,12 +1509,11 @@ static void render_saver(void)
         ck.colon_on = ((s.anim_frame / 5) & 1) == 0;      /* 1 Hz blink */
     }
 
-    /* Wash-away: over the cycle's last 2 s a rinse line sweeps down the
-     * block; rows above it lose their paint and let the rain pour through. */
-    int washed = 0;
-    uint32_t cyc = s.anim_frame % CLK_CYCLE;
-    if (big && cyc >= CLK_CYCLE - CLK_WASH)
-        washed = (int)((cyc - (CLK_CYCLE - CLK_WASH) + 1) * CLK_H / CLK_WASH);
+    /* Wash-off: the cycle's last 10 s heads scrub paint instead of laying
+     * it, and rain falls through the scrubbed cells. Ten seconds is enough
+     * for every head to visit every row (slowest columns wrap in 9 s), so
+     * the block is bare again before the hop. */
+    bool washing = big && s.anim_frame % CLK_CYCLE >= CLK_CYCLE - CLK_WASH;
 
     ui_colors(UI_FG, UI_BG);
     ui_clear();
@@ -1523,22 +1522,27 @@ static void render_saver(void)
     for (int c = 0; c < W; c++) {
         if (s.anim_frame % ((c % 3) + 1) == 0) {     /* three fall speeds */
             head[c] = (uint8_t)((head[c] + 1) % (unsigned)H);
-            /* Falling onto the top edge of a stroke throws up a splash. */
+            /* Falling onto the top edge of a stroke throws up a splash —
+             * not on a scrubbed-bare stroke, where rain just falls through. */
             if (big && head[c] > 0 && sp_ttl[c] == 0
-                && head[c] - ck.oy >= washed
                 && clk_mask(&ck, c, head[c])
-                && !clk_mask(&ck, c, head[c] - 1)) {
+                && !clk_mask(&ck, c, head[c] - 1)
+                && (!washing || glow[head[c] - ck.oy][c - ck.ox])) {
                 sp_ttl[c] = 3;
                 sp_row[c] = (uint8_t)(head[c] - 1);
             }
         }
         for (int k = 0; k < 6; k++) {                /* head + 5-cell trail */
             int y = (head[c] - k + H) % H;
-            if (big && y - ck.oy >= washed
-                && clk_mask(&ck, c, y)) {            /* rain wets a numeral */
-                if (k == 0)              /* a head glints, then stays wet */
-                    glow[y - ck.oy][c - ck.ox] = 4;
-                continue;
+            if (big && clk_mask(&ck, c, y)) {
+                uint8_t *gl = &glow[y - ck.oy][c - ck.ox];
+                if (!washing) {          /* rain paints the numerals...   */
+                    if (k == 0)          /* a head glints, then stays wet */
+                        *gl = 4;
+                    continue;
+                }
+                if (k == 0) *gl = 0;     /* ...then scrubs them off again */
+                if (*gl) continue;       /* remaining paint occludes rain */
             }
             ui_pen(k == 0 ? OVERLAY_COL_WHITE
                  : k <= 2 ? OVERLAY_COL_GREEN : OVERLAY_COL_BLUE);
@@ -1549,17 +1553,15 @@ static void render_saver(void)
     }
 
     /* The clock: invisible until the rain paints it. A struck cell glints,
-     * then settles at glow 1 — a wet blue pixel that stays lit. Unstruck
-     * cells draw nothing: the digits exist only as rain-holes until the
-     * storm finds them. Washed rows are skipped (their paint is gone); the
-     * row on the rinse line itself gleams cyan as the water sheets down. */
-    for (int y = washed; big && y < CLK_H; y++) {
+     * then settles at glow 1 — a wet blue pixel that stays lit until a
+     * washing head scrubs it back to zero. Unstruck cells draw nothing:
+     * the digits exist only as rain-holes until the storm finds them. */
+    for (int y = 0; big && y < CLK_H; y++) {
         for (int x = 0; x < CLK_W; x++) {
             uint8_t g = glow[y][x];
             if (!g || !clk_mask(&ck, ck.ox + x, ck.oy + y)) continue;
             if (g > 1) glow[y][x]--;
-            ui_pen(washed && y == washed ? OVERLAY_COL_CYAN
-                                         : OVERLAY_COL_BLUE);
+            ui_pen(OVERLAY_COL_BLUE);
             ui_putch(ck.ox + x, ck.oy + y,
                      g >= 3 ? UI_SHADE2 : UI_SHADE1, 0);
         }
