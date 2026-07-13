@@ -782,15 +782,28 @@ static esp_err_t post_delete(httpd_req_t *req)
 
 /* ------------------------------------------------------------- HTTP handlers */
 
+/* Must the browser user type the proof code? WEB mode only — in SoftAP the
+ * WPA2 join is the proof and the field is hidden+prefilled. The DEV Kconfig
+ * toggle prefills it in WEB mode too (the page then carries the code, so
+ * the gate is effectively off for anyone who can load the page). */
+bool ssh_import_pop_required(void)
+{
+#ifdef CONFIG_SSH_IMPORT_POP_DISABLED
+    return false;
+#else
+    return s_mode == SSH_IMPORT_WEB;
+#endif
+}
+
 static esp_err_t get_form(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
     httpd_resp_sendstr_chunk(req, FORM_HEAD);
-    if (s_mode == SSH_IMPORT_WEB) {
+    if (ssh_import_pop_required()) {
         httpd_resp_sendstr_chunk(req, FORM_POP_WEB);    /* visible, user types it */
     } else {
         httpd_resp_sendstr_chunk(req, "<input type=hidden name=pop value=\"");
-        httpd_resp_sendstr_chunk(req, s_pop);           /* prefilled: WPA2 gated */
+        httpd_resp_sendstr_chunk(req, s_pop);           /* prefilled */
         httpd_resp_sendstr_chunk(req, "\">");
     }
     httpd_resp_sendstr_chunk(req, FORM_TAIL);

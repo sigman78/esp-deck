@@ -24,6 +24,7 @@ const char *ssh_import_service_name(void)
     return s_mode == SSH_IMPORT_WEB ? "" : "DECK-SETUP-SIM";
 }
 const char *ssh_import_pop(void)  { return "1A2B3C4D"; }
+bool ssh_import_pop_required(void) { return s_mode == SSH_IMPORT_WEB; }
 const char *ssh_import_url(void)
 {
     return s_mode == SSH_IMPORT_WEB ? "http://192.168.1.158" : "http://192.168.4.1";

@@ -57,6 +57,11 @@ const char *ssh_import_service_name(void);
 /** Proof code shown on the device (SoftAP passphrase / form gate). */
 const char *ssh_import_pop(void);
 
+/** True when the browser user must TYPE the proof code (WEB mode with the
+ *  code enabled). False in SoftAP mode and under the DEV
+ *  SSH_IMPORT_POP_DISABLED Kconfig toggle (page carries it hidden). */
+bool ssh_import_pop_required(void);
+
 /** URL to open (e.g. "http://192.168.4.1" or "http://<lan-ip>"). */
 const char *ssh_import_url(void);
 

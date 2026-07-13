@@ -2065,11 +2065,18 @@ static void render_sshimport(uint64_t now)
         ui_printf(32, 6, OVERLAY_ATTR_INVERSE, " %s ", ssh_import_url());
         ui_pen(OVERLAY_COL_DEFAULT);
 
-        ui_pen(OVERLAY_COL_CYAN);  ui_puts(4, 8, "2", 0);
-        ui_pen(OVERLAY_COL_DEFAULT); ui_puts(6, 8, "Type this proof code in the form:", 0);
-        ui_pen(OVERLAY_COL_AMBER);
-        ui_printf(40, 8, OVERLAY_ATTR_INVERSE, " %s ", ssh_import_pop());
-        ui_pen(OVERLAY_COL_DEFAULT);
+        if (ssh_import_pop_required()) {
+            ui_pen(OVERLAY_COL_CYAN);  ui_puts(4, 8, "2", 0);
+            ui_pen(OVERLAY_COL_DEFAULT); ui_puts(6, 8, "Type this proof code in the form:", 0);
+            ui_pen(OVERLAY_COL_AMBER);
+            ui_printf(40, 8, OVERLAY_ATTR_INVERSE, " %s ", ssh_import_pop());
+            ui_pen(OVERLAY_COL_DEFAULT);
+        } else {
+            ui_pen(OVERLAY_COL_CYAN);  ui_puts(4, 8, "2", 0);
+            ui_pen(OVERLAY_COL_AMBER);
+            ui_puts(6, 8, "Proof code OFF (dev build) - page is open.", 0);
+            ui_pen(OVERLAY_COL_DEFAULT);
+        }
 
         ui_pen(OVERLAY_COL_CYAN);  ui_puts(4, 10, "3", 0);
         ui_pen(OVERLAY_COL_DEFAULT);
