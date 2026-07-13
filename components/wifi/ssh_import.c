@@ -23,6 +23,7 @@
 
 #include "qrcode.h"
 
+#include <stdarg.h>
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -363,6 +364,22 @@ static void json_escape(const char *src, char *dst, int cap)
     dst[o] = '\0';
 }
 
+/* Append into out[cap] at offset o, SATURATING at cap-1: snprintf returns
+ * the would-be length, so a raw "o += snprintf(...)" can push o past cap
+ * and turn the next call's (cap - o) into a huge size_t. Saturation keeps
+ * every call in bounds and the final overflow check catches truncation. */
+static int json_append(char *out, int cap, int o, const char *fmt, ...)
+{
+    if (o >= cap - 1) return cap - 1;
+    va_list ap;
+    va_start(ap, fmt);
+    int r = vsnprintf(out + o, (size_t)(cap - o), fmt, ap);
+    va_end(ap);
+    if (r < 0) return cap - 1;
+    o += r;
+    return o > cap - 1 ? cap - 1 : o;
+}
+
 static esp_err_t json_reply(httpd_req_t *req, const char *status,
                             const char *json)
 {
@@ -620,40 +637,39 @@ static esp_err_t post_list(httpd_req_t *req)
     }
 
     int o = 0;
-    o += snprintf(out + o, OUT_CAP - o, "{\"max\":%d,\"profiles\":[",
-                  IMPORT_PROFILE_MAX);
+    o = json_append(out, OUT_CAP, o, "{\"max\":%d,\"profiles\":[",
+                    IMPORT_PROFILE_MAX);
     char e1[80], e2[160];
     for (int i = 0; i < n && o < OUT_CAP - 2; i++) {
         json_escape(list[i].name, e1, sizeof(e1));
         json_escape(list[i].host, e2, sizeof(e2));
-        o += snprintf(out + o, OUT_CAP - o,
-                      "%s{\"name\":\"%s\",\"host\":\"%s\",\"port\":%u",
-                      i ? "," : "", e1, e2, (unsigned)list[i].port);
+        o = json_append(out, OUT_CAP, o,
+                        "%s{\"name\":\"%s\",\"host\":\"%s\",\"port\":%u",
+                        i ? "," : "", e1, e2, (unsigned)list[i].port);
         json_escape(list[i].user, e1, sizeof(e1));
         json_escape(list[i].key_id, e2, sizeof(e2));
-        o += snprintf(out + o, OUT_CAP - o,
-                      ",\"user\":\"%s\",\"auth\":\"%s\",\"key_id\":\"%s\"}",
-                      e1, list[i].auth == STORAGE_AUTH_KEY ? "key" : "password",
-                      list[i].auth == STORAGE_AUTH_KEY ? e2 : "");
+        o = json_append(out, OUT_CAP, o,
+                        ",\"user\":\"%s\",\"auth\":\"%s\",\"key_id\":\"%s\"}",
+                        e1, list[i].auth == STORAGE_AUTH_KEY ? "key" : "password",
+                        list[i].auth == STORAGE_AUTH_KEY ? e2 : "");
     }
     free(list);
 
-    o += snprintf(out + o, OUT_CAP - o, "],\"keys\":[");
+    o = json_append(out, OUT_CAP, o, "],\"keys\":[");
     int nk = 0;
     storage_list_keys(ids, IMPORT_KEY_LIST_MAX, &nk);
     for (int i = 0; i < nk && o < OUT_CAP - 2; i++) {
         char type[24], comment[64];
         storage_key_info(ids[i], type, sizeof(type), comment, sizeof(comment));
         json_escape(ids[i], e1, sizeof(e1));
-        o += snprintf(out + o, OUT_CAP - o, "%s{\"id\":\"%s\"",
-                      i ? "," : "", e1);
+        o = json_append(out, OUT_CAP, o, "%s{\"id\":\"%s\"", i ? "," : "", e1);
         json_escape(type, e1, sizeof(e1));
         json_escape(comment, e2, sizeof(e2));
-        o += snprintf(out + o, OUT_CAP - o, ",\"type\":\"%s\",\"comment\":\"%s\"}",
-                      e1, e2);
+        o = json_append(out, OUT_CAP, o,
+                        ",\"type\":\"%s\",\"comment\":\"%s\"}", e1, e2);
     }
     free(ids);
-    o += snprintf(out + o, OUT_CAP - o, "]}");
+    o = json_append(out, OUT_CAP, o, "]}");
 
     esp_err_t e;
     if (o >= OUT_CAP - 2) {           /* truncated mid-structure: bail out */
