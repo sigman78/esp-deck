@@ -2109,18 +2109,27 @@ static void render_sshimport(uint64_t now)
         draw_import_qr("scan to join");
     }
 
-    /* Status: running import count / last name, or a waiting spinner. */
+    /* Status: running import/delete tally + last name, or a waiting spinner. */
     int cnt = ssh_import_count();
+    int del = ssh_import_deleted();
     const char *err = ssh_import_err();
     if (err && err[0]) {
         ui_pen(OVERLAY_COL_RED);
         ui_putch(4, 15, UI_DIAMOND, 0);
         ui_printf(6, 15, 0, "rejected: %s", err);
         ui_pen(OVERLAY_COL_DEFAULT);
-    } else if (cnt > 0) {
+    } else if (cnt > 0 || del > 0) {
         ui_pen(OVERLAY_COL_GREEN);
         ui_putch(4, 15, UI_LED_ON, 0);
-        ui_printf(6, 15, 0, "imported '%s'  (%d saved)", s.import_last, cnt);
+        if (del > 0 && cnt > 0)
+            ui_printf(6, 15, 0, "last: '%s'  (%d saved, %d removed)",
+                      s.import_last, cnt, del);
+        else if (del > 0)
+            ui_printf(6, 15, 0, "removed '%s'  (%d removed)",
+                      s.import_last, del);
+        else
+            ui_printf(6, 15, 0, "imported '%s'  (%d saved)",
+                      s.import_last, cnt);
         ui_pen(OVERLAY_COL_DEFAULT);
     } else {
         ui_pen(OVERLAY_COL_GREEN);
@@ -2137,8 +2146,8 @@ static void render_sshimport(uint64_t now)
     ui_printf(6, 17, 0, "RAM  %s", ram);
     ui_pen(OVERLAY_COL_DEFAULT);
 
-    draw_footer(cnt > 0 ? "tap or Esc when done - profiles are saved"
-                        : "tap or Esc to cancel");
+    draw_footer(cnt > 0 || del > 0 ? "tap or Esc when done - changes are saved"
+                                   : "tap or Esc to cancel");
     ui_no_cursor();
     ui_present();
 }
@@ -2166,12 +2175,15 @@ static void enter_sshimport(uint64_t now, ssh_import_mode_t mode)
 static void exit_sshimport(uint64_t now)
 {
     int cnt = ssh_import_count();
+    int del = ssh_import_deleted();
     bool softap = (ssh_import_mode() == SSH_IMPORT_SOFTAP);
     ssh_import_stop();
     if (softap) kick_wifi();   /* resume STA auto-reconnect (web never parked) */
     load_profiles();           /* surface freshly imported profiles on HOME */
-    if (cnt > 0) toast(now, "imported %d profile(s)", cnt);
-    else         toast(now, "import cancelled");
+    if (cnt > 0 && del > 0) toast(now, "%d imported, %d removed", cnt, del);
+    else if (cnt > 0)       toast(now, "imported %d profile(s)", cnt);
+    else if (del > 0)       toast(now, "removed %d profile(s)", del);
+    else                    toast(now, "import cancelled");
     enter_home(now);
 }
 
@@ -2542,6 +2554,13 @@ static void hostkey_trust_and_connect(uint64_t now)
  * clean EOF — a plain logout stays calm and short). */
 static void session_dropped(uint64_t now)
 {
+    /* A drop can yank the user out of ANY in-session menu screen — including
+     * a mid-drag reorder. Discard the uncommitted in-RAM permutation now, or
+     * a later delete_profile_at() would silently persist it. */
+    if (s.menu_screen == MS_REORDER && s.reorder_grab >= 0) {
+        s.reorder_grab = -1;
+        load_profiles();
+    }
     uint32_t dur = (uint32_t)((now - s.session_start) / 1000);
     const char *why = ssh_client_last_error();
     display_bell();
@@ -2891,12 +2910,13 @@ void cyberdeck_app_tick(uint64_t now)
         break;
 
     case ST_SSHIMPORT:
-        /* A submission lands on the httpd task; re-render on its count bump so
-         * the confirmation appears immediately, plus the usual anim tick.
-         * Snapshot the name under the module's lock (via the getter) once per
-         * bump so the render never samples a half-written string. */
-        if (ssh_import_count() != s.import_seen) {
-            s.import_seen = ssh_import_count();
+        /* A submission lands on the httpd task; re-render on its activity
+         * bump (imports + web deletes) so the confirmation appears at once,
+         * plus the usual anim tick. Snapshot the name under the module's
+         * lock (via the getter) once per bump so the render never samples a
+         * half-written string. */
+        if (ssh_import_count() + ssh_import_deleted() != s.import_seen) {
+            s.import_seen = ssh_import_count() + ssh_import_deleted();
             snprintf(s.import_last, sizeof(s.import_last), "%s", ssh_import_last());
             s.next_anim   = now + ANIM_PERIOD_MS;
             render_sshimport(now);

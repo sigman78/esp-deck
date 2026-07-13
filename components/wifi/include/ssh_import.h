@@ -63,7 +63,10 @@ const char *ssh_import_url(void);
 /** Number of profiles imported since ssh_import_start(). */
 int ssh_import_count(void);
 
-/** Name of the most recently imported profile ("" until the first). */
+/** Number of profiles deleted via the web manager since ssh_import_start(). */
+int ssh_import_deleted(void);
+
+/** Name of the most recently imported OR deleted profile ("" until one). */
 const char *ssh_import_last(void);
 
 /** Last rejection reason ("" if none / cleared by a later success). */

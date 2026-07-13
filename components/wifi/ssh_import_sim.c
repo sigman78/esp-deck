@@ -30,7 +30,8 @@ const char *ssh_import_url(void)
 }
 const char *ssh_import_last(void) { return ""; }
 const char *ssh_import_err(void)  { return ""; }
-int         ssh_import_count(void) { return 0; }
+int         ssh_import_count(void)   { return 0; }
+int         ssh_import_deleted(void) { return 0; }
 
 int  ssh_import_qr_size(void)           { return 0; }
 bool ssh_import_qr_module(int x, int y) { (void)x; (void)y; return false; }

@@ -9,6 +9,7 @@
 
 #include "storage.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -349,6 +350,20 @@ esp_err_t storage_wifi_save(const wifi_profile_t *profiles, int count)
 
 #define KNOWN_HOSTS_MAX 16
 
+/* In-RAM copy of known_hosts.ini for read-modify-write. ~3.6 KB — heap, not
+ * stack: known_host_set/delete are reachable from the 6 KB httpd worker task
+ * (web profile manager), which a stack copy of this size would overflow. */
+typedef struct {
+    char keys[KNOWN_HOSTS_MAX][96];
+    char vals[KNOWN_HOSTS_MAX][128];
+} known_hosts_t;
+
+static known_hosts_t *known_hosts_alloc(void)
+{
+    return heap_caps_malloc(sizeof(known_hosts_t),
+                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+}
+
 static void known_hosts_path(char *buf, size_t bufsz)
 {
     snprintf(buf, bufsz, "%s/known_hosts.ini", storage_platform_mount_point());
@@ -392,17 +407,17 @@ esp_err_t storage_known_host_set(const char *host, uint16_t port,
     known_hosts_path(path, sizeof(path));
 
     /* Read existing entries so we can replace in place */
-    char keys[KNOWN_HOSTS_MAX][96];
-    char vals[KNOWN_HOSTS_MAX][128];
-    int  n = 0;
+    known_hosts_t *kh = known_hosts_alloc();
+    if (!kh) return ESP_ERR_NO_MEM;
+    int n = 0;
 
     FILE *f = fopen(path, "r");
     if (f) {
         char line[256];
         while (fgets(line, sizeof(line), f) && n < KNOWN_HOSTS_MAX) {
             rtrim(line);
-            if (!parse_kv(line, keys[n], sizeof(keys[n]),
-                          vals[n], sizeof(vals[n]))) continue;
+            if (!parse_kv(line, kh->keys[n], sizeof(kh->keys[n]),
+                          kh->vals[n], sizeof(kh->vals[n]))) continue;
             n++;
         }
         fclose(f);
@@ -413,25 +428,28 @@ esp_err_t storage_known_host_set(const char *host, uint16_t port,
 
     int idx = -1;
     for (int i = 0; i < n; i++) {
-        if (strcmp(keys[i], want) == 0) { idx = i; break; }
+        if (strcmp(kh->keys[i], want) == 0) { idx = i; break; }
     }
     if (idx < 0) {
         if (n >= KNOWN_HOSTS_MAX) {
             /* Drop the first (oldest) entry */
-            memmove(keys[0], keys[1], sizeof(keys[0]) * (KNOWN_HOSTS_MAX - 1));
-            memmove(vals[0], vals[1], sizeof(vals[0]) * (KNOWN_HOSTS_MAX - 1));
+            memmove(kh->keys[0], kh->keys[1],
+                    sizeof(kh->keys[0]) * (KNOWN_HOSTS_MAX - 1));
+            memmove(kh->vals[0], kh->vals[1],
+                    sizeof(kh->vals[0]) * (KNOWN_HOSTS_MAX - 1));
             n = KNOWN_HOSTS_MAX - 1;
         }
         idx = n++;
     }
-    snprintf(keys[idx], sizeof(keys[idx]), "%s", want);
-    snprintf(vals[idx], sizeof(vals[idx]), "%s", fp_hex);
+    snprintf(kh->keys[idx], sizeof(kh->keys[idx]), "%s", want);
+    snprintf(kh->vals[idx], sizeof(kh->vals[idx]), "%s", fp_hex);
 
     atomic_file_t af;
     f = atomic_open(&af, path);
-    if (!f) return ESP_FAIL;
+    if (!f) { free(kh); return ESP_FAIL; }
     for (int i = 0; i < n; i++)
-        fprintf(f, "%s=%s\n", keys[i], vals[i]);
+        fprintf(f, "%s=%s\n", kh->keys[i], kh->vals[i]);
+    free(kh);
     if (atomic_close(&af) != ESP_OK) return ESP_FAIL;
 
     ESP_LOGI(TAG, "Pinned host key for %s", want);
@@ -445,17 +463,18 @@ esp_err_t storage_known_host_delete(const char *host, uint16_t port)
     char path[128];
     known_hosts_path(path, sizeof(path));
 
-    char keys[KNOWN_HOSTS_MAX][96];
-    char vals[KNOWN_HOSTS_MAX][128];
-    int  n = 0;
-
     FILE *f = fopen(path, "r");
     if (!f) return ESP_ERR_NOT_FOUND;
+
+    known_hosts_t *kh = known_hosts_alloc();
+    if (!kh) { fclose(f); return ESP_ERR_NO_MEM; }
+    int n = 0;
+
     char line[256];
     while (fgets(line, sizeof(line), f) && n < KNOWN_HOSTS_MAX) {
         rtrim(line);
-        if (!parse_kv(line, keys[n], sizeof(keys[n]),
-                      vals[n], sizeof(vals[n]))) continue;
+        if (!parse_kv(line, kh->keys[n], sizeof(kh->keys[n]),
+                      kh->vals[n], sizeof(kh->vals[n]))) continue;
         n++;
     }
     fclose(f);
@@ -465,20 +484,21 @@ esp_err_t storage_known_host_delete(const char *host, uint16_t port)
 
     int w = 0;
     for (int i = 0; i < n; i++) {
-        if (strcmp(keys[i], want) == 0) continue;
+        if (strcmp(kh->keys[i], want) == 0) continue;
         if (w != i) {
-            memcpy(keys[w], keys[i], sizeof(keys[0]));
-            memcpy(vals[w], vals[i], sizeof(vals[0]));
+            memcpy(kh->keys[w], kh->keys[i], sizeof(kh->keys[0]));
+            memcpy(kh->vals[w], kh->vals[i], sizeof(kh->vals[0]));
         }
         w++;
     }
-    if (w == n) return ESP_ERR_NOT_FOUND;
+    if (w == n) { free(kh); return ESP_ERR_NOT_FOUND; }
 
     atomic_file_t af;
     f = atomic_open(&af, path);
-    if (!f) return ESP_FAIL;
+    if (!f) { free(kh); return ESP_FAIL; }
     for (int i = 0; i < w; i++)
-        fprintf(f, "%s=%s\n", keys[i], vals[i]);
+        fprintf(f, "%s=%s\n", kh->keys[i], kh->vals[i]);
+    free(kh);
     if (atomic_close(&af) != ESP_OK) return ESP_FAIL;
 
     ESP_LOGI(TAG, "Unpinned host key for %s", want);
@@ -652,24 +672,31 @@ esp_err_t storage_key_info(const char *key_id,
     FILE *f = fopen(path, "r");
     if (!f) return ESP_ERR_NOT_FOUND;
 
-    char line[256];
-    char *got = fgets(line, sizeof(line), f);
+    /* Heap, not stack (httpd task calls this), and big enough that a
+     * 4096-bit RSA base64 blob (~730 chars) can't swallow the comment. */
+    enum { PUB_LINE_MAX = 2048 };
+    char *line = heap_caps_malloc(PUB_LINE_MAX,
+                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!line) { fclose(f); return ESP_ERR_NO_MEM; }
+    char *got = fgets(line, PUB_LINE_MAX, f);
     fclose(f);
-    if (!got) return ESP_ERR_NOT_FOUND;
+    if (!got) { free(line); return ESP_ERR_NOT_FOUND; }
     rtrim(line);
 
-    /* "<type> <base64> [comment...]" */
+    /* "<type> <base64> [comment...]" — tolerate runs of spaces. */
     char *sp = strchr(line, ' ');
     if (sp) *sp = '\0';
     if (type && type_len) snprintf(type, type_len, "%s", line);
     if (sp && comment && comment_len) {
         char *b64 = sp + 1;
+        while (*b64 == ' ') b64++;
         char *sp2 = strchr(b64, ' ');
         if (sp2) {
             while (*sp2 == ' ') sp2++;
             snprintf(comment, comment_len, "%s", sp2);
         }
     }
+    free(line);
     return ESP_OK;
 }
 

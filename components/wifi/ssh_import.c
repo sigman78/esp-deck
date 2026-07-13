@@ -20,6 +20,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #include "qrcode.h"
 
@@ -42,7 +43,9 @@ static char s_pop[16]     = "";
 static char s_url[40]     = "";
 static char s_last[32]    = "";
 static char s_err[64]     = "";
-static volatile int s_count = 0;
+static volatile int s_count   = 0;
+static volatile int s_deleted = 0;
+static volatile int s_pop_fails = 0;
 
 static httpd_handle_t  s_httpd    = NULL;
 static esp_netif_t    *s_ap_netif = NULL;
@@ -302,6 +305,32 @@ static void set_err(const char *msg)
     ESP_LOGW(TAG, "reject: %s", msg);
 }
 
+/* Gate every mutating/reading endpoint on the session code. The code is
+ * only 32 bits, so misses back off linearly and POP_FAIL_LOCKOUT misses
+ * brick the session (even a correct code is refused) until the user
+ * reopens the import modal for a fresh code. Compare is constant-time-ish
+ * so timing doesn't leak a prefix match. */
+#define POP_FAIL_LOCKOUT 8
+
+static bool check_pop(const char *pop)
+{
+    if (s_pop_fails >= POP_FAIL_LOCKOUT) {
+        ESP_LOGW(TAG, "pop locked out (%d misses)", (int)s_pop_fails);
+        return false;
+    }
+    size_t lp = strlen(pop), ls = strlen(s_pop);
+    unsigned diff = (unsigned)(lp ^ ls);
+    for (size_t i = 0; i < ls; i++)
+        diff |= (unsigned)((i < lp ? pop[i] : 0) ^ s_pop[i]);
+    if (diff) {
+        s_pop_fails++;
+        vTaskDelay(pdMS_TO_TICKS(250u * (unsigned)s_pop_fails));
+        return false;
+    }
+    s_pop_fails = 0;
+    return true;
+}
+
 /* Write keys/<id>.pub directly (storage_set_key only handles .pem). */
 static void write_pubkey(const char *key_id, const char *pub, int len)
 {
@@ -410,7 +439,7 @@ static esp_err_t handle_save(httpd_req_t *req, char *body)
     char password[128], passphrase[128], keyid[STORAGE_KEY_ID_LEN];
 
     form_field(body, "pop", pop, sizeof(pop));
-    if (strcmp(pop, s_pop) != 0) {
+    if (!check_pop(pop)) {
         set_err("bad proof code");
         httpd_resp_set_status(req, "403 Forbidden");
         return ok_page(req, "&#10007; Rejected", "Proof code did not match.");
@@ -510,13 +539,19 @@ static esp_err_t handle_save(httpd_req_t *req, char *body)
 
         if (keyid[0]) {
             /* Reference an already-stored key. The dropdown hides the paste
-             * box, so a stale pasted blob must not win over the selection. */
-            char ids[IMPORT_KEY_LIST_MAX][STORAGE_KEY_ID_LEN];
-            int nk = 0;
-            storage_list_keys(ids, IMPORT_KEY_LIST_MAX, &nk);
+             * box, so a stale pasted blob must not win over the selection.
+             * (ids on the heap — the httpd worker stack is only 6144 B.) */
+            char (*ids)[STORAGE_KEY_ID_LEN] =
+                heap_caps_malloc(IMPORT_KEY_LIST_MAX * STORAGE_KEY_ID_LEN,
+                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
             bool known = false;
-            for (int i = 0; i < nk; i++)
-                if (strcmp(ids[i], keyid) == 0) { known = true; break; }
+            if (ids) {
+                int nk = 0;
+                storage_list_keys(ids, IMPORT_KEY_LIST_MAX, &nk);
+                for (int i = 0; i < nk; i++)
+                    if (strcmp(ids[i], keyid) == 0) { known = true; break; }
+                free(ids);
+            }
             free(key); free(pubkey);
             if (!known) {
                 free(list);
@@ -621,7 +656,7 @@ static esp_err_t post_list(httpd_req_t *req)
         return json_reply(req, "400 Bad Request", "{\"ok\":false}");
     char pop[16];
     form_field(body, "pop", pop, sizeof(pop));
-    if (strcmp(pop, s_pop) != 0)
+    if (!check_pop(pop))
         return json_reply(req, "403 Forbidden", "{\"ok\":false}");
 
     enum { OUT_CAP = 8192 };
@@ -691,7 +726,7 @@ static esp_err_t post_delete(httpd_req_t *req)
         return json_reply(req, "400 Bad Request", "{\"ok\":false}");
     char pop[16], name[40];
     form_field(body, "pop", pop, sizeof(pop));
-    if (strcmp(pop, s_pop) != 0) {
+    if (!check_pop(pop)) {
         set_err("bad proof code");
         return json_reply(req, "403 Forbidden", "{\"ok\":false}");
     }
@@ -736,6 +771,11 @@ static esp_err_t post_delete(httpd_req_t *req)
         set_err("failed to save profiles");
         return json_reply(req, "500 Internal Server Error", "{\"ok\":false}");
     }
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_err[0] = '\0';
+    snprintf(s_last, sizeof(s_last), "%s", name);
+    if (s_lock) xSemaphoreGive(s_lock);
+    s_deleted++;                                 /* publish after s_last is set */
     ESP_LOGI(TAG, "deleted profile '%s' via web", name);
     return json_reply(req, "200 OK", "{\"ok\":true}");
 }
@@ -881,7 +921,9 @@ esp_err_t ssh_import_start(ssh_import_mode_t mode)
 
     s_mode = mode;
     s_last[0] = s_err[0] = '\0';
-    s_count = 0;
+    s_count     = 0;
+    s_deleted   = 0;
+    s_pop_fails = 0;
     gen_code();
 
     esp_err_t e = (mode == SSH_IMPORT_WEB) ? start_web() : start_softap();
@@ -924,6 +966,7 @@ const char *ssh_import_service_name(void) { return s_service; }
 const char *ssh_import_pop(void)          { return s_pop; }
 const char *ssh_import_url(void)          { return s_url; }
 int         ssh_import_count(void)        { return s_count; }
+int         ssh_import_deleted(void)      { return s_deleted; }
 
 /* Status strings are written by the httpd task under s_lock; copy under the
  * same lock into a small static so the render task never reads a torn string. */
