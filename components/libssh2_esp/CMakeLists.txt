@@ -54,7 +54,10 @@ if(BUILD_SIMULATOR)
 
     add_library(libssh2_esp STATIC ${_srcs})
     target_compile_definitions(libssh2_esp PRIVATE
-        LIBSSH2_WINCNG)   # no HAVE_CONFIG_H → libssh2_setup.h uses its _WIN32 branch
+        LIBSSH2_WINCNG    # no HAVE_CONFIG_H → libssh2_setup.h uses its _WIN32 branch
+        LIBSSH2_ECDSA_WINCNG)  # ECDSA hostkeys + ecdh-sha2-nistp* KEX; without it
+                               # WinCNG only has classic DH, which hardened servers
+                               # (kex: curve25519/ecdh only) no longer offer
     target_include_directories(libssh2_esp PUBLIC
         ${LIBSSH2_DIR}/src
         ${LIBSSH2_DIR}/include
