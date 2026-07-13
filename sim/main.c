@@ -16,6 +16,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "cyberdeck_app.h"
 #include "display.h"
@@ -156,6 +159,12 @@ int main(int argc, char *argv[])
     int         port = (argc > 2) ? atoi(argv[2]) : 22;
     const char *user = (argc > 3) ? argv[3] : "user";
     const char *pass = (argc > 4) ? argv[4] : "";
+
+#ifdef _WIN32
+    /* Log strings are UTF-8 (em dashes etc.); the console default is the
+     * OEM codepage, which renders them as mojibake ("ΓÇö"). */
+    SetConsoleOutputCP(CP_UTF8);
+#endif
 
     if (storage_init() != ESP_OK) {
         fprintf(stderr, "storage_init() failed\n");
