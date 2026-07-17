@@ -334,9 +334,17 @@ static IRAM_ATTR void build_row_cache(int cr, int scan_on)
 
         if (ov_cp != 0) {
             if (ov_attrs & OVERLAY_ATTR_INVERSE) {
-                /* Solid bar: muted accent behind dark text. */
+                /* Solid bar: muted accent background. Colored bars (1-6)
+                 * carry LIGHT text — a pale 3/4-to-white tint of their own
+                 * hue; focus (BRIGHT) washes the bar pastel and flips the
+                 * text dark. Gray/white surfaces (0,7) always keep dark
+                 * text: QR modules must stay dark-on-white. */
                 bg = s_overlay_bar[ov_color];
-                fg = s_overlay_bg;
+                if (ov_color >= 1 && ov_color <= 6 &&
+                        !(ov_attrs & OVERLAY_ATTR_BRIGHT))
+                    fg = (color_t)(((bg >> 2) & 0x39E7) + 0x7BEF + 0x39E7);
+                else
+                    fg = s_overlay_bg;
             } else {
                 fg = ov_color ? s_overlay_pal[ov_color] : s_overlay_fg;
                 bg = s_overlay_bg;
