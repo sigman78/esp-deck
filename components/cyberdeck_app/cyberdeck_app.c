@@ -767,7 +767,7 @@ static void render_home(void)
                         "tap or long-press", sel);
                 break;
             case HX_CONFIG:
-                ui_pen(OVERLAY_COL_BLUE);
+                ui_pen(OVERLAY_COL_CYAN);
                 ui_tile(cx, cy, g.tw, g.th, "Configuration",
                         "wifi / profiles / more", sel);
                 break;
@@ -1389,33 +1389,39 @@ typedef enum {
 
 #define NELEM(a) ((int)(sizeof(a) / sizeof((a)[0])))
 
+/* Menu color law — one color per KIND of item, not per item (a page of
+ * many-colored bars reads as motley):
+ *   CYAN  = normal action / navigation      GREEN = go / primary
+ *   RED   = destructive                     AMBER = caution
+ *   BLUE  = Back / Cancel (safe exit)
+ * MAGENTA stays reserved for the title lozenge. */
 static const char *main_items[]     = { "Resume session", "Disconnect", "Configuration >" };
-static const uint8_t main_cols[]    = { OVERLAY_COL_GREEN, OVERLAY_COL_AMBER, OVERLAY_COL_BLUE };
+static const uint8_t main_cols[]    = { OVERLAY_COL_GREEN, OVERLAY_COL_AMBER, OVERLAY_COL_CYAN };
 
 static const char *config_items[]   = { "Profiles >", "WiFi >", "Keyboard >", "Effects >",
                                         "System >", "Back" };
-static const uint8_t config_cols[]  = { OVERLAY_COL_GREEN, OVERLAY_COL_CYAN,
-                                        OVERLAY_COL_MAGENTA, OVERLAY_COL_CYAN,
-                                        OVERLAY_COL_AMBER, OVERLAY_COL_BLUE };
+static const uint8_t config_cols[]  = { OVERLAY_COL_CYAN, OVERLAY_COL_CYAN,
+                                        OVERLAY_COL_CYAN, OVERLAY_COL_CYAN,
+                                        OVERLAY_COL_CYAN, OVERLAY_COL_BLUE };
 #define CFG_KEYBOARD 2   /* index of "Keyboard >" (needs BLE) */
 
 static const char *profiles_items[] = { "Add (type here)", "Edit", "Reorder",
                                         "Delete", "Import >", "Back" };
-static const uint8_t profiles_cols[]= { OVERLAY_COL_GREEN, OVERLAY_COL_CYAN,
-                                        OVERLAY_COL_MAGENTA, OVERLAY_COL_RED,
-                                        OVERLAY_COL_AMBER, OVERLAY_COL_BLUE };
+static const uint8_t profiles_cols[]= { OVERLAY_COL_CYAN, OVERLAY_COL_CYAN,
+                                        OVERLAY_COL_CYAN, OVERLAY_COL_RED,
+                                        OVERLAY_COL_CYAN, OVERLAY_COL_BLUE };
 
 static const char *import_items[]   = { "SoftAP (phone)", "Web (PC)", "Back" };
 static const uint8_t import_cols[]  = { OVERLAY_COL_CYAN, OVERLAY_COL_CYAN, OVERLAY_COL_BLUE };
 
 static const char *wifi_items[]     = { "Reconnect", "Add network (phone)", "Back" };
-static const uint8_t wifi_cols[]    = { OVERLAY_COL_GREEN, OVERLAY_COL_CYAN, OVERLAY_COL_BLUE };
+static const uint8_t wifi_cols[]    = { OVERLAY_COL_CYAN, OVERLAY_COL_CYAN, OVERLAY_COL_BLUE };
 
 static const char *kbd_items[]      = { "Pair keyboard", "Forget bonds", "Back" };
-static const uint8_t kbd_cols[]     = { OVERLAY_COL_GREEN, OVERLAY_COL_RED, OVERLAY_COL_BLUE };
+static const uint8_t kbd_cols[]     = { OVERLAY_COL_CYAN, OVERLAY_COL_RED, OVERLAY_COL_BLUE };
 
 static const char *system_items[]   = { "Clear host keys", "Factory reset", "Back" };
-static const uint8_t system_cols[]  = { OVERLAY_COL_AMBER, OVERLAY_COL_RED, OVERLAY_COL_BLUE };
+static const uint8_t system_cols[]  = { OVERLAY_COL_RED, OVERLAY_COL_RED, OVERLAY_COL_BLUE };
 
 typedef struct {
     const char        *title;
@@ -1690,7 +1696,6 @@ static void render_menu(void)
         else if (picker)  col = i >= s.stored_count ? OVERLAY_COL_BLUE
                               : sc == MS_DELPROFILE ? OVERLAY_COL_AMBER
                               : grabbed             ? OVERLAY_COL_GREEN
-                              : sc == MS_REORDER    ? OVERLAY_COL_MAGENTA
                                                     : OVERLAY_COL_CYAN;
         else if (fxpage)  col = i == g.count - 1 ? OVERLAY_COL_BLUE
                                                  : OVERLAY_COL_CYAN;
