@@ -380,7 +380,7 @@ static IRAM_ATTR void build_row_cache(int cr, int scan_on)
  * falls inside this band (sub-row bands render the tag across two calls). */
 static IRAM_ATTR void draw_bell_tag(color_t *dst, int y0, int nrows)
 {
-    static const uint16_t bell[16] = {
+    static DRAM_ATTR const uint16_t bell[16] = {
         0x0180, 0x0180, 0x03C0, 0x07E0, 0x07E0, 0x0FF0, 0x0FF0, 0x1FF8,
         0x1FF8, 0x3FFC, 0x3FFC, 0x7FFE, 0x7FFE, 0x0000, 0x0180, 0x0180,
     };
@@ -507,7 +507,11 @@ void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
 
     const int band_y0 = start_scan;
     if (clipped && (band_y0 >= wv1 || band_y0 + num_scans <= wv0)) {
-        /* Band fully hidden: black + any edge lines that fall in it. */
+        /* Band fully hidden: black + any edge lines that fall in it.
+         * Invalidate the row cache: a later band of this row (or of a frame
+         * long after — the uint8 frame stamp can wrap) must never reuse a
+         * cache this path skipped rebuilding. */
+        s_cc_row = -1;
         uint32_t *p = (uint32_t *)dst;
         int words = n_bytes >> 2;
         for (int i = 0; i < words; i++) p[i] = 0;
@@ -661,12 +665,15 @@ void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
     if (g_fx_static_left > 0 && num_scans > 0) {
         int nl = g_fx_cfg.static_lines;
         if (nl > 4) nl = 4;
-        uint32_t h = ((uint32_t)char_row * 2654435761u)
+        /* Seed by BAND (not char row): with sub-row bands a per-row seed
+         * would draw the same snow lines in both halves of the row, and the
+         * pairing reads as structure instead of noise. */
+        uint32_t h = ((uint32_t)(start_scan / BOUNCE_BUFFER_HEIGHT) * 2654435761u)
                    ^ ((uint32_t)g_fx_frame * 2246822519u);
         for (int k = 0; k < nl; k++) {
             h = h * 1664525u + 1013904223u;
-            int n = (int)((h >> 27) & 15);
-            if (n >= num_scans) n = num_scans - 1;
+            /* Unbiased 0..num_scans-1 from 4 hash bits (scale, not clamp). */
+            int n = (int)((((h >> 27) & 15u) * (unsigned)num_scans) >> 4);
             uint32_t *p = (uint32_t *)(dst_base + (unsigned)n * DISPLAY_WIDTH);
             uint32_t r = h;
             for (int i = 0; i < DISPLAY_WIDTH / 2; i += 4) {
