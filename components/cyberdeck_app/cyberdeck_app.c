@@ -47,6 +47,7 @@ typedef enum {
     ST_HOSTKEY,     /* trust-on-first-use fingerprint prompt (modal) */
     ST_CONNECTING,  /* pending/armed SSH connect                     */
     ST_SESSION,     /* bytes flow to/from SSH                        */
+    ST_POWEROFF,    /* CRT collapse playing over the dead session    */
     ST_MENU,        /* in-session overlay menu                       */
     ST_WIFIPROV,    /* SoftAP WiFi onboarding (modal)                */
     ST_PROFILE,     /* on-device profile editor (modal)              */
@@ -179,6 +180,7 @@ static struct {
     uint64_t next_home_refresh;
     uint32_t anim_frame;            /* advances ~10 fps for subtle animation */
     uint64_t next_anim;             /* next animated re-render (PAIRING)      */
+    uint64_t poweroff_until;        /* ST_POWEROFF: when the collapse ends    */
     bool     halted;
 } s;
 
@@ -2509,6 +2511,26 @@ static void commit_reorder(uint64_t now)
     load_profiles();
 }
 
+/* Session teardown with the CRT power-off done RIGHT: hide the overlay so
+ * the collapse plays over the last live terminal frame (not over HOME/menu
+ * chrome), and only enter HOME once the animation has finished. Toasts set
+ * by the caller survive — they are state, rendered when HOME appears.
+ * With the collapse effect disabled this is just enter_home(). */
+static void enter_home_after_collapse(uint64_t now)
+{
+    display_fx_cfg_t c;
+    display_fx_get(&c);
+    if (!c.collapse) {
+        enter_home(now);
+        return;
+    }
+    ui_hide();
+    ui_no_cursor();
+    display_fx_collapse();
+    s.state          = ST_POWEROFF;
+    s.poweroff_until = now + (uint64_t)c.collapse_frames * 17 + 80;
+}
+
 static void menu_activate(uint64_t now)
 {
     const int sc  = s.menu_screen;
@@ -2521,9 +2543,8 @@ static void menu_activate(uint64_t now)
         switch (sel) {
         case 0: s.state = ST_SESSION; ui_hide();          return;  /* resume  */
         case 1:                                                    /* discon. */
-            display_fx_collapse();   /* deliberate power-off: CRT collapse */
             ssh_client_disconnect();
-            enter_home(now);
+            enter_home_after_collapse(now);   /* deliberate CRT power-off */
             return;
         case 2: menu_goto(MS_CONFIG);                     return;
         }
@@ -2746,14 +2767,13 @@ static void session_dropped(uint64_t now)
     uint32_t dur = (uint32_t)((now - s.session_start) / 1000);
     const char *why = ssh_client_last_error();
     display_bell();
-    display_fx_collapse();       /* CRT power-off */
     if (why[0]) display_fx_static();   /* transport error: signal-loss snow */
     if (why[0])
         toast_for(now, ERR_TOAST_MS, "NO CARRIER (%02u:%02u) - %.36s",
                   dur / 60, dur % 60, why);
     else
         toast(now, "NO CARRIER (%02u:%02u)", dur / 60, dur % 60);
-    enter_home(now);
+    enter_home_after_collapse(now);    /* CRT power-off over the dead screen */
 }
 
 static void enter_session(uint64_t now)
@@ -2943,6 +2963,11 @@ void cyberdeck_app_tick(uint64_t now)
             s.next_anim = now + ANIM_PERIOD_MS;
             render_boot(now);
         }
+        break;
+
+    case ST_POWEROFF:
+        /* Collapse finished (or was cut short by input) — bring HOME up. */
+        if (now >= s.poweroff_until) enter_home(now);
         break;
 
     case ST_HOME:
@@ -3179,6 +3204,11 @@ void cyberdeck_app_handle_input(const cyberdeck_input_t *ev, uint64_t now)
         if (k != K_NONE || ev->type == CYBERDECK_INPUT_TAP ||
             ev->type == CYBERDECK_INPUT_LONG_PRESS)
             enter_home(now);
+        break;
+
+    case ST_POWEROFF:
+        /* Any input skips the rest of the power-off animation. */
+        enter_home(now);
         break;
 
     case ST_HOME:
