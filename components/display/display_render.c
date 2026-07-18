@@ -470,7 +470,7 @@ static DRAM_ATTR const uint32_t s_fx_noise[16] = {
  * n_bytes  — byte count of the band
  *            (= DISPLAY_WIDTH × BOUNCE_BUFFER_HEIGHT × sizeof(color_t))
  */
-void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
+static IRAM_ATTR void render_chunk_body(color_t *dst, int pos_px, int n_bytes)
 {
     if (!dst) return;
 
@@ -706,6 +706,56 @@ void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
     }
 
     /* ------------------------------------------------------------------
+     * CRT line wobble — a single ~16-scanline S-wiggle sweeps down the
+     * screen (~2.5 lines/frame → a visible pass in ~5 s, then a short
+     * off-screen rest). The vertical envelope is one FULL signed sine:
+     * the top half bulges one way, the bottom half the other, crossing
+     * zero smoothly in the middle. Bulge depth additionally follows the
+     * temporal sine (one cycle per sweep, from the LUT). At most 16
+     * shifted lines per FRAME — negligible ISR cost. The shift is
+     * in-place WITHIN the line (an offset render origin would spill
+     * across line/band boundaries — the sync-tear bounce-buffer lesson);
+     * 1-px granularity via uint16 copies, vacated edge pixels go black.
+     * ------------------------------------------------------------------ */
+    if (g_fx_cfg.wobble) {
+        /* Vertical envelope: sin(2*pi * (k+1) / 17) * 127, k = 0..15 —
+         * a full period: bulge right, then bulge left (for positive dx). */
+        static DRAM_ATTR const int8_t wob_env[16] = {
+             46,  86, 114, 126, 122, 101,  67,  23,
+            -23, -67, -101, -122, -126, -114, -86, -46,
+        };
+        const int dx = g_fx_wobble_lut[g_fx_frame];
+        /* Analog grit: amplitude drifts ±25% (re-rolled ~10 Hz) so no two
+         * sweeps look identical. Same LCG recipe as the static burst. */
+        const uint32_t hf = (uint32_t)(g_fx_frame >> 2) * 2246822519u;
+        const int dxa = (dx * (12 + (int)((hf >> 7) & 7))) >> 4;
+        /* Wiggle top: 0..637 over the 256-frame cycle; >479 = resting. */
+        const int yc = (int)(((unsigned)g_fx_frame * 5u) >> 1);
+        const int n0 = yc - start_scan;
+        for (int k = 0; k < 16 && dx != 0; k++) {
+            const int n = n0 + k;
+            if (n < 0 || n >= num_scans) continue;     /* other band / off */
+            /* Per-row ±1 px jitter (~20 Hz) roughens the clean S-curve.
+             * Hashed from absolute y + frame, so the sub-row bands of one
+             * frame always agree at their seam. */
+            const uint32_t hr = ((uint32_t)(start_scan + n) * 2654435761u)
+                              ^ ((uint32_t)(g_fx_frame >> 1) * 2246822519u);
+            int d = (dxa * (int)wob_env[k] + 64) >> 7;
+            d += (int)((hr >> 9) % 3u) - 1;
+            if (d == 0) continue;
+            color_t *lp = dst_base + (unsigned)n * DISPLAY_WIDTH;
+            if (d > 0) {                               /* shift right */
+                for (int i = DISPLAY_WIDTH - 1; i >= d; i--) lp[i] = lp[i - d];
+                for (int i = d - 1; i >= 0; i--)             lp[i] = 0;
+            } else {                                   /* shift left */
+                for (int i = 0; i < DISPLAY_WIDTH + d; i++) lp[i] = lp[i - d];
+                for (int i = DISPLAY_WIDTH + d; i < DISPLAY_WIDTH; i++)
+                    lp[i] = 0;
+            }
+        }
+    }
+
+    /* ------------------------------------------------------------------
      * Signal-loss static burst — replace a few pseudo-randomly chosen
      * scanlines of this band with grayscale snow. Transient (frame-
      * bounded) by design: this is the one per-pixel-ish pass allowed.
@@ -757,6 +807,44 @@ void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
     if (char_row == 0 && s_bell_show && glyph_row0 < 16)
         draw_bell_tag(dst_base, glyph_row0, num_scans);
 }
+
+/* -------------------------------------------------------------------------
+ * Public entry — optionally wrapped in a cycle-count bench (device only):
+ * per-chunk CPU cycles accumulated in DRAM, drained by
+ * display_render_bench_read() from any task. Overhead ~20 cycles/chunk.
+ * ---------------------------------------------------------------------- */
+#if DISPLAY_RENDER_BENCH
+#include "esp_cpu.h"
+
+static DRAM_ATTR volatile uint32_t s_bench_cyc = 0;
+static DRAM_ATTR volatile uint32_t s_bench_n   = 0;
+static DRAM_ATTR volatile uint32_t s_bench_max = 0;
+
+void display_render_bench_read(uint32_t *cycles, uint32_t *chunks,
+                               uint32_t *max_cycles)
+{
+    if (cycles)     *cycles     = s_bench_cyc;
+    if (chunks)     *chunks     = s_bench_n;
+    if (max_cycles) *max_cycles = s_bench_max;
+    /* Reset races the ISR's accumulate; a lost chunk is bench noise. */
+    s_bench_cyc = s_bench_n = s_bench_max = 0;
+}
+
+void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
+{
+    const uint32_t t0 = esp_cpu_get_cycle_count();
+    render_chunk_body(dst, pos_px, n_bytes);
+    const uint32_t dt = esp_cpu_get_cycle_count() - t0;
+    s_bench_cyc += dt;
+    s_bench_n++;
+    if (dt > s_bench_max) s_bench_max = dt;
+}
+#else
+void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
+{
+    render_chunk_body(dst, pos_px, n_bytes);
+}
+#endif
 
 #undef GPAIR
 #undef EMIT_COL

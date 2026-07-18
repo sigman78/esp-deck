@@ -24,4 +24,21 @@
  */
 void display_render_chunk(color_t *dst, int pos_px, int n_bytes);
 
+/* Cycle-count bench around the chunk renderer. Device-only (reads CCOUNT);
+ * negligible overhead, so it stays on in device builds until the FX budget
+ * work settles. */
+#ifndef DISPLAY_RENDER_BENCH
+#ifdef BUILD_SIMULATOR
+#define DISPLAY_RENDER_BENCH 0
+#else
+#define DISPLAY_RENDER_BENCH 1
+#endif
+#endif
+
+#if DISPLAY_RENDER_BENCH
+/** Drain (read + reset) the accumulated per-chunk cycle counters. */
+void display_render_bench_read(uint32_t *cycles, uint32_t *chunks,
+                               uint32_t *max_cycles);
+#endif
+
 #endif /* DISPLAY_RENDER_H */
