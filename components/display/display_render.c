@@ -470,7 +470,7 @@ static DRAM_ATTR const uint32_t s_fx_noise[16] = {
  * n_bytes  — byte count of the band
  *            (= DISPLAY_WIDTH × BOUNCE_BUFFER_HEIGHT × sizeof(color_t))
  */
-static IRAM_ATTR void render_chunk_body(color_t *dst, int pos_px, int n_bytes)
+void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
 {
     if (!dst) return;
 
@@ -807,44 +807,6 @@ static IRAM_ATTR void render_chunk_body(color_t *dst, int pos_px, int n_bytes)
     if (char_row == 0 && s_bell_show && glyph_row0 < 16)
         draw_bell_tag(dst_base, glyph_row0, num_scans);
 }
-
-/* -------------------------------------------------------------------------
- * Public entry — optionally wrapped in a cycle-count bench (device only):
- * per-chunk CPU cycles accumulated in DRAM, drained by
- * display_render_bench_read() from any task. Overhead ~20 cycles/chunk.
- * ---------------------------------------------------------------------- */
-#if DISPLAY_RENDER_BENCH
-#include "esp_cpu.h"
-
-static DRAM_ATTR volatile uint32_t s_bench_cyc = 0;
-static DRAM_ATTR volatile uint32_t s_bench_n   = 0;
-static DRAM_ATTR volatile uint32_t s_bench_max = 0;
-
-void display_render_bench_read(uint32_t *cycles, uint32_t *chunks,
-                               uint32_t *max_cycles)
-{
-    if (cycles)     *cycles     = s_bench_cyc;
-    if (chunks)     *chunks     = s_bench_n;
-    if (max_cycles) *max_cycles = s_bench_max;
-    /* Reset races the ISR's accumulate; a lost chunk is bench noise. */
-    s_bench_cyc = s_bench_n = s_bench_max = 0;
-}
-
-void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
-{
-    const uint32_t t0 = esp_cpu_get_cycle_count();
-    render_chunk_body(dst, pos_px, n_bytes);
-    const uint32_t dt = esp_cpu_get_cycle_count() - t0;
-    s_bench_cyc += dt;
-    s_bench_n++;
-    if (dt > s_bench_max) s_bench_max = dt;
-}
-#else
-void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
-{
-    render_chunk_body(dst, pos_px, n_bytes);
-}
-#endif
 
 #undef GPAIR
 #undef EMIT_COL
