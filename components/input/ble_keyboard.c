@@ -126,6 +126,7 @@ static struct ble_gap_event_listener s_gap_listener;
 #define OPEN_STUCK_US       (75ULL * 1000 * 1000)   /* 30 s connect + discovery */
 static esp_timer_handle_t s_keeper_timer = NULL;
 static volatile int64_t   s_connecting_since_us = 0;
+static uint8_t            s_no_scan_ticks = 0;   /* consecutive "no scan" samples */
 
 /* ------------------------------------------------------------------ */
 /*  Forward declarations                                               */
@@ -788,7 +789,7 @@ static int sec_gap_event(struct ble_gap_event *event, void *arg)
              * then drops and CLOSE_EVENT restarts the reconnect scan. */
             struct ble_gap_conn_desc desc;
             if (ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0) {
-                ESP_LOGW(TAG, "encryption failed — dropping stale bond");
+                ESP_LOGW(TAG, "encryption failed - dropping stale bond");
                 ble_store_util_delete_peer(&desc.peer_id_addr);
             }
         }
@@ -824,7 +825,7 @@ static void on_sync(void)
         s_state = BLE_RECONNECT;
         start_scan(CONFIG_INPUT_BLE_SCAN_DURATION * 1000);
     } else {
-        ESP_LOGI(TAG, "No paired devices — awaiting pairing trigger");
+        ESP_LOGI(TAG, "No paired devices - awaiting pairing trigger");
     }
 }
 
@@ -862,7 +863,7 @@ static void keeper_cb(void *arg)
     switch (s_state) {
     case BLE_CONNECTED:
         if (s_connected_dev && !esp_hidh_dev_exists(s_connected_dev)) {
-            ESP_LOGW(TAG, "keeper: connected device vanished — rescanning");
+            ESP_LOGW(TAG, "keeper: connected device vanished - rescanning");
             s_connected_dev     = NULL;
             s_connected_name[0] = '\0';
             repeat_stop();
@@ -877,7 +878,7 @@ static void keeper_cb(void *arg)
             /* An open should finish (or fail) well inside this. Cancelling the
              * GAP procedure makes the stack report the connect as failed,
              * which unblocks the opener task and lets it unwind normally. */
-            ESP_LOGE(TAG, "keeper: connect stuck — cancelling");
+            ESP_LOGE(TAG, "keeper: connect stuck - cancelling");
             ble_gap_conn_cancel();
             s_connecting_since_us = esp_timer_get_time();   /* don't spam */
         }
@@ -886,15 +887,25 @@ static void keeper_cb(void *arg)
     case BLE_RECONNECT:
     case BLE_PAIRING_SCAN:
         if (!s_hid_open_live && !ble_gap_disc_active() && !ble_gap_conn_active()) {
-            ESP_LOGW(TAG, "keeper: no scan running in state %d — restarting",
-                     (int)s_state);
-            start_scan(CONFIG_INPUT_BLE_SCAN_DURATION * 1000);
+            /* Two strikes: a scan ends and is restarted from the same
+             * DISC_COMPLETE callback, and this timer samples often enough to
+             * land in that gap (~twice a day with a 10 s scan and a 5 s tick).
+             * One miss says nothing; two in a row means nothing is restarting
+             * it. */
+            if (++s_no_scan_ticks >= 2) {
+                ESP_LOGW(TAG, "keeper: no scan running in state %d - restarting",
+                         (int)s_state);
+                start_scan(CONFIG_INPUT_BLE_SCAN_DURATION * 1000);
+                s_no_scan_ticks = 0;
+            }
+        } else {
+            s_no_scan_ticks = 0;
         }
         break;
 
     case BLE_IDLE:
         if (s_registry_count > 0 && !s_hid_open_live) {
-            ESP_LOGW(TAG, "keeper: idle with %d known device(s) — rescanning",
+            ESP_LOGW(TAG, "keeper: idle with %d known device(s) - rescanning",
                      s_registry_count);
             s_state = BLE_RECONNECT;
             start_scan(CONFIG_INPUT_BLE_SCAN_DURATION * 1000);
