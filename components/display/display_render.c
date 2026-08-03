@@ -173,8 +173,13 @@ static inline uint16_t fx_dim565(uint16_t p)
     return (uint16_t)(p - ((p >> 4) & 0x0861));
 }
 
-/* Luma-map onto a monochrome phosphor ramp: mode 1 = green, 2 = amber. */
-static inline uint16_t fx_mono565(uint16_t p, uint8_t mode)
+/* Luma-map onto a monochrome phosphor ramp: mode 1 = green, 2 = amber.
+ *
+ * IRAM_ATTR, not just `inline`: at -Os GCC outlines this and it landed in
+ * FLASH while its only caller (build_row_cache) runs from the bounce ISR —
+ * a call the ISR must not make with the flash cache disabled. `inline` is a
+ * hint, so the attribute is what actually guarantees placement. */
+static IRAM_ATTR uint16_t fx_mono565(uint16_t p, uint8_t mode)
 {
     const uint32_t r6 = ((p >> 11) & 0x1F) << 1;
     const uint32_t g6 = (p >> 5) & 0x3F;
@@ -411,8 +416,15 @@ static IRAM_ATTR void build_row_cache(int cr, int scan_on)
             if (cell->attrs & ATTR_REVERSE) { color_t t = fg; fg = bg; bg = t; }
             underline = cell->attrs & ATTR_UNDERLINE;
             bold      = cell->attrs & ATTR_BOLD;
-            glyph = font_get_glyph(cell->cp);
-            if (bold) {
+            /* Blanks skip the lookup entirely: the band loop already renders
+             * a NULL glyph as all-zero bits, and U+0020 is all-zero in
+             * Terminus, so this is byte-identical output for one compare
+             * instead of two windowed calls plus a binary search. Terminal
+             * and menu screens run well over half blank, and the saving
+             * lands on the row's FIRST band — the peak-cost one. */
+            glyph = (cell->cp == 0x20 || cell->cp == 0)
+                  ? NULL : font_get_glyph(cell->cp);
+            if (bold && glyph) {
                 /* Real bold face when stored (subset A); misses keep the
                  * normal glyph. The bold-pop color effect applies either
                  * way — it is an independent, user-tunable emphasis. */
@@ -883,6 +895,8 @@ void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
 }
 
 #undef GPAIR
-#undef EMIT_COL
+#undef EMIT_COL_8
+#undef EMIT_COL_10
+#undef EMIT_COL_12
 
 #undef RENDER_MAX_COLS

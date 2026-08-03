@@ -140,7 +140,11 @@ static font_size_t boot_font_size(void)
     char stored[16];
     if (storage_font_load(stored, sizeof(stored)) == ESP_OK) {
         for (int i = 0; i < FONT_SIZE_COUNT; i++) {
-            if (strcmp(stored, font_size_name((font_size_t)i)) == 0) {
+            /* Availability, not just the name: honouring a size this build
+             * dropped would send font_init() to its last-resort "first
+             * linked size", overriding the configured default. */
+            if (font_size_available((font_size_t)i) &&
+                strcmp(stored, font_size_name((font_size_t)i)) == 0) {
                 want = (font_size_t)i;
                 break;
             }

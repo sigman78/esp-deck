@@ -103,21 +103,32 @@ static int fx_menu_items(const char *out[], const char *bodies[],
  * means right now: which size is live, which is staged for the next boot,
  * and which was left out of this build (Kconfig can trim sizes to reclaim
  * the renderer's per-width code). */
+/* What the next boot will use — normally the active size, but a tile tapped
+ * this session has already been written to font.ini. Resolved when the page
+ * opens, NOT per render: render_menu runs on the animation tick (~10 Hz) and
+ * re-reading font.ini there would fopen/fgets/fclose littlefs ten times a
+ * second for a label that only changes on a tap. */
+static font_size_t s_font_pending = FONT_SIZE_COUNT;   /* COUNT = unresolved */
+
+static void font_menu_refresh_pending(void)
+{
+    s_font_pending = font_active_size();
+    char staged[16];
+    if (storage_font_load(staged, sizeof(staged)) == ESP_OK) {
+        for (int i = 0; i < FONT_SIZE_COUNT; i++)
+            if (strcmp(staged, font_size_name((font_size_t)i)) == 0) {
+                s_font_pending = (font_size_t)i;
+                break;
+            }
+    }
+}
+
 static int font_menu_items(const char *out[], const char *bodies[])
 {
     const font_size_t active = font_active_size();
 
-    /* What the next boot will use — normally the active size, but a tile
-     * tapped this session has already been written to font.ini. */
-    char staged[16];
-    font_size_t pending = active;
-    if (storage_font_load(staged, sizeof(staged)) == ESP_OK) {
-        for (int i = 0; i < FONT_SIZE_COUNT; i++)
-            if (strcmp(staged, font_size_name((font_size_t)i)) == 0) {
-                pending = (font_size_t)i;
-                break;
-            }
-    }
+    if (s_font_pending >= FONT_SIZE_COUNT) font_menu_refresh_pending();
+    const font_size_t pending = s_font_pending;
 
     for (int i = 0; i < FONT_SIZE_COUNT; i++) {
         const font_size_t s = (font_size_t)i;
@@ -260,9 +271,15 @@ static void render_menu(void)
         chrome_x  = (ui_cols() - 40) / 2;   /* center chrome over the screen */
     } else {
         /* Tile height shrinks with the grid; items always keep a 1-row gap
-         * (glued bars read as one slab). The tallest page (6 tiles at
-         * 20 rows) pins the title to row 0 and the legend to the last row. */
+         * (glued bars read as one slab). Then shrink further until the
+         * column actually FITS: a page that outgrows its budget used to run
+         * off the bottom, and an off-grid tile is not merely invisible —
+         * ui_putch clips it AND no touch y can map to it, so the item (Back,
+         * usually) becomes untappable. Derived from count rather than
+         * assumed, so adding a menu item cannot silently break a grid. */
         int th = ui_rows() >= 28 ? (count >= 6 ? 3 : 4) : 2;
+        const int budget = ui_rows() - 3;   /* title chip above, legend below */
+        while (th > 1 && count * (th + 1) - 1 > budget) th--;
         g = (tilegrid_t){ .tw = 40, .th = th, .gx = 0, .gy = 1,
                           .ncols = 1, .nrows = count, .count = count };
         int total = count * (g.th + 1) - 1;
@@ -330,14 +347,17 @@ static void render_menu(void)
         }
     }
 
-    /* Esc legend under the tile area — quiet blue, centered on the column. */
-    const char *legend = root ? "Esc/F12 resume \xB7 tap outside closes"
-                       : sc == MS_CONFIG
-                           ? (app.menu_from_home ? "Esc \xB7 home" : "Esc \xB7 menu")
-                           : "Esc \xB7 back";
-    ui_pen(OVERLAY_COL_BLUE);
-    ui_puts(chrome_x + (40 - (int)strlen(legend)) / 2, ly, legend, 0);
-    ui_pen(OVERLAY_COL_DEFAULT);
+    /* Esc legend under the tile area — quiet blue, centered on the column.
+     * Suppressed while a note is up: the two share this row (see below). */
+    if (!app.menu_msg[0]) {
+        const char *legend = root ? "Esc/F12 resume \xB7 tap outside closes"
+                           : sc == MS_CONFIG
+                               ? (app.menu_from_home ? "Esc \xB7 home" : "Esc \xB7 menu")
+                               : "Esc \xB7 back";
+        ui_pen(OVERLAY_COL_BLUE);
+        ui_puts(chrome_x + (40 - (int)strlen(legend)) / 2, ly, legend, 0);
+        ui_pen(OVERLAY_COL_DEFAULT);
+    }
 
     /* Empty-picker hint, just above the (Back-only) grid. */
     if (picker && app.stored_count == 0) {
@@ -347,10 +367,14 @@ static void render_menu(void)
     }
 
     if (app.menu_msg[0]) {               /* action feedback */
+        /* On the legend row, not below it. ly is already clamped to the last
+         * grid row, so ly+1 was off-panel on any page tall enough to hit that
+         * clamp — the note then vanished silently and the tap that produced
+         * it looked like it had done nothing. */
         int mx = chrome_x + (40 - ((int)strlen(app.menu_msg) + 2)) / 2;
         ui_pen(OVERLAY_COL_AMBER);
-        ui_putch(mx, ly + 1, UI_DIAMOND, 0);
-        ui_puts(mx + 2, ly + 1, app.menu_msg, 0);
+        ui_putch(mx, ly, UI_DIAMOND, 0);
+        ui_puts(mx + 2, ly, app.menu_msg, 0);
         ui_pen(OVERLAY_COL_DEFAULT);
     }
 
@@ -396,6 +420,7 @@ void menu_goto(int sc)
     app.menu_screen = sc;
     app.menu_sel    = 0;
     app.menu_armed  = false;
+    if (sc == MS_FONT) s_font_pending = FONT_SIZE_COUNT;  /* re-read on open */
     menu_clear_note();
     render_menu();
 }
