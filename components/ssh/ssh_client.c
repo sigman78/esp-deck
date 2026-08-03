@@ -532,18 +532,6 @@ esp_err_t ssh_client_connect(const ssh_config_t *config)
         }
         ESP_LOGI(TAG, "Public-key auth (%u-byte PEM in memory)",
                  (unsigned)strlen(config->private_key_pem));
-        /* Diagnostics only — the header line is public, never the body. A
-         * mis-stored key shows up here as a wrong/absent BEGIN line. */
-        {
-            const char *pem = config->private_key_pem;
-            size_t hdr = strcspn(pem, "\r\n");
-            if (hdr > 48) hdr = 48;
-            ESP_LOGI(TAG, "  key header: \"%.*s\"", (int)hdr, pem);
-            ESP_LOGI(TAG, "  passphrase: %s (%u chars), pubkey: %s",
-                     config->passphrase ? "yes" : "NONE",
-                     (unsigned)(config->passphrase ? strlen(config->passphrase) : 0),
-                     config->public_key_pem ? "yes" : "no");
-        }
         rc = libssh2_userauth_publickey_frommemory(
                  s_session,
                  config->username, strlen(config->username),
@@ -553,6 +541,21 @@ esp_err_t ssh_client_connect(const ssh_config_t *config)
                  config->passphrase);
         if (rc == 0) goto auth_done;
         log_last_error("publickey");
+        /* Key auth fails far more often from a mis-stored key or a profile
+         * missing its passphrase than from anything libssh2 can name, so dump
+         * what we fed it — on the failure path only, to keep a good connect
+         * quiet. The BEGIN line is public; the key body never goes to the
+         * console, and the passphrase is reported by length alone. */
+        {
+            const char *pem = config->private_key_pem;
+            size_t hdr = strcspn(pem, "\r\n");
+            if (hdr > 48) hdr = 48;
+            ESP_LOGE(TAG, "  key header: \"%.*s\"", (int)hdr, pem);
+            ESP_LOGE(TAG, "  passphrase: %s (%u chars), pubkey: %s",
+                     config->passphrase ? "yes" : "NONE",
+                     (unsigned)(config->passphrase ? strlen(config->passphrase) : 0),
+                     config->public_key_pem ? "yes" : "no");
+        }
         ssh_cleanup();
         return SSH_ERR_AUTH;
     }
