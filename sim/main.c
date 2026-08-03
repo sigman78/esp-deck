@@ -228,9 +228,9 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    font_init();
+    font_init(FONT_SIZE_8X16);   /* sim: single linked size; falls back to it */
     display_init();
-    vterm_init(DISPLAY_TEXT_COLS, DISPLAY_TEXT_ROWS);
+    vterm_init(display_text_cols(), display_text_rows());
     vterm_write("\x1b[2J\x1b[H", 7);
     display_render_frame();
 

@@ -15,6 +15,12 @@
 #include <stdio.h>
 #include <string.h>
 
+#ifndef BUILD_SIMULATOR
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_system.h"     /* esp_restart() — applying a new font size */
+#endif
+
 /* -------------------------------------------------------------------------
  * EFFECTS page — every runtime render-fx tunable as a value-cycling tile.
  * Tapping a tile steps its value (wrapping); the menu re-renders every frame
@@ -86,6 +92,44 @@ static int fx_menu_items(const char *out[], const char *bodies[],
     buf[FXM_BACK][0] = '\0';
     for (int i = 0; i < FX_MENU_TILES; i++) bodies[i] = buf[i];
     return FX_MENU_TILES;
+}
+
+/* ---------------------------------------------------------------- FONT */
+
+/* One tile per font size, plus Back. */
+#define FONT_MENU_TILES  (FONT_SIZE_COUNT + 1)
+
+/* Build the FONT page. Bodies are static strings — they say what each tile
+ * means right now: which size is live, which is staged for the next boot,
+ * and which was left out of this build (Kconfig can trim sizes to reclaim
+ * the renderer's per-width code). */
+static int font_menu_items(const char *out[], const char *bodies[])
+{
+    const font_size_t active = font_active_size();
+
+    /* What the next boot will use — normally the active size, but a tile
+     * tapped this session has already been written to font.ini. */
+    char staged[16];
+    font_size_t pending = active;
+    if (storage_font_load(staged, sizeof(staged)) == ESP_OK) {
+        for (int i = 0; i < FONT_SIZE_COUNT; i++)
+            if (strcmp(staged, font_size_name((font_size_t)i)) == 0) {
+                pending = (font_size_t)i;
+                break;
+            }
+    }
+
+    for (int i = 0; i < FONT_SIZE_COUNT; i++) {
+        const font_size_t s = (font_size_t)i;
+        out[i] = font_size_name(s);
+        bodies[i] = !font_size_available(s) ? "not in this build"
+                  : (s == active)           ? "in use"
+                  : (s == pending)          ? "reboot to apply"
+                                            : "";
+    }
+    out[FONT_SIZE_COUNT]    = "Back";
+    bodies[FONT_SIZE_COUNT] = "";
+    return FONT_MENU_TILES;
 }
 
 /* Step the EFFECTS tunable at @p sel, persist, and (for the event effects)
@@ -173,8 +217,11 @@ static void render_menu(void)
     const char *const *bodies = NULL;
     const uint8_t *cols;
     int count;
+    const char *fnti[FONT_MENU_TILES];
+    const char *fntb[FONT_MENU_TILES];
     const bool picker = menu_is_picker(sc);
     const bool fxpage = (sc == MS_EFFECTS);
+    const bool fntpage = (sc == MS_FONT);
     if (picker) {
         title = sc == MS_DELPROFILE  ? "DELETE PROFILE"
               : sc == MS_EDITPROFILE ? "EDIT PROFILE"
@@ -188,6 +235,12 @@ static void render_menu(void)
         count  = fx_menu_items(fxi, fxb, fxbuf);
         items  = fxi;
         bodies = fxb;
+        cols   = NULL;                      /* colored per-tile below */
+    } else if (fntpage) {
+        title  = "FONT";
+        count  = font_menu_items(fnti, fntb);
+        items  = fnti;
+        bodies = fntb;
         cols   = NULL;                      /* colored per-tile below */
     } else {
         menu_def_t d = menu_def(sc);
@@ -251,6 +304,10 @@ static void render_menu(void)
                                                     : OVERLAY_COL_CYAN;
         else if (fxpage)  col = i == g.count - 1 ? OVERLAY_COL_BLUE
                                                  : OVERLAY_COL_CYAN;
+        else if (fntpage) col = i >= FONT_SIZE_COUNT          ? OVERLAY_COL_BLUE
+                              : (font_size_t)i == font_active_size()
+                                                             ? OVERLAY_COL_GREEN
+                                                             : OVERLAY_COL_CYAN;
         else              col = cols[i];
         ui_pen(col);
         /* Focus is carried entirely by the tile itself (washed bar + lit
@@ -451,8 +508,9 @@ static void menu_activate(uint64_t now)
                                         "no BLE keyboard support"); break; }
             menu_goto(MS_KEYBOARD); return;
         case 3: menu_goto(MS_EFFECTS); return;
-        case 4: menu_goto(MS_SYSTEM);  return;
-        case 5: menu_back(now);        return;   /* Back */
+        case 4: menu_goto(MS_FONT);    return;
+        case 5: menu_goto(MS_SYSTEM);  return;
+        case 6: menu_back(now);        return;   /* Back */
         }
         break;
 
@@ -460,6 +518,47 @@ static void menu_activate(uint64_t now)
         if (sel >= FX_MENU_TILES - 1) { menu_back(now); return; }  /* Back */
         fx_menu_cycle(sel);
         return;
+
+    case MS_FONT: {
+        if (sel >= FONT_SIZE_COUNT) { menu_back(now); return; }    /* Back */
+        const font_size_t want = (font_size_t)sel;
+        char note[40];
+
+        if (!font_size_available(want)) {
+            snprintf(note, sizeof(note), "%s not in this build",
+                     font_size_name(want));
+            menu_note(now, MENU_MSG_MS, false, note);
+            return;
+        }
+        if (want == font_active_size()) {
+            snprintf(note, sizeof(note), "%s already in use",
+                     font_size_name(want));
+            menu_note(now, MENU_MSG_MS, false, note);
+            return;
+        }
+        if (storage_font_save(font_size_name(want)) != ESP_OK) {
+            menu_note(now, MENU_MSG_MS, false, "could not save font");
+            return;
+        }
+        /* The grid, the DMA bounce geometry and the DRAM glyph copy are all
+         * established during init, so the size can only change across a
+         * restart. Paint the note first, hold it long enough to read, then
+         * reboot — the setting is already on disk, so a power cut here just
+         * arrives at the new size a little sooner. */
+#ifndef BUILD_SIMULATOR
+        snprintf(note, sizeof(note), "%s set - rebooting", font_size_name(want));
+        menu_note(now, MENU_MSG_MS, false, note);
+        render_menu();
+        vTaskDelay(pdMS_TO_TICKS(1200));
+        esp_restart();
+#else
+        /* The simulator is single-size and cannot restart into another one;
+         * the setting is saved so the device picks it up. */
+        snprintf(note, sizeof(note), "%s saved (reboot)", font_size_name(want));
+        menu_note(now, MENU_MSG_MS, false, note);
+#endif
+        return;
+    }
 
     case MS_PROFILES:
         switch (sel) {
