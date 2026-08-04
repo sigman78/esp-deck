@@ -47,14 +47,10 @@ void hostkey_tick(uint64_t now);
 void hostkey_input(const cyberdeck_input_t *ev, ui_key_t k, char ch, uint64_t now);
 
 /* ---- connect + session (app_connect.c) ---- */
-/** Arm a connect to profile @p idx (snapshots it into the active profile). */
+/** Arm a connect to profile @p idx (snapshots it into app.conn.active). */
 void start_connect(int idx, uint64_t not_before, uint64_t now);
-/** The profile snapshot being connected / connected. */
-const conn_profile_t *connect_active(void);
 /** Re-arm a connect to the active snapshot, pinning @p fp (hostkey trust). */
 void connect_arm_pinned(const char *fp, uint64_t now);
-/** enter_session() time, for NO CARRIER / the menu LINK clock. */
-uint64_t connect_session_start(void);
 /** Session died and we are NOT auto-reconnecting: NO CARRIER + collapse. */
 void session_dropped(uint64_t now);
 void connecting_tick(uint64_t now);

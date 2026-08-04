@@ -11,10 +11,6 @@
 
 #define SAVER_IDLE_MS  (3 * 60 * 1000)   /* HOME idle before the rain */
 
-static uint64_t s_last_input;   /* any key/touch; drives the idle timer  */
-static bool     s_on;           /* rain actually on screen (not derived) */
-static uint64_t s_since;        /* when the rain went up (wake grace)    */
-
 /* Bold 6x7 block font (2-px strokes) for the screensaver clock, bit 5 =
  * leftmost column. Digits 0-9 plus ':' at index 10 (blinked by clk_mask). */
 static const uint8_t k_clk_font[11][7] = {
@@ -194,34 +190,34 @@ static void render_saver(void)
 
 void saver_reset(uint64_t now)
 {
-    s_last_input = now;
-    s_on         = false;
+    app.saver.last_input = now;
+    app.saver.on         = false;
 }
 
 bool saver_on_input(uint64_t now)
 {
-    s_last_input = now;
-    if (!s_on) return false;
-    s_on = false;
+    app.saver.last_input = now;
+    if (!app.saver.on) return false;
+    app.saver.on = false;
     if (app.toast[0] && now >= app.toast_until) app.toast[0] = '\0';
     render_home();
     /* Only swallow once the rain has been up for a moment: the main loop
      * ticks before it drains input, so a keypress aimed at a HOME visible
      * milliseconds ago must still act, not vanish into a wake. */
-    return now - s_since >= 1000;
+    return now - app.saver.since >= 1000;
 }
 
 bool saver_tick_home(uint64_t now)
 {
-    if (now - s_last_input <= SAVER_IDLE_MS) {
-        s_on = false;
+    if (now - app.saver.last_input <= SAVER_IDLE_MS) {
+        app.saver.on = false;
         return false;
     }
     if (now >= app.next_anim) {          /* idle: let it rain */
         app.next_anim = now + ANIM_PERIOD_MS;
-        if (!s_on) {
-            s_on    = true;   /* input handling keys off what's on screen */
-            s_since = now;
+        if (!app.saver.on) {
+            app.saver.on    = true;   /* input handling keys off what's on screen */
+            app.saver.since = now;
         }
         render_saver();
     }

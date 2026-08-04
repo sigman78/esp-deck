@@ -26,20 +26,6 @@ typedef enum {
 
 #define PF_KEY_MAX 8              /* key ids offered by the picker */
 
-static conn_profile_t s_draft;          /* profile being entered           */
-static char   s_port[6];                /* port as text (parsed on save)   */
-static int    s_field;                  /* focused field (pf_field_t)      */
-static int    s_cursor;                 /* caret within the focused field  */
-static char   s_err[40];                /* inline validation error, "" = ok */
-static int    s_edit_idx = -1;          /* stored index being edited, -1 = new */
-static char   s_orig_name[32];          /* name at edit entry (slot re-found
-                                         * by name at save time)           */
-static bool   s_return_menu;            /* editor was entered from the menu */
-static char (*s_keys)[STORAGE_KEY_ID_LEN];  /* SPIRAM, PF_KEY_MAX entries  */
-static int    s_nkeys;
-static int    s_key_sel = -1;           /* index into s_keys, -1 = none    */
-static char   s_key_type[24];           /* cached type of the selected key */
-
 static bool pf_is_text(int f)
 {
     return f <= PF_USER || f == PF_PASS;
@@ -48,7 +34,7 @@ static bool pf_is_text(int f)
 /* Is @p f part of the focus ring under the current auth mode? */
 static bool pf_field_present(int f)
 {
-    return f != PF_KEY || s_draft.auth == STORAGE_AUTH_KEY;
+    return f != PF_KEY || app.pf.draft.auth == STORAGE_AUTH_KEY;
 }
 
 /* Resolve a text field's label, buffer, max length and flags. */
@@ -57,19 +43,19 @@ static char *pf_buf(int i, const char **label, int *max,
 {
     *numeric = false; *mask = false;
     switch (i) {
-    case PF_NAME: *label = "Name"; *max = sizeof(s_draft.name) - 1;
-                  return s_draft.name;
-    case PF_HOST: *label = "Host"; *max = sizeof(s_draft.host) - 1;
-                  return s_draft.host;
+    case PF_NAME: *label = "Name"; *max = sizeof(app.pf.draft.name) - 1;
+                  return app.pf.draft.name;
+    case PF_HOST: *label = "Host"; *max = sizeof(app.pf.draft.host) - 1;
+                  return app.pf.draft.host;
     case PF_PORT: *label = "Port"; *max = 5; *numeric = true;
-                  return s_port;
-    case PF_USER: *label = "User"; *max = sizeof(s_draft.user) - 1;
-                  return s_draft.user;
+                  return app.pf.port;
+    case PF_USER: *label = "User"; *max = sizeof(app.pf.draft.user) - 1;
+                  return app.pf.draft.user;
     case PF_PASS: /* doubles as the key passphrase under key auth */
-                  *label = s_draft.auth == STORAGE_AUTH_KEY
+                  *label = app.pf.draft.auth == STORAGE_AUTH_KEY
                            ? "Phrase" : "Pass";
-                  *max = sizeof(s_draft.password) - 1;
-                  *mask = true; return s_draft.password;
+                  *max = sizeof(app.pf.draft.password) - 1;
+                  *mask = true; return app.pf.draft.password;
     }
     *label = ""; *max = 0; return NULL;
 }
@@ -77,53 +63,53 @@ static char *pf_buf(int i, const char **label, int *max,
 /* (Re)load the key picker's id list and cached type of the selection. */
 static void pf_key_refresh_info(void)
 {
-    s_key_type[0] = '\0';
-    if (s_key_sel >= 0 && s_key_sel < s_nkeys)
-        storage_key_info(s_keys[s_key_sel],
-                         s_key_type, sizeof(s_key_type), NULL, 0);
+    app.pf.key_type[0] = '\0';
+    if (app.pf.key_sel >= 0 && app.pf.key_sel < app.pf.nkeys)
+        storage_key_info(app.pf.keys[app.pf.key_sel],
+                         app.pf.key_type, sizeof(app.pf.key_type), NULL, 0);
 }
 
 static void pf_load_keys(void)
 {
-    if (!s_keys)
-        s_keys = heap_caps_malloc(PF_KEY_MAX * STORAGE_KEY_ID_LEN,
+    if (!app.pf.keys)
+        app.pf.keys = heap_caps_malloc(PF_KEY_MAX * STORAGE_KEY_ID_LEN,
                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    s_nkeys = 0;
-    if (s_keys)
-        storage_list_keys(s_keys, PF_KEY_MAX, &s_nkeys);
+    app.pf.nkeys = 0;
+    if (app.pf.keys)
+        storage_list_keys(app.pf.keys, PF_KEY_MAX, &app.pf.nkeys);
 
     /* Preselect the draft's key when editing; a draft without one starts on
      * the first stored key (adopted only when auth is toggled to key). */
-    s_key_sel = -1;
-    for (int i = 0; i < s_nkeys; i++)
-        if (strcmp(s_keys[i], s_draft.key_id) == 0) {
-            s_key_sel = i;
+    app.pf.key_sel = -1;
+    for (int i = 0; i < app.pf.nkeys; i++)
+        if (strcmp(app.pf.keys[i], app.pf.draft.key_id) == 0) {
+            app.pf.key_sel = i;
             break;
         }
-    if (s_key_sel < 0 && !s_draft.key_id[0] && s_nkeys > 0)
-        s_key_sel = 0;
+    if (app.pf.key_sel < 0 && !app.pf.draft.key_id[0] && app.pf.nkeys > 0)
+        app.pf.key_sel = 0;
     pf_key_refresh_info();
 }
 
 static void pf_auth_toggle(void)
 {
-    if (s_draft.auth == STORAGE_AUTH_KEY) {
-        s_draft.auth = STORAGE_AUTH_PASSWORD;
+    if (app.pf.draft.auth == STORAGE_AUTH_KEY) {
+        app.pf.draft.auth = STORAGE_AUTH_PASSWORD;
     } else {
-        s_draft.auth = STORAGE_AUTH_KEY;
-        if (s_key_sel >= 0 && s_key_sel < s_nkeys)
-            snprintf(s_draft.key_id, sizeof(s_draft.key_id), "%s",
-                     s_keys[s_key_sel]);
+        app.pf.draft.auth = STORAGE_AUTH_KEY;
+        if (app.pf.key_sel >= 0 && app.pf.key_sel < app.pf.nkeys)
+            snprintf(app.pf.draft.key_id, sizeof(app.pf.draft.key_id), "%s",
+                     app.pf.keys[app.pf.key_sel]);
     }
 }
 
 static void pf_key_cycle(int dir)
 {
-    if (s_nkeys <= 0) return;
-    s_key_sel = (s_key_sel < 0)
-              ? (dir > 0 ? 0 : s_nkeys - 1)
-              : (s_key_sel + dir + s_nkeys) % s_nkeys;
-    snprintf(s_draft.key_id, sizeof(s_draft.key_id), "%s", s_keys[s_key_sel]);
+    if (app.pf.nkeys <= 0) return;
+    app.pf.key_sel = (app.pf.key_sel < 0)
+              ? (dir > 0 ? 0 : app.pf.nkeys - 1)
+              : (app.pf.key_sel + dir + app.pf.nkeys) % app.pf.nkeys;
+    snprintf(app.pf.draft.key_id, sizeof(app.pf.draft.key_id), "%s", app.pf.keys[app.pf.key_sel]);
     pf_key_refresh_info();
 }
 
@@ -152,35 +138,35 @@ static void render_profile(void)
     ui_clear();
     ui_fill(0, 0, ui_cols(), ui_rows(), 0);
 
-    draw_screen_header(s_edit_idx >= 0 ? "EDIT PROFILE" : "NEW PROFILE",
+    draw_screen_header(app.pf.edit_idx >= 0 ? "EDIT PROFILE" : "NEW PROFILE",
                        "// SSH DECK");
 
     for (int i = 0; i < PF_ROWS; i++) {
         int row = pf_y0() + i * pf_step();
-        bool focused = (s_field == i);
+        bool focused = (app.pf.field == i);
         if (pf_is_text(i)) {
             const char *label; int max; bool numeric, mask;
             char *buf = pf_buf(i, &label, &max, &numeric, &mask);
             ui_pen(focused ? OVERLAY_COL_CYAN : OVERLAY_COL_DEFAULT);
             ui_puts(pf_x0(), row, label, 0);
             /* Only the focused field's caret drives scrolling. */
-            ui_field(pf_fx(), row, pf_fw(), buf, focused ? s_cursor : 0,
+            ui_field(pf_fx(), row, pf_fw(), buf, focused ? app.pf.cursor : 0,
                      focused, mask);
         } else if (i == PF_AUTH) {
             ui_pen(focused ? OVERLAY_COL_CYAN : OVERLAY_COL_DEFAULT);
             ui_puts(pf_x0(), row, "Auth", 0);
             pf_draw_selector(row, focused,
-                             s_draft.auth == STORAGE_AUTH_KEY
+                             app.pf.draft.auth == STORAGE_AUTH_KEY
                              ? "key" : "password");
-        } else if (i == PF_KEY && s_draft.auth == STORAGE_AUTH_KEY) {
+        } else if (i == PF_KEY && app.pf.draft.auth == STORAGE_AUTH_KEY) {
             ui_pen(focused ? OVERLAY_COL_CYAN : OVERLAY_COL_DEFAULT);
             ui_puts(pf_x0(), row, "Key", 0);
             char v[64];
-            if (s_key_sel >= 0 && s_key_sel < s_nkeys)
-                snprintf(v, sizeof(v), "%s%s%s", s_keys[s_key_sel],
-                         s_key_type[0] ? "  " : "", s_key_type);
-            else if (s_draft.key_id[0])
-                snprintf(v, sizeof(v), "%s (missing)", s_draft.key_id);
+            if (app.pf.key_sel >= 0 && app.pf.key_sel < app.pf.nkeys)
+                snprintf(v, sizeof(v), "%s%s%s", app.pf.keys[app.pf.key_sel],
+                         app.pf.key_type[0] ? "  " : "", app.pf.key_type);
+            else if (app.pf.draft.key_id[0])
+                snprintf(v, sizeof(v), "%s (missing)", app.pf.draft.key_id);
             else
                 snprintf(v, sizeof(v), "(no keys - use Import)");
             pf_draw_selector(row, focused, v);
@@ -190,9 +176,9 @@ static void render_profile(void)
 
     /* Inline validation error — a modal has no toast strip, so a failed
      * Save must report here or it looks dead. */
-    if (s_err[0]) {
+    if (app.pf.err[0]) {
         ui_pen(OVERLAY_COL_RED);
-        ui_puts(pf_x0(), pf_y0() + PF_ROWS * pf_step(), s_err, 0);
+        ui_puts(pf_x0(), pf_y0() + PF_ROWS * pf_step(), app.pf.err, 0);
         ui_pen(OVERLAY_COL_DEFAULT);
     }
 
@@ -204,10 +190,10 @@ static void render_profile(void)
     app.grid = bg;
     ui_pen(OVERLAY_COL_GREEN);
     ui_tile(tile_x(&bg, 0), tile_y(&bg, 0), bg.tw, bg.th, "Save", "",
-            s_field == PF_SAVE);
+            app.pf.field == PF_SAVE);
     ui_pen(OVERLAY_COL_BLUE);   /* safe navigation — matches menu Back */
     ui_tile(tile_x(&bg, 1), tile_y(&bg, 1), bg.tw, bg.th, "Cancel", "",
-            s_field == PF_CANCEL);
+            app.pf.field == PF_CANCEL);
     ui_pen(OVERLAY_COL_DEFAULT);
 
     draw_footer("type to edit \xB7 Tab/arrows move \xB7 Enter next \xB7 Esc cancel");
@@ -219,22 +205,22 @@ static void render_profile(void)
  * one. Remembers whether it was entered from the menu (to return there). */
 void enter_profile(uint64_t now, int edit_idx)
 {
-    memset(&s_draft, 0, sizeof(s_draft));
-    s_return_menu  = (app.state == ST_MENU);
-    s_edit_idx     = (edit_idx >= 0 && edit_idx < app.stored_count)
+    memset(&app.pf.draft, 0, sizeof(app.pf.draft));
+    app.pf.return_menu  = (app.state == ST_MENU);
+    app.pf.edit_idx     = (edit_idx >= 0 && edit_idx < app.stored_count)
                    ? edit_idx : -1;
-    s_orig_name[0] = '\0';
-    if (s_edit_idx >= 0) {
-        s_draft = app.profiles[s_edit_idx];
-        snprintf(s_orig_name, sizeof(s_orig_name), "%s", s_draft.name);
-        snprintf(s_port, sizeof(s_port), "%u", (unsigned)s_draft.port);
+    app.pf.orig_name[0] = '\0';
+    if (app.pf.edit_idx >= 0) {
+        app.pf.draft = app.profiles[app.pf.edit_idx];
+        snprintf(app.pf.orig_name, sizeof(app.pf.orig_name), "%s", app.pf.draft.name);
+        snprintf(app.pf.port, sizeof(app.pf.port), "%u", (unsigned)app.pf.draft.port);
     } else {
-        snprintf(s_port, sizeof(s_port), "22");
+        snprintf(app.pf.port, sizeof(app.pf.port), "22");
     }
     pf_load_keys();
-    s_field  = PF_NAME;
-    s_cursor = (int)strlen(s_draft.name);
-    s_err[0] = '\0';
+    app.pf.field  = PF_NAME;
+    app.pf.cursor = (int)strlen(app.pf.draft.name);
+    app.pf.err[0] = '\0';
     app.state = ST_PROFILE;
     (void)now;
     render_profile();
@@ -245,20 +231,20 @@ void enter_profile(uint64_t now, int edit_idx)
  * or a short reason to show inline on failure. */
 static const char *profile_commit(void)
 {
-    if (s_draft.name[0] == '\0') return "name required";
+    if (app.pf.draft.name[0] == '\0') return "name required";
     /* A '[' or ']' in the name breaks the INI section header on save and
      * silently corrupts the file on reload. Reject them. */
-    if (strpbrk(s_draft.name, "[]")) return "name: no [ or ]";
-    if (s_draft.host[0] == '\0') return "host required";
-    if (s_draft.user[0] == '\0') return "user required";
-    long port = strtol(s_port, NULL, 10);
+    if (strpbrk(app.pf.draft.name, "[]")) return "name: no [ or ]";
+    if (app.pf.draft.host[0] == '\0') return "host required";
+    if (app.pf.draft.user[0] == '\0') return "user required";
+    long port = strtol(app.pf.port, NULL, 10);
     if (port < 1 || port > 65535)   return "bad port";
 
-    s_draft.port = (uint16_t)port;
-    if (s_draft.auth == STORAGE_AUTH_KEY) {
-        if (!s_draft.key_id[0]) return "no key - Import adds keys";
+    app.pf.draft.port = (uint16_t)port;
+    if (app.pf.draft.auth == STORAGE_AUTH_KEY) {
+        if (!app.pf.draft.key_id[0]) return "no key - Import adds keys";
     } else {
-        s_draft.key_id[0] = '\0';
+        app.pf.draft.key_id[0] = '\0';
     }
 
     /* Load the authoritative on-flash set (app.profiles may hold the synth
@@ -268,15 +254,15 @@ static const char *profile_commit(void)
     if (storage_load_profiles(set, &n, MAX_PROFILES - 1) != ESP_OK) n = 0;
 
     int slot = -1;                        /* slot being replaced (edit) */
-    if (s_edit_idx >= 0) {
+    if (app.pf.edit_idx >= 0) {
         for (int i = 0; i < n; i++)
-            if (strcmp(set[i].name, s_orig_name) == 0) { slot = i; break; }
+            if (strcmp(set[i].name, app.pf.orig_name) == 0) { slot = i; break; }
         if (slot < 0) return "original profile is gone";
     }
     /* Names are the profile identity everywhere (find/replace/import) —
      * a duplicate would be ambiguous to connect to and to delete. */
     for (int i = 0; i < n; i++)
-        if (i != slot && strcmp(set[i].name, s_draft.name) == 0)
+        if (i != slot && strcmp(set[i].name, app.pf.draft.name) == 0)
             return "name already in use";
 
     conn_profile_t old = { 0 };
@@ -286,7 +272,7 @@ static const char *profile_commit(void)
     } else {
         old = set[slot];
     }
-    set[slot] = s_draft;
+    set[slot] = app.pf.draft;
     if (storage_save_profiles(set, n) != ESP_OK) return "save failed";
 
     /* The edit dropped or swapped a key reference: GC the old .pem when
@@ -306,18 +292,18 @@ static void pf_focus(int field)
 {
     if (field < 0) field = PF_COUNT - 1;
     if (field >= PF_COUNT) field = 0;
-    s_field = field;
+    app.pf.field = field;
     if (pf_is_text(field)) {
         const char *label; int max; bool numeric, mask;
         char *buf = pf_buf(field, &label, &max, &numeric, &mask);
-        s_cursor = (int)strlen(buf);
+        app.pf.cursor = (int)strlen(buf);
     }
 }
 
 /* Step the focus ring by @p dir, skipping fields the auth mode hides. */
 static void pf_focus_step(int dir)
 {
-    int f = s_field;
+    int f = app.pf.field;
     do {
         f += dir;
         if (f < 0) f = PF_COUNT - 1;
@@ -329,7 +315,7 @@ static void pf_focus_step(int dir)
 /* Leave the profile editor for wherever it was entered from. */
 static void exit_profile(uint64_t now, bool saved)
 {
-    if (s_return_menu) {
+    if (app.pf.return_menu) {
         app.state = ST_MENU;
         menu_goto(MS_PROFILES);
         if (saved) menu_note(now, MENU_MSG_MS, false, "profile saved");
@@ -370,7 +356,7 @@ void profile_input(const cyberdeck_input_t *ev, ui_key_t k, char ch, uint64_t no
             if (f < 0 || f >= PF_ROWS || !pf_field_present(f)) return;
             if (f == PF_AUTH)     pf_auth_toggle();
             else if (f == PF_KEY) pf_key_cycle(+1);
-            s_err[0] = '\0';
+            app.pf.err[0] = '\0';
             pf_focus(f);
             render_profile();
             return;
@@ -378,7 +364,7 @@ void profile_input(const cyberdeck_input_t *ev, ui_key_t k, char ch, uint64_t no
     }
 
     /* ---- button focus (Save / Cancel) ---- */
-    if (s_field >= PF_SAVE) {
+    if (app.pf.field >= PF_SAVE) {
         switch (k) {
         case K_LEFT:  pf_focus(PF_SAVE);   render_profile(); break;
         case K_RIGHT: pf_focus(PF_CANCEL); render_profile(); break;
@@ -387,11 +373,11 @@ void profile_input(const cyberdeck_input_t *ev, ui_key_t k, char ch, uint64_t no
         case K_DOWN: case K_TAB:                /* forward (Cancel wraps) */
             pf_focus_step(+1); render_profile(); break;
         case K_ENTER:
-            if (s_field == PF_CANCEL) { exit_profile(now, false); break; }
+            if (app.pf.field == PF_CANCEL) { exit_profile(now, false); break; }
             else {
                 const char *err = profile_commit();
                 if (err[0]) {   /* inline — a modal has no toast strip */
-                    snprintf(s_err, sizeof(s_err), "%s", err);
+                    snprintf(app.pf.err, sizeof(app.pf.err), "%s", err);
                     render_profile();
                 } else {
                     load_profiles();
@@ -405,19 +391,19 @@ void profile_input(const cyberdeck_input_t *ev, ui_key_t k, char ch, uint64_t no
     }
 
     /* ---- selector rows (auth toggle / key picker) ---- */
-    if (s_field == PF_AUTH || s_field == PF_KEY) {
+    if (app.pf.field == PF_AUTH || app.pf.field == PF_KEY) {
         switch (k) {
         case K_LEFT: case K_RIGHT:
-            if (s_field == PF_AUTH) pf_auth_toggle();
+            if (app.pf.field == PF_AUTH) pf_auth_toggle();
             else pf_key_cycle(k == K_RIGHT ? +1 : -1);
-            s_err[0] = '\0';
+            app.pf.err[0] = '\0';
             render_profile();
             break;
         case K_CHAR:
             if (ch != ' ') break;               /* space also steps it */
-            if (s_field == PF_AUTH) pf_auth_toggle();
+            if (app.pf.field == PF_AUTH) pf_auth_toggle();
             else pf_key_cycle(+1);
-            s_err[0] = '\0';
+            app.pf.err[0] = '\0';
             render_profile();
             break;
         case K_UP:    pf_focus_step(-1); render_profile(); break;
@@ -430,31 +416,31 @@ void profile_input(const cyberdeck_input_t *ev, ui_key_t k, char ch, uint64_t no
 
     /* ---- text field editing ---- */
     const char *label; int max; bool numeric, mask;
-    char *buf = pf_buf(s_field, &label, &max, &numeric, &mask);
+    char *buf = pf_buf(app.pf.field, &label, &max, &numeric, &mask);
     int len = (int)strlen(buf);
     switch (k) {
     case K_CHAR:
         if (numeric && !(ch >= '0' && ch <= '9')) break;
         /* Section-header metacharacters corrupt profiles.ini on reload;
          * block them at the source. */
-        if (s_field == PF_NAME && (ch == '[' || ch == ']')) break;
+        if (app.pf.field == PF_NAME && (ch == '[' || ch == ']')) break;
         if (len < max) {
-            memmove(buf + s_cursor + 1, buf + s_cursor, len - s_cursor + 1);
-            buf[s_cursor++] = ch;
-            s_err[0] = '\0';              /* an edit clears the error */
+            memmove(buf + app.pf.cursor + 1, buf + app.pf.cursor, len - app.pf.cursor + 1);
+            buf[app.pf.cursor++] = ch;
+            app.pf.err[0] = '\0';              /* an edit clears the error */
             render_profile();
         }
         break;
     case K_BACKSPACE:
-        if (s_cursor > 0) {
-            memmove(buf + s_cursor - 1, buf + s_cursor, len - s_cursor + 1);
-            s_cursor--;
-            s_err[0] = '\0';
+        if (app.pf.cursor > 0) {
+            memmove(buf + app.pf.cursor - 1, buf + app.pf.cursor, len - app.pf.cursor + 1);
+            app.pf.cursor--;
+            app.pf.err[0] = '\0';
             render_profile();
         }
         break;
-    case K_LEFT:  if (s_cursor > 0)   { s_cursor--; render_profile(); } break;
-    case K_RIGHT: if (s_cursor < len) { s_cursor++; render_profile(); } break;
+    case K_LEFT:  if (app.pf.cursor > 0)   { app.pf.cursor--; render_profile(); } break;
+    case K_RIGHT: if (app.pf.cursor < len) { app.pf.cursor++; render_profile(); } break;
     case K_UP:    pf_focus_step(-1); render_profile(); break;
     case K_DOWN: case K_TAB:
     case K_ENTER: pf_focus_step(+1); render_profile(); break;

@@ -14,22 +14,6 @@
 
 #include "esp_heap_caps.h"   /* key-PEM buffers (idfsim stubs it) */
 
-/* The profile snapshot being connected/connected: list mutations
- * (edit/delete/reorder) must never redirect a live session. */
-static conn_profile_t s_active;
-
-static bool     s_armed;          /* render one frame, then connect     */
-static bool     s_connecting;     /* async connect worker is running    */
-static bool     s_cancelled;      /* user aborted the in-flight connect */
-static uint64_t s_connect_at;     /* not before (auto-reconnect delay)  */
-static uint64_t s_started;        /* when the in-flight attempt began   */
-static int      s_attempt;        /* 0 = user-initiated, >0 = auto-retry # */
-static char     s_pinned_fp[65];  /* fp to pass as expected_fp, "" = none */
-static uint64_t s_session_start;  /* enter_session() time, for NO CARRIER */
-
-const conn_profile_t *connect_active(void)      { return &s_active; }
-uint64_t              connect_session_start(void) { return s_session_start; }
-
 static void render_connecting(const char *msg, uint64_t now)
 {
     ui_colors(UI_FG, UI_BG);
@@ -38,14 +22,14 @@ static void render_connecting(const char *msg, uint64_t now)
 
     draw_screen_header("CONNECTING", "// SSH DECK");
 
-    const conn_profile_t *p = &s_active;
+    const conn_profile_t *p = &app.conn.active;
     int cy = ui_rows() / 2;
 
     char line[96];
     size_t ll = (size_t)snprintf(line, sizeof(line), "%s  %s@%s:%u",
                                  msg, p->user, p->host, (unsigned)p->port);
-    if (s_attempt > 0 && ll < sizeof(line))
-        snprintf(line + ll, sizeof(line) - ll, "  (attempt %d)", s_attempt);
+    if (app.conn.attempt > 0 && ll < sizeof(line))
+        snprintf(line + ll, sizeof(line) - ll, "  (attempt %d)", app.conn.attempt);
     /* A long host/user can outgrow a narrow grid: truncate and pin left so
      * the leading status word always survives. */
     int maxw = ui_cols() - 8;
@@ -58,10 +42,10 @@ static void render_connecting(const char *msg, uint64_t now)
     ui_puts(lx, cy - 1, line, 0);
 
     int bw = 42, bx = (ui_cols() - bw) / 2;
-    if (s_armed && s_connect_at > now && app.cfg.ssh_retry_delay_ms) {
+    if (app.conn.armed && app.conn.connect_at > now && app.cfg.ssh_retry_delay_ms) {
         /* Retry wait: an amber bar drains toward the reconnect moment, so
          * the delay reads as a countdown instead of a stalled connect. */
-        uint64_t remain = s_connect_at - now;
+        uint64_t remain = app.conn.connect_at - now;
         if (remain > app.cfg.ssh_retry_delay_ms)
             remain = app.cfg.ssh_retry_delay_ms;
         int filled = (int)(remain * (uint64_t)bw / app.cfg.ssh_retry_delay_ms);
@@ -74,15 +58,15 @@ static void render_connecting(const char *msg, uint64_t now)
             UI_SHADE1, UI_SHADE2, UI_SHADE3, UI_BLOCK,
             UI_SHADE3, UI_SHADE2, UI_SHADE1
         };
-        ui_pen(s_cancelled ? OVERLAY_COL_AMBER : prof_accent(p->name));
+        ui_pen(app.conn.cancelled ? OVERLAY_COL_AMBER : prof_accent(p->name));
         for (int i = 0; i < bw; i++)
             ui_putch(bx + i, cy + 1, grad[(i + app.anim_frame) % 7], 0);
-        if (s_connecting) {
+        if (app.conn.connecting) {
             /* Elapsed seconds right of the bar: a stalled handshake at 40 s
              * should look different from one that just started. */
             ui_pen(OVERLAY_COL_BLUE);
             ui_printf(bx + bw + 2, cy + 1, 0, "%2us",
-                      (unsigned)((now - s_started) / 1000));
+                      (unsigned)((now - app.conn.started) / 1000));
         }
     }
     ui_pen(OVERLAY_COL_DEFAULT);
@@ -123,25 +107,25 @@ static void render_session_toast(uint64_t now)
 /* Fetch the pinned fingerprint (if any) for the active profile's host. */
 static void load_pinned_fp(void)
 {
-    if (storage_known_host_get(s_active.host, s_active.port,
-                               s_pinned_fp, sizeof(s_pinned_fp)) != ESP_OK)
-        s_pinned_fp[0] = '\0';
+    if (storage_known_host_get(app.conn.active.host, app.conn.active.port,
+                               app.conn.pinned_fp, sizeof(app.conn.pinned_fp)) != ESP_OK)
+        app.conn.pinned_fp[0] = '\0';
 }
 
 /* Arm a connect: one frame of "Connecting", then do it. */
 static void arm_connect(uint64_t not_before, uint64_t now)
 {
-    s_connect_at = not_before;
-    s_armed      = true;
+    app.conn.connect_at = not_before;
+    app.conn.armed      = true;
     app.state    = ST_CONNECTING;
     render_connecting(now < not_before ? "Retrying" : "Connecting to", now);
 }
 
-/* Arm a connect to profile @p idx, snapshotting it into s_active. */
+/* Arm a connect to profile @p idx, snapshotting it into app.conn.active. */
 void start_connect(int idx, uint64_t not_before, uint64_t now)
 {
-    s_attempt = 0;
-    s_active  = app.profiles[idx];
+    app.conn.attempt = 0;
+    app.conn.active  = app.profiles[idx];
     load_pinned_fp();
     arm_connect(not_before, now);
 }
@@ -150,8 +134,8 @@ void start_connect(int idx, uint64_t not_before, uint64_t now)
  * hostkey prompt's trust path (explicit user action, not a retry). */
 void connect_arm_pinned(const char *fp, uint64_t now)
 {
-    snprintf(s_pinned_fp, sizeof(s_pinned_fp), "%s", fp);
-    s_attempt = 0;
+    snprintf(app.conn.pinned_fp, sizeof(app.conn.pinned_fp), "%s", fp);
+    app.conn.attempt = 0;
     arm_connect(now, now);
 }
 
@@ -159,7 +143,7 @@ void connect_arm_pinned(const char *fp, uint64_t now)
  * visible attempt counter; survives edits/deletes of the stored list). */
 static void start_reconnect(uint64_t not_before, uint64_t now)
 {
-    s_attempt++;
+    app.conn.attempt++;
     load_pinned_fp();
     arm_connect(not_before, now);
 }
@@ -171,7 +155,7 @@ void session_dropped(uint64_t now)
     /* A drop can yank the user out of a mid-drag reorder; discard the
      * uncommitted permutation or a later delete would persist it. */
     menu_abort_reorder();
-    uint32_t dur = (uint32_t)((now - s_session_start) / 1000);
+    uint32_t dur = (uint32_t)((now - app.conn.session_start) / 1000);
     const char *why = ssh_client_last_error();
     display_bell();
     if (why[0]) display_fx_static();   /* transport error: signal-loss snow */
@@ -186,8 +170,8 @@ void session_dropped(uint64_t now)
 static void enter_session(uint64_t now)
 {
     app.state       = ST_SESSION;
-    s_session_start = now;
-    s_attempt       = 0;   /* a future drop counts retries from 1 again */
+    app.conn.session_start = now;
+    app.conn.attempt       = 0;   /* a future drop counts retries from 1 again */
     display_fx_wipe();     /* raster-reveal the fresh session */
     ui_hide();
     /* The terminal was cleared inside ssh_client_connect() before the read
@@ -212,13 +196,13 @@ static void do_connect_start(uint64_t now)
     enum { KEY_PEM_MAX = 8192, PUB_PEM_MAX = 2048 };
     static char *key_pem = NULL;
     static char *pub_pem = NULL;
-    const conn_profile_t *p = &s_active;
+    const conn_profile_t *p = &app.conn.active;
 
     ssh_config_t cfg = {
         .host        = p->host,
         .port        = p->port,
         .username    = p->user,
-        .expected_fp = s_pinned_fp[0] ? s_pinned_fp : NULL,
+        .expected_fp = app.conn.pinned_fp[0] ? app.conn.pinned_fp : NULL,
     };
     if (p->auth == STORAGE_AUTH_KEY) {
         if (!key_pem) key_pem = heap_caps_malloc(KEY_PEM_MAX, MALLOC_CAP_SPIRAM);
@@ -251,9 +235,9 @@ static void do_connect_start(uint64_t now)
         enter_home(now);
         return;
     }
-    s_connecting  = true;
-    s_cancelled   = false;
-    s_started     = now;
+    app.conn.connecting  = true;
+    app.conn.cancelled   = false;
+    app.conn.started     = now;
     app.next_anim = 0;
     render_connecting("Connecting to", now);
 }
@@ -261,9 +245,9 @@ static void do_connect_start(uint64_t now)
 /* Handle the async connect result once the worker finishes. */
 static void do_connect_finish(uint64_t now, esp_err_t err)
 {
-    if (s_cancelled) {
+    if (app.conn.cancelled) {
         if (err == ESP_OK) ssh_client_disconnect();   /* it connected as we cancelled */
-        s_cancelled = false;
+        app.conn.cancelled = false;
         toast(now, "cancelled");
         enter_home(now);
         return;
@@ -302,21 +286,21 @@ static void do_connect_finish(uint64_t now, esp_err_t err)
 
 void connecting_tick(uint64_t now)
 {
-    if (s_armed && now >= s_connect_at) {
-        s_armed = false;
+    if (app.conn.armed && now >= app.conn.connect_at) {
+        app.conn.armed = false;
         do_connect_start(now);           /* launches worker; returns at once */
-    } else if (s_armed) {                /* retry pre-delay: drain the bar */
+    } else if (app.conn.armed) {                /* retry pre-delay: drain the bar */
         if (now >= app.next_anim) {
             app.next_anim = now + ANIM_PERIOD_MS;
             render_connecting("Retrying", now);
         }
-    } else if (s_connecting) {
+    } else if (app.conn.connecting) {
         if (ssh_client_connect_ready()) {
-            s_connecting = false;
+            app.conn.connecting = false;
             do_connect_finish(now, ssh_client_connect_take_result());
         } else if (now >= app.next_anim) {  /* keep the bar alive while it runs */
             app.next_anim = now + ANIM_PERIOD_MS;
-            render_connecting(s_cancelled ? "Cancelling" : "Connecting to", now);
+            render_connecting(app.conn.cancelled ? "Cancelling" : "Connecting to", now);
         }
     }
 }
@@ -347,12 +331,12 @@ void connecting_input(const cyberdeck_input_t *ev, ui_key_t k, char ch, uint64_t
     /* ESC (keyboard) or any tap/long-press (touch) cancels. */
     if (k == K_ESC || ev->type == CYBERDECK_INPUT_TAP ||
         ev->type == CYBERDECK_INPUT_LONG_PRESS) {
-        if (s_armed) {                          /* still in the pre-delay wait */
-            s_armed = false;
+        if (app.conn.armed) {                          /* still in the pre-delay wait */
+            app.conn.armed = false;
             toast(now, "cancelled");     /* same ack as the mid-connect path */
             enter_home(now);
-        } else if (s_connecting && !s_cancelled) {
-            s_cancelled = true;
+        } else if (app.conn.connecting && !app.conn.cancelled) {
+            app.conn.cancelled = true;
             ssh_client_connect_cancel();        /* best-effort unblock */
             render_connecting("Cancelling", now);
         }

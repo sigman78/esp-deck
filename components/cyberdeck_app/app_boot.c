@@ -39,8 +39,6 @@ static RTC_NOINIT_ATTR uint32_t s_boot_seq;
 static uint32_t s_boot_seq;
 #endif
 
-static uint64_t s_boot_until;   /* when the splash ends */
-
 static const char *const BOOT_TAGLINES[] = {
     "SPINNING UP THE ICE",
     "WAKING THE WETWARE",
@@ -62,7 +60,7 @@ static void render_boot(uint64_t now)
     int x0 = (ui_cols() - total_w) / 2;
     int y0 = ui_rows() / 4;
 
-    uint64_t start     = s_boot_until - app.cfg.boot_delay_ms;
+    uint64_t start     = app.boot.until - app.cfg.boot_delay_ms;
     uint32_t reveal_ms = app.cfg.boot_delay_ms * 4 / 5;
     uint32_t el        = (uint32_t)(now - start);
     int reveal = reveal_ms ? (int)((uint64_t)el * total_w / reveal_ms) : total_w;
@@ -109,13 +107,13 @@ static void render_boot(uint64_t now)
 void boot_enter(uint64_t now)
 {
     s_boot_seq++;   /* next tagline (RTC-resident, see decl above) */
-    s_boot_until = now + app.cfg.boot_delay_ms;
+    app.boot.until = now + app.cfg.boot_delay_ms;
     app.state    = ST_BOOT;
 }
 
 void boot_tick(uint64_t now)
 {
-    if (now >= s_boot_until) {
+    if (now >= app.boot.until) {
         display_fx_wipe();   /* raster-reveal HOME once the splash ends */
         enter_home(now);
         return;

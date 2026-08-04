@@ -21,15 +21,6 @@
 #include "esp_system.h"     /* esp_restart() — applying a new font size */
 #endif
 
-static int      s_sel;
-static int      s_screen;        /* menu_screen_t: page of the menu tree  */
-static bool     s_from_home;     /* config opened from HOME (no session)  */
-static bool     s_armed;         /* a destructive item needs a 2nd hit    */
-static char     s_msg[48];       /* action result, shown under the tiles  */
-static uint64_t s_msg_until;     /* auto-clear time; 0 = sticky           */
-static bool     s_msg_wifi;      /* live-track wifi_status_str() while up */
-static int      s_reorder_grab = -1;   /* grabbed stored index, -1 = none */
-
 /* -------------------------------------------------------------------------
  * EFFECTS page — every runtime render-fx tunable as a value-cycling tile.
  * Values are quantized presets; fx.ini keeps byte-granular control.
@@ -211,7 +202,7 @@ static void render_menu(void)
     ui_colors(UI_FG, UI_BG);
     ui_dim();   /* dim the live session behind the menu so it pops */
 
-    const int sc = s_screen;
+    const int sc = app.menu.screen;
     const bool root = (sc == MS_MAIN);
 
     /* Resolve the page: static def, a dynamic stored-profile picker, or the
@@ -286,7 +277,7 @@ static void render_menu(void)
         chrome_x  = g.x0;
     }
     app.grid = g;
-    if (s_sel >= g.count) s_sel = g.count ? g.count - 1 : 0;
+    if (app.menu.sel >= g.count) app.menu.sel = g.count ? g.count - 1 : 0;
 
     /* Title as a magenta lozenge, centered over the chrome column. */
     int tl = (int)strlen(title);
@@ -305,8 +296,8 @@ static void render_menu(void)
     for (int i = 0; i < g.count; i++) {
         bool dim   = menu_item_dim(sc, i);
         const char *confirm = menu_confirm(sc, i);
-        bool armed   = (i == s_sel) && s_armed && confirm;
-        bool grabbed = (sc == MS_REORDER) && (i == s_reorder_grab);
+        bool armed   = (i == app.menu.sel) && app.menu.armed && confirm;
+        bool grabbed = (sc == MS_REORDER) && (i == app.menu.reorder_grab);
         uint8_t col;
         if (armed)        col = OVERLAY_COL_RED;
         else if (picker)  col = i >= app.stored_count ? OVERLAY_COL_BLUE
@@ -325,7 +316,7 @@ static void render_menu(void)
          * a grabbed REORDER tile reads by its green bar. */
         const char *title = armed ? confirm : items[i];
         const char *body  = bodies ? bodies[i] : dim ? "(unavailable)" : "";
-        bool sel = i == s_sel || grabbed;
+        bool sel = i == app.menu.sel || grabbed;
         if (fxpage && body[0] && !armed) {
             /* EFFECTS: value right-aligned on the title row in regular
              * weight, settings-table style — the bold name carries the
@@ -341,10 +332,10 @@ static void render_menu(void)
 
     /* Esc legend under the tile area; suppressed while a note is up (the
      * two share this row). */
-    if (!s_msg[0]) {
+    if (!app.menu.msg[0]) {
         const char *legend = root ? "Esc/F12 resume \xB7 tap outside closes"
                            : sc == MS_CONFIG
-                               ? (s_from_home ? "Esc \xB7 home" : "Esc \xB7 menu")
+                               ? (app.menu.from_home ? "Esc \xB7 home" : "Esc \xB7 menu")
                                : "Esc \xB7 back";
         ui_pen(OVERLAY_COL_BLUE);
         ui_puts(chrome_x + (40 - (int)strlen(legend)) / 2, ly, legend, 0);
@@ -358,13 +349,13 @@ static void render_menu(void)
         ui_puts(chrome_x + (40 - (int)strlen(m)) / 2, title_row + 1, m, 0);
     }
 
-    if (s_msg[0]) {               /* action feedback */
+    if (app.menu.msg[0]) {               /* action feedback */
         /* On the legend row, not below it: ly is clamped to the last grid
          * row, so ly+1 could be off-panel and the note would vanish. */
-        int mx = chrome_x + (40 - ((int)strlen(s_msg) + 2)) / 2;
+        int mx = chrome_x + (40 - ((int)strlen(app.menu.msg) + 2)) / 2;
         ui_pen(OVERLAY_COL_AMBER);
         ui_putch(mx, ly, UI_DIAMOND, 0);
-        ui_puts(mx + 2, ly, s_msg, 0);
+        ui_puts(mx + 2, ly, app.menu.msg, 0);
         ui_pen(OVERLAY_COL_DEFAULT);
     }
 
@@ -373,7 +364,7 @@ static void render_menu(void)
         uint64_t up = (uint64_t)app.anim_frame * ANIM_PERIOD_MS / 1000;
         char flex[48];
         uint64_t now_ms = (uint64_t)app.anim_frame * ANIM_PERIOD_MS;
-        uint64_t ss = connect_session_start();
+        uint64_t ss = app.conn.session_start;
         uint64_t lk = now_ms > ss ? (now_ms - ss) / 1000 : 0;
         snprintf(flex, sizeof(flex), "UP %02u:%02u:%02u   LINK %02u:%02u",
                  (unsigned)(up / 3600), (unsigned)(up / 60 % 60),
@@ -390,24 +381,24 @@ static void render_menu(void)
  * @p ms: lifetime; 0 = sticky. @p live_wifi: track wifi_status_str(). */
 void menu_note(uint64_t now, uint32_t ms, bool live_wifi, const char *text)
 {
-    snprintf(s_msg, sizeof(s_msg), "%s", text);
-    s_msg_until = ms ? now + ms : 0;
-    s_msg_wifi  = live_wifi;
+    snprintf(app.menu.msg, sizeof(app.menu.msg), "%s", text);
+    app.menu.msg_until = ms ? now + ms : 0;
+    app.menu.msg_wifi  = live_wifi;
 }
 
 static void menu_clear_note(void)
 {
-    s_msg[0]    = '\0';
-    s_msg_until = 0;
-    s_msg_wifi  = false;
+    app.menu.msg[0]    = '\0';
+    app.menu.msg_until = 0;
+    app.menu.msg_wifi  = false;
 }
 
 /* Switch to menu screen @p sc, resetting selection/arm/note. */
 void menu_goto(int sc)
 {
-    s_screen = sc;
-    s_sel    = 0;
-    s_armed  = false;
+    app.menu.screen = sc;
+    app.menu.sel    = 0;
+    app.menu.armed  = false;
     if (sc == MS_FONT) s_font_pending = FONT_SIZE_COUNT;  /* re-read on open */
     menu_clear_note();
     render_menu();
@@ -418,8 +409,8 @@ void menu_goto(int sc)
  * user out mid-drag — a later save would silently persist them. */
 void menu_abort_reorder(void)
 {
-    if (s_screen == MS_REORDER && s_reorder_grab >= 0) {
-        s_reorder_grab = -1;
+    if (app.menu.screen == MS_REORDER && app.menu.reorder_grab >= 0) {
+        app.menu.reorder_grab = -1;
         load_profiles();
     }
 }
@@ -428,20 +419,20 @@ void menu_abort_reorder(void)
  * so an armed confirm can never leak across pages. */
 static void menu_back(uint64_t now)
 {
-    if (s_screen == MS_REORDER && s_reorder_grab >= 0) {
+    if (app.menu.screen == MS_REORDER && app.menu.reorder_grab >= 0) {
         menu_abort_reorder();
         menu_clear_note();
         render_menu();
         return;
     }
-    switch (s_screen) {
+    switch (app.menu.screen) {
     case MS_MAIN:                              /* resume the live session */
-        s_armed = false;
+        app.menu.armed = false;
         app.state = ST_SESSION;
         ui_hide();
         break;
     case MS_CONFIG:
-        if (s_from_home) enter_home(now);
+        if (app.menu.from_home) enter_home(now);
         else             menu_goto(MS_MAIN);
         break;
     case MS_DELPROFILE:
@@ -492,7 +483,7 @@ static void delete_profile_at(int idx)
 /* Persist the reorder picker's current in-RAM order and release the grab. */
 static void commit_reorder(uint64_t now)
 {
-    s_reorder_grab = -1;
+    app.menu.reorder_grab = -1;
     if (storage_save_profiles(app.profiles, app.stored_count) == ESP_OK)
         menu_note(now, MENU_MSG_MS, false, "order saved");
     else
@@ -502,10 +493,10 @@ static void commit_reorder(uint64_t now)
 
 static void menu_activate(uint64_t now)
 {
-    const int sc  = s_screen;
-    const int sel = s_sel;
-    const bool was_armed = s_armed;
-    s_armed = false;   /* destructive branches re-arm on the first hit */
+    const int sc  = app.menu.screen;
+    const int sel = app.menu.sel;
+    const bool was_armed = app.menu.armed;
+    app.menu.armed = false;   /* destructive branches re-arm on the first hit */
 
     switch (sc) {
     case MS_MAIN:
@@ -599,7 +590,7 @@ static void menu_activate(uint64_t now)
                 menu_note(now, MENU_MSG_MS, false, "nothing to reorder");
                 break;
             }
-            s_reorder_grab = -1;
+            app.menu.reorder_grab = -1;
             menu_goto(MS_REORDER);
             return;
         case 3: menu_goto(MS_DELPROFILE);                 return;
@@ -636,7 +627,7 @@ static void menu_activate(uint64_t now)
             if (!app.cfg.ble->forget) {
                 menu_note(now, MENU_MSG_MS, false, "forget unavailable");
             } else if (!was_armed) {
-                s_armed = true;
+                app.menu.armed = true;
                 menu_note(now, 0, false, "activate again to forget");
             } else {
                 app.cfg.ble->forget();
@@ -651,7 +642,7 @@ static void menu_activate(uint64_t now)
         switch (sel) {
         case 0:                                   /* clear host keys (2-step) */
             if (!was_armed) {
-                s_armed = true;
+                app.menu.armed = true;
                 menu_note(now, 0, false, "activate again to clear");
             } else {
                 esp_err_t e = storage_known_hosts_clear();
@@ -661,7 +652,7 @@ static void menu_activate(uint64_t now)
             break;
         case 1:                                   /* factory reset (2-step) */
             if (!was_armed) {
-                s_armed = true;
+                app.menu.armed = true;
                 menu_note(now, 0, false, "activate again to WIPE ALL");
             } else {
                 storage_factory_reset();
@@ -677,11 +668,11 @@ static void menu_activate(uint64_t now)
     case MS_DELPROFILE:
         if (sel >= app.stored_count) { menu_back(now); return; }   /* Back tile */
         if (!was_armed) {
-            s_armed = true;
+            app.menu.armed = true;
             menu_note(now, 0, false, "activate again to delete");
         } else {
             delete_profile_at(sel);
-            if (s_sel >= app.stored_count && s_sel > 0) s_sel--;
+            if (app.menu.sel >= app.stored_count && app.menu.sel > 0) app.menu.sel--;
             menu_note(now, MENU_MSG_MS, false, "profile deleted");
         }
         break;
@@ -693,15 +684,15 @@ static void menu_activate(uint64_t now)
 
     case MS_REORDER:
         if (sel >= app.stored_count) { menu_back(now); return; }   /* Back tile */
-        if (s_reorder_grab < 0) {                                  /* grab      */
-            s_reorder_grab = sel;
+        if (app.menu.reorder_grab < 0) {                                  /* grab      */
+            app.menu.reorder_grab = sel;
             menu_note(now, 0, false, "arrows/tap move it - Enter drops");
         } else {                                                   /* drop      */
-            if (sel != s_reorder_grab) {
+            if (sel != app.menu.reorder_grab) {
                 conn_profile_t t             = app.profiles[sel];
-                app.profiles[sel]            = app.profiles[s_reorder_grab];
-                app.profiles[s_reorder_grab] = t;
-                s_sel = sel;
+                app.profiles[sel]            = app.profiles[app.menu.reorder_grab];
+                app.profiles[app.menu.reorder_grab] = t;
+                app.menu.sel = sel;
             }
             commit_reorder(now);
         }
@@ -714,10 +705,10 @@ static void menu_activate(uint64_t now)
 void menu_open(uint64_t now)
 {
     (void)now;
-    s_sel       = 0;
-    s_screen    = MS_MAIN;
-    s_from_home = false;
-    s_armed     = false;
+    app.menu.sel       = 0;
+    app.menu.screen    = MS_MAIN;
+    app.menu.from_home = false;
+    app.menu.armed     = false;
     menu_clear_note();
     app.state = ST_MENU;
     render_menu();
@@ -726,7 +717,7 @@ void menu_open(uint64_t now)
 /* Open the config hub directly from HOME (no session behind it). */
 void menu_open_config(void)
 {
-    s_from_home = true;
+    app.menu.from_home = true;
     app.state   = ST_MENU;
     menu_goto(MS_CONFIG);
 }
@@ -734,7 +725,7 @@ void menu_open_config(void)
 void menu_tick(uint64_t now)
 {
     /* A menu opened from HOME has no session to monitor. */
-    if (!s_from_home && !ssh_client_is_connected()) {
+    if (!app.menu.from_home && !ssh_client_is_connected()) {
         session_dropped(now);
         return;
     }
@@ -742,15 +733,15 @@ void menu_tick(uint64_t now)
      * the real state, expired notes clear, the UP/LINK clocks tick. */
     if (now >= app.next_anim) {
         app.next_anim = now + ANIM_PERIOD_MS;
-        if (s_msg[0] && s_msg_wifi) {
-            snprintf(s_msg, sizeof(s_msg), "wifi: %s", wifi_status_str());
+        if (app.menu.msg[0] && app.menu.msg_wifi) {
+            snprintf(app.menu.msg, sizeof(app.menu.msg), "wifi: %s", wifi_status_str());
             /* Still in flight? Keep the note alive — expiring mid-
              * reconnect reads as the action silently dying. */
             wifi_mgr_state_t ws = wifi_manager_get_state();
             if (ws == WIFI_MGR_CONNECTING || ws == WIFI_MGR_LOST)
-                s_msg_until = now + MENU_MSG_MS;
+                app.menu.msg_until = now + MENU_MSG_MS;
         }
-        if (s_msg[0] && s_msg_until && now >= s_msg_until)
+        if (app.menu.msg[0] && app.menu.msg_until && now >= app.menu.msg_until)
             menu_clear_note();
         render_menu();
     }
@@ -769,35 +760,35 @@ void menu_input(const cyberdeck_input_t *ev, ui_key_t k, char ch, uint64_t now)
         if (slot < 0) { menu_back(now); return; }   /* tap outside: back */
         /* Tapping a DIFFERENT tile than the armed one must disarm first, or
          * the stale arm fires this tile's destructive action unconfirmed. */
-        if (slot != s_sel && s_armed) {
-            s_armed = false;
+        if (slot != app.menu.sel && app.menu.armed) {
+            app.menu.armed = false;
             menu_clear_note();
         }
-        s_sel = slot;
+        app.menu.sel = slot;
         menu_activate(now);                        /* == Enter */
         return;
     }
     switch (k) {
     case K_UP: case K_DOWN: case K_LEFT: case K_RIGHT: {
-        int ns = tile_nav(&app.grid, s_sel, k);
+        int ns = tile_nav(&app.grid, app.menu.sel, k);
         /* A grabbed reorder tile rides the arrows: each step swaps it
          * with the neighbour (never with the trailing Back tile). */
-        if (s_screen == MS_REORDER && s_reorder_grab >= 0) {
-            if (ns != s_sel && ns < app.stored_count &&
-                s_sel < app.stored_count) {
+        if (app.menu.screen == MS_REORDER && app.menu.reorder_grab >= 0) {
+            if (ns != app.menu.sel && ns < app.stored_count &&
+                app.menu.sel < app.stored_count) {
                 conn_profile_t t     = app.profiles[ns];
-                app.profiles[ns]     = app.profiles[s_sel];
-                app.profiles[s_sel]  = t;
-                s_reorder_grab = ns;
-                s_sel          = ns;
+                app.profiles[ns]     = app.profiles[app.menu.sel];
+                app.profiles[app.menu.sel]  = t;
+                app.menu.reorder_grab = ns;
+                app.menu.sel          = ns;
                 render_menu();
             }
             break;
         }
-        if (ns != s_sel) {
-            s_sel = ns;
-            if (s_armed) {              /* moving away backs the arm down */
-                s_armed = false;
+        if (ns != app.menu.sel) {
+            app.menu.sel = ns;
+            if (app.menu.armed) {              /* moving away backs the arm down */
+                app.menu.armed = false;
                 menu_clear_note();
             }
             render_menu();

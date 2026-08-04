@@ -126,35 +126,32 @@ void toast_for(uint64_t now, uint32_t ms, const char *fmt, ...)
  * screen narrates itself, and leaving it for a scan is not a "disconnect". */
 static void status_toasts(uint64_t now)
 {
-    static uint8_t prev_wifi;   /* wifi_mgr_state_t */
-    static uint8_t prev_ble;    /* ble_state_t as int (see cyberdeck_ble_ops_t) */
-
     uint8_t w = (uint8_t)wifi_manager_get_state();
-    if (w != prev_wifi) {
+    if (w != app.prev_wifi) {
         if (w == WIFI_MGR_CONNECTED)
             toast(now, "wifi connected %s", wifi_manager_get_ip());
         else if (w == WIFI_MGR_CONNECTING)
             toast(now, "wifi connecting...");
         else if (w == WIFI_MGR_FAILED)
             toast_for(now, ERR_TOAST_MS, "wifi connect failed (retrying)");
-        else if (prev_wifi == WIFI_MGR_CONNECTED)   /* -> LOST / IDLE */
+        else if (app.prev_wifi == WIFI_MGR_CONNECTED)   /* -> LOST / IDLE */
             toast(now, "wifi disconnected");
-        prev_wifi = w;
+        app.prev_wifi = w;
     }
 
     if (app.cfg.ble && app.cfg.ble->get_state) {
         uint8_t b = (uint8_t)app.cfg.ble->get_state();
-        if (b != prev_ble) {
+        if (b != app.prev_ble) {
             if (b == 4) {                          /* BLE_CONNECTED  */
                 const char *n = app.cfg.ble->get_name
                               ? app.cfg.ble->get_name() : "";
                 toast(now, "keyboard connected %s", n);
             } else if (b == 3) {                   /* BLE_CONNECTING */
                 toast(now, "keyboard connecting...");
-            } else if (prev_ble == 4 && b != 2) {  /* not pairing scan */
+            } else if (app.prev_ble == 4 && b != 2) {  /* not pairing scan */
                 toast(now, "keyboard disconnected");
             }
-            prev_ble = b;
+            app.prev_ble = b;
         }
     }
 }
@@ -190,6 +187,9 @@ esp_err_t cyberdeck_app_init(const cyberdeck_app_config_t *cfg, uint64_t now_ms)
 
     memset(&app, 0, sizeof(app));
     app.cfg = *cfg;
+    app.pf.edit_idx    = -1;
+    app.pf.key_sel     = -1;
+    app.menu.reorder_grab = -1;
     boot_enter(now_ms);
     saver_reset(now_ms);   /* idle timer starts at boot */
 
