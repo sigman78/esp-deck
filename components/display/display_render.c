@@ -148,7 +148,7 @@ void display_render_set_font(int width, int height)
  * ---------------------------------------------------------------------- */
 
 /* Scanline dim: 93.75% brightness, the one level that read as CRT texture
- * on-glass — everything stronger (87.5% and below) read as bars. */
+ * on hardware — everything stronger (87.5% and below) read as bars. */
 static inline uint16_t fx_dim565(uint16_t p)
 {
     return (uint16_t)(p - ((p >> 4) & 0x0861));

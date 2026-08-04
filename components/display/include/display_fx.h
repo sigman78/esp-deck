@@ -15,7 +15,7 @@
 
 #include <stdint.h>
 
-/* Row-recency back glow didn't hold up on-glass (2026-07): compiled out by
+/* Row-recency back glow didn't hold up on hardware (2026-07): compiled out by
  * default, -DDISPLAY_FX_ROW_GLOW=1 to experiment. The cfg fields and fx.ini
  * keys survive either way so saved settings round-trip. */
 #ifndef DISPLAY_FX_ROW_GLOW
@@ -24,7 +24,7 @@
 
 typedef struct {
     /* CRT scanlines — every other scanline rendered at 93.75% brightness.
-     * A single fixed level: anything stronger read as bars on-glass. */
+     * A single fixed level: anything stronger read as bars on hardware. */
     uint8_t scanlines;        /* 0 off / 1 on                              */
 
     /* Bold phosphor pop — ATTR_BOLD glyphs get ~1.5x brighter fg. */

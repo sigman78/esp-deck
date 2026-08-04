@@ -27,7 +27,7 @@ static const uint8_t k_clk_font[11][7] = {
     { 0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C, 0x00 },   /* : */
 };
 
-/* One font pixel = 2x2 cells: "HH:MM" spans 544x224 px on the 800x480 glass. */
+/* One font pixel = 2x2 cells: "HH:MM" spans 544x224 px on the 800x480 panel. */
 #define CLK_FW   6                           /* font pixels per glyph row   */
 #define CLK_SX   2
 #define CLK_SY   2
