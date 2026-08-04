@@ -12,6 +12,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#define PROV_ACK_HOLD_MS 2500   /* success hold so the phone reads the ack */
+
+static uint64_t s_done_at;      /* when to finish after CRED_SUCCESS (0 = unset) */
+
 /* Full-screen SoftAP onboarding modal. */
 static void render_wifiprov(uint64_t now)
 {
@@ -34,9 +38,9 @@ static void render_wifiprov(uint64_t now)
         ui_puts(6, 8, "returning home", 0);
         /* Departure bar: ✓s fill toward the moment we head home, so the
          * 2.5 s ack hold reads as a countdown instead of a freeze. */
-        if (app.prov_done_at) {
+        if (s_done_at) {
             const int BW = 20;
-            uint64_t left = app.prov_done_at > now ? app.prov_done_at - now : 0;
+            uint64_t left = s_done_at > now ? s_done_at - now : 0;
             int fill = BW - (int)(left * BW / PROV_ACK_HOLD_MS);
             for (int i = 0; i < fill && i < BW; i++)
                 ui_putch(22 + i, 8, 0x2713, 0);
@@ -111,24 +115,24 @@ void enter_wifiprov(uint64_t now)
         enter_home(now);
         return;
     }
-    app.prov_done_at = 0;
-    app.next_anim    = 0;
-    app.state        = ST_WIFIPROV;
+    s_done_at     = 0;
+    app.next_anim = 0;
+    app.state     = ST_WIFIPROV;
     render_wifiprov(now);
 }
 
 void wifiprov_tick(uint64_t now)
 {
     if (wifi_provision_state() == WIFI_PROV_ST_SUCCESS) {
-        if (app.prov_done_at == 0) {
-            app.prov_done_at = now + PROV_ACK_HOLD_MS; /* phone reads the ack */
+        if (s_done_at == 0) {
+            s_done_at = now + PROV_ACK_HOLD_MS;  /* phone reads the ack */
             render_wifiprov(now);
-        } else if (now < app.prov_done_at) { /* keep the check-bar filling */
+        } else if (now < s_done_at) {        /* keep the check-bar filling */
             if (now >= app.next_anim) {
                 app.next_anim = now + ANIM_PERIOD_MS;
                 render_wifiprov(now);
             }
-        } else if (now >= app.prov_done_at) {
+        } else if (now >= s_done_at) {
             char ssid[33];
             snprintf(ssid, sizeof(ssid), "%s", wifi_provision_ssid());
             wifi_provision_stop();
