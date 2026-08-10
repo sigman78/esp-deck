@@ -9,12 +9,6 @@ builds as a native Windows/SDL **simulator** for fast UI iteration.
 
 *`htop` over SSH on the hardware — 800×480 panel, Bluetooth keyboard below.*
 
-```
-Boot ─► Profile picker ─► WiFi ─► SSH (host-key pinned) ─► Session
-         │  b: pair keyboard                                 F12: menu
-         └─ arrows / two-tap                        (resume/disconnect/pair)
-```
-
 ## Features
 
 - **SSH shell** over WiFi (`libssh2`) — password and public-key auth
