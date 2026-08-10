@@ -7,8 +7,6 @@ builds as a native Windows/SDL **simulator** for fast UI iteration.
 
 ![Cyberdeck running htop over an SSH session on the Waveshare 7" panel, with a Bluetooth keyboard below](docs/sshot.jpg)
 
-*`htop` over SSH on the hardware — 800×480 panel, Bluetooth keyboard below.*
-
 ## Features
 
 - **SSH shell** over WiFi (`libssh2`) — password and public-key auth
