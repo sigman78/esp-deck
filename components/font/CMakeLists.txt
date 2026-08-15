@@ -20,4 +20,8 @@ if(BUILD_SIMULATOR)
     target_include_directories(font PRIVATE ${CMAKE_CURRENT_LIST_DIR})
 else()
     target_include_directories(${COMPONENT_LIB} PRIVATE ${CMAKE_CURRENT_LIST_DIR})
+    # The PackBits decoder runs in the bounce ISR; -O2 (over the project's
+    # -Os) buys measurable per-glyph decode time for a few hundred bytes.
+    set_source_files_properties(font_renderer.c PROPERTIES
+        COMPILE_OPTIONS "-O2")
 endif()
