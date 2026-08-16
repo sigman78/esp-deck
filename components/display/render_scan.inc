@@ -21,7 +21,7 @@
  *
  * The glyph stride is 2*W*sizeof(SCAN_ROW): every cell height is exactly
  * 2*W for the sizes we ship, so the stride folds to a constant here (the
- * generic g_rs_gb is not needed in this loop).
+ * generic g_rs.gb is not needed in this loop).
  */
 
 static IRAM_ATTR void SCAN_FN(const scan_ctx_t *cx)

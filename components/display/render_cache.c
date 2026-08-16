@@ -14,30 +14,32 @@
 
 /* -------------------------------------------------------------------------
  * Cell buffer — registered once by vterm_init via display_set_text_buffer.
- * Plain statics (DRAM on ESP32, regular BSS on host) so the ISR can reach
- * them.
+ * Plain static state (DRAM on ESP32, regular BSS on host) so the ISR can
+ * reach it.
  * ---------------------------------------------------------------------- */
-static DRAM_ATTR const terminal_cell_t *s_cell_buf  = NULL;
-static DRAM_ATTR int                    s_cell_cols = 0;
-static DRAM_ATTR int                    s_cell_rows = 0;
+static DRAM_ATTR struct {
+    const terminal_cell_t *buf;
+    int cols, rows;
+} s_cells = {};
 
 /* -------------------------------------------------------------------------
  * Overlay buffer — optional second compositing layer.
- * Written by the main task; read by the ISR. Pointer written last so the
- * ISR never sees a non-NULL pointer with stale cols/rows.
+ * Written by the main task; read by the ISR.
  * ---------------------------------------------------------------------- */
-static DRAM_ATTR display_overlay_cell_t *s_overlay_buf  = NULL;
-static DRAM_ATTR int                     s_overlay_cols = 0;
-static DRAM_ATTR int                     s_overlay_rows = 0;
-static DRAM_ATTR color_t                 s_overlay_fg   = COLOR_BLACK;
-static DRAM_ATTR color_t                 s_overlay_bg   = COLOR_CYAN;
+static DRAM_ATTR struct {
+    display_overlay_cell_t *buf;   /* written LAST in the setter — the ISR
+                                    * must never see a fresh pointer with
+                                    * stale cols/rows */
+    int     cols, rows;
+    color_t fg, bg;
+} s_overlay = { .fg = COLOR_BLACK, .bg = COLOR_CYAN };
 
-/* Overlay accent palettes (index 0 → s_overlay_fg), DRAM for the ISR.
+/* Overlay accent palettes (index 0 → s_overlay.fg), DRAM for the ISR.
  * Dual palette: TEXT accents use VGA bright tones; INVERSE bars use muted
  * companions of the same hues (full-saturation bars read as motley).
  * WHITE stays pure in both — QR codes need true white modules. */
 static DRAM_ATTR const color_t s_overlay_pal[OVERLAY_PAL_SIZE] = {
-    0,                        /* 0: default → replaced by s_overlay_fg */
+    0,                        /* 0: default → replaced by s_overlay.fg */
     RGB565( 85, 255,  85),    /* 1 green   (VGA bright green)   */
     RGB565( 85, 255, 255),    /* 2 cyan    (VGA bright cyan)    */
     RGB565(255,  85, 255),    /* 3 magenta (VGA bright magenta) */
@@ -59,35 +61,35 @@ static DRAM_ATTR const color_t s_overlay_bar[OVERLAY_PAL_SIZE] = {
 
 void display_set_text_buffer(const terminal_cell_t *buf, int cols, int rows)
 {
-    s_cell_buf  = buf;
-    s_cell_cols = cols;
-    s_cell_rows = rows;
+    s_cells.buf  = buf;
+    s_cells.cols = cols;
+    s_cells.rows = rows;
 }
 
 void display_set_overlay_buffer(display_overlay_cell_t *buf, int cols, int rows)
 {
-    s_overlay_cols = cols;
-    s_overlay_rows = rows;
-    s_overlay_buf  = buf;   /* written last — atomic 32-bit store */
+    s_overlay.cols = cols;
+    s_overlay.rows = rows;
+    s_overlay.buf  = buf;   /* written last — atomic 32-bit store */
 }
 
 void display_set_overlay_colors(color_t fg, color_t bg)
 {
-    s_overlay_fg = fg;
-    s_overlay_bg = bg;
+    s_overlay.fg = fg;
+    s_overlay.bg = bg;
 }
 
 void display_get_text_size(int *cols, int *rows)
 {
-    if (cols) *cols = s_cell_cols;
-    if (rows) *rows = s_cell_rows;
+    if (cols) *cols = s_cells.cols;
+    if (rows) *rows = s_cells.rows;
 }
 
-int render_cache_text_rows(void) { return s_cell_rows; }
-int render_cache_text_cols(void) { return s_cell_cols; }
+int render_cache_text_rows(void) { return s_cells.rows; }
+int render_cache_text_cols(void) { return s_cells.cols; }
 bool render_cache_has_cells(void)
 {
-    return s_cell_buf != NULL && s_cell_cols > 0 && s_cell_rows > 0;
+    return s_cells.buf != NULL && s_cells.cols > 0 && s_cells.rows > 0;
 }
 
 /* -------------------------------------------------------------------------
@@ -95,7 +97,7 @@ bool render_cache_has_cells(void)
  * scanline ([0] normal, [1] scanline-dimmed) so the hot loop pays no
  * per-pixel effect cost. Glyphs cannot be cached by pointer — the font
  * tables are compressed (PackBits row-RLE) — so each column's glyph is
- * DECODED once per row into s_cc_rows (g_rs_gb stride) and the scan reads
+ * DECODED once per row into s_cc.rows (g_rs.gb stride) and the scan reads
  * plain rows.
  *
  * ONE bank, rebuilt synchronously on the first chunk of each character
@@ -104,26 +106,28 @@ bool render_cache_has_cells(void)
  * look-ahead, per-band rebuild, in-row decode splitting) are documented
  * in docs/ARCHITECTURE.md — measured, don't re-litigate without new data.
  * ---------------------------------------------------------------------- */
-static DRAM_ATTR _Alignas(4) uint8_t s_cc_rows[FONT_MAX_CACHE_BYTES];
-static DRAM_ATTR uint16_t           s_cc_bg[2][RENDER_MAX_COLS];
-static DRAM_ATTR uint16_t           s_cc_xf[2][RENDER_MAX_COLS];
-static DRAM_ATTR uint8_t            s_cc_ul[RENDER_MAX_COLS];
+static DRAM_ATTR struct {
+    _Alignas(4) uint8_t rows[FONT_MAX_CACHE_BYTES];  /* decoded glyphs  */
+    uint16_t bg[2][RENDER_MAX_COLS];                 /* [variant][col]  */
+    uint16_t xf[2][RENDER_MAX_COLS];                 /* fg ^ bg         */
+    uint8_t  ul[RENDER_MAX_COLS];                    /* underline flags */
 #if OVERLAY_DIM_DITHER
-static DRAM_ATTR uint8_t            s_cc_dim[RENDER_MAX_COLS];
+    uint8_t  dim[RENDER_MAX_COLS];                   /* scrim flags     */
 #endif
-
-/* Validity tags + per-row summaries (skip whole post-passes when clear). */
-static DRAM_ATTR int     s_cc_row    = -1;  /* char row held, -1 = none */
-static DRAM_ATTR int     s_cc_scan   = 0;   /* dim variant populated?   */
-static DRAM_ATTR uint8_t s_cc_frame  = 0;   /* g_fx_frame at build      */
-static DRAM_ATTR bool    s_cc_any_ul = false;
+    /* Validity tags + per-row summaries (the summaries let whole
+     * post-passes be skipped when clear). */
+    int      row;         /* char row held, -1 = none */
+    int      scan;        /* dim variant populated?   */
+    uint8_t  frame;       /* g_fx_frame at build      */
+    bool     any_ul;
 #if OVERLAY_DIM_DITHER
-static DRAM_ATTR bool    s_cc_any_dim = false;
+    bool     any_dim;
 #endif
+} s_cc = { .row = -1 };
 
 void render_cache_invalidate(void)
 {
-    s_cc_row = -1;
+    s_cc.row = -1;
 }
 
 /* -------------------------------------------------------------------------
@@ -175,10 +179,10 @@ static IRAM_ATTR void resolve_overlay_cell(uint8_t ov_attrs, uint8_t ov_color,
         if (ov_color >= 1 && ov_color <= 6 && !(ov_attrs & OVERLAY_ATTR_BRIGHT))
             fg = (color_t)(((bg >> 2) & 0x39E7) + 0x7BEF + 0x39E7);
         else
-            fg = s_overlay_bg;
+            fg = s_overlay.bg;
     } else {
-        fg = ov_color ? s_overlay_pal[ov_color] : s_overlay_fg;
-        bg = s_overlay_bg;
+        fg = ov_color ? s_overlay_pal[ov_color] : s_overlay.fg;
+        bg = s_overlay.bg;
     }
     /* Focus glow: wash the bg 50% toward white (carry-safe half-sum) —
      * the focused bar turns pastel, text stays dark. */
@@ -231,10 +235,10 @@ static IRAM_ATTR void resolve_terminal_cell(const terminal_cell_t *cell,
  * always agree, even if the config changes mid-band). */
 static IRAM_ATTR void build_row_cache(int cr, int scan_on)
 {
-    const terminal_cell_t *row_cells = s_cell_buf + cr * s_cell_cols;
+    const terminal_cell_t *row_cells = s_cells.buf + cr * s_cells.cols;
     const display_overlay_cell_t *ov_row =
-        (s_overlay_buf && cr < s_overlay_rows)
-        ? (s_overlay_buf + cr * s_overlay_cols) : NULL;
+        (s_overlay.buf && cr < s_overlay.rows)
+        ? (s_overlay.buf + cr * s_overlay.cols) : NULL;
 
     const uint8_t mono     = g_fx_cfg.mono;
     const uint8_t bold_pop = g_fx_cfg.bold_pop;
@@ -260,12 +264,12 @@ static IRAM_ATTR void build_row_cache(int cr, int scan_on)
     }
 #endif
 
-    for (int c = 0; c < s_cell_cols; c++) {
-        uint8_t *dst = s_cc_rows + (size_t)c * (size_t)g_rs_gb;
+    for (int c = 0; c < s_cells.cols; c++) {
+        uint8_t *dst = s_cc.rows + (size_t)c * (size_t)g_rs.gb;
         cell_colors_t cc;
 
-        const uint8_t  ov_attrs = (ov_row && c < s_overlay_cols) ? ov_row[c].attrs : 0;
-        const uint16_t ov_cp    = (ov_row && c < s_overlay_cols) ? ov_row[c].cp    : 0;
+        const uint8_t  ov_attrs = (ov_row && c < s_overlay.cols) ? ov_row[c].attrs : 0;
+        const uint16_t ov_cp    = (ov_row && c < s_overlay.cols) ? ov_row[c].cp    : 0;
 
         if (ov_cp != 0) {
             resolve_overlay_cell(ov_attrs, ov_row[c].color, &cc);
@@ -281,7 +285,7 @@ static IRAM_ATTR void build_row_cache(int cr, int scan_on)
              * of 4. */
             if (cell->cp == 0x20 || cell->cp == 0) {
                 uint32_t *d32 = (uint32_t *)dst;
-                for (int i = 0; i < g_rs_gb >> 2; i++) d32[i] = 0;
+                for (int i = 0; i < g_rs.gb >> 2; i++) d32[i] = 0;
             } else {
                 font_decode_glyph(cell->cp, cc.bold != 0, dst);
             }
@@ -298,46 +302,46 @@ static IRAM_ATTR void build_row_cache(int cr, int scan_on)
         if (cc.bold && bold_pop)
             fg |= (uint16_t)((fg >> 1) & 0x7BEF);
 
-        s_cc_bg[0][c] = bg;
-        s_cc_xf[0][c] = (uint16_t)(fg ^ bg);
-        s_cc_ul[c]    = cc.underline;
+        s_cc.bg[0][c] = bg;
+        s_cc.xf[0][c] = (uint16_t)(fg ^ bg);
+        s_cc.ul[c]    = cc.underline;
         any_ul |= cc.underline != 0;
         if (scan_on) {
             const uint16_t fgd = fx_dim565(fg);
             const uint16_t bgd = fx_dim565(bg);
-            s_cc_bg[1][c] = bgd;
-            s_cc_xf[1][c] = (uint16_t)(fgd ^ bgd);
+            s_cc.bg[1][c] = bgd;
+            s_cc.xf[1][c] = (uint16_t)(fgd ^ bgd);
         }
 #if OVERLAY_DIM_DITHER
-        s_cc_dim[c] = cc.dim;
+        s_cc.dim[c] = cc.dim;
         any_dim |= cc.dim != 0;
 #endif
     }
 
-    s_cc_any_ul = any_ul;
+    s_cc.any_ul = any_ul;
 #if OVERLAY_DIM_DITHER
-    s_cc_any_dim = any_dim;
+    s_cc.any_dim = any_dim;
 #endif
 }
 
 IRAM_ATTR void render_cache_resolve(int char_row, int scan_on, scan_ctx_t *cx)
 {
-    if (s_cc_row != char_row || s_cc_scan != scan_on
-            || s_cc_frame != g_fx_frame) {
+    if (s_cc.row != char_row || s_cc.scan != scan_on
+            || s_cc.frame != g_fx_frame) {
         build_row_cache(char_row, scan_on);
-        s_cc_row   = char_row;
-        s_cc_scan  = scan_on;
-        s_cc_frame = g_fx_frame;
+        s_cc.row   = char_row;
+        s_cc.scan  = scan_on;
+        s_cc.frame = g_fx_frame;
     }
-    cx->rows   = s_cc_rows;
-    cx->bg[0]  = s_cc_bg[0];
-    cx->bg[1]  = s_cc_bg[1];
-    cx->xf[0]  = s_cc_xf[0];
-    cx->xf[1]  = s_cc_xf[1];
-    cx->ul     = s_cc_ul;
-    cx->any_ul = s_cc_any_ul;
+    cx->rows   = s_cc.rows;
+    cx->bg[0]  = s_cc.bg[0];
+    cx->bg[1]  = s_cc.bg[1];
+    cx->xf[0]  = s_cc.xf[0];
+    cx->xf[1]  = s_cc.xf[1];
+    cx->ul     = s_cc.ul;
+    cx->any_ul = s_cc.any_ul;
 #if OVERLAY_DIM_DITHER
-    cx->dim     = s_cc_dim;
-    cx->any_dim = s_cc_any_dim;
+    cx->dim     = s_cc.dim;
+    cx->any_dim = s_cc.any_dim;
 #endif
 }

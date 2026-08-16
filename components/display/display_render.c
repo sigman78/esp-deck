@@ -19,16 +19,17 @@
  * setting applied on reboot) and then read by the ISR on every band, so it
  * lives in DRAM rather than behind a call into the font component.
  * ---------------------------------------------------------------------- */
-DRAM_ATTR int g_rs_fw   = 8;    /* cell width  */
-DRAM_ATTR int g_rs_fh   = 16;   /* cell height */
-DRAM_ATTR int g_rs_band = 16;   /* bounce band height, in scanlines */
-DRAM_ATTR int g_rs_gb   = 16;   /* glyph stride in the row cache, bytes
-                                 * (font_glyph_bytes() of the active size) */
+DRAM_ATTR render_geom_t g_rs = {
+    .fw   = 8,
+    .fh   = 16,
+    .band = 16,
+    .gb   = 16,   /* font_glyph_bytes() of the active size */
+};
 
-int display_band_height(void) { return g_rs_band; }
-int display_bounce_px(void)   { return DISPLAY_WIDTH * g_rs_band; }
-int display_text_cols(void)   { return DISPLAY_WIDTH  / g_rs_fw; }
-int display_text_rows(void)   { return DISPLAY_HEIGHT / g_rs_fh; }
+int display_band_height(void) { return g_rs.band; }
+int display_bounce_px(void)   { return DISPLAY_WIDTH * g_rs.band; }
+int display_text_cols(void)   { return DISPLAY_WIDTH  / g_rs.fw; }
+int display_text_rows(void)   { return DISPLAY_HEIGHT / g_rs.fh; }
 
 void display_render_set_font(int width, int height)
 {
@@ -47,10 +48,10 @@ void display_render_set_font(int width, int height)
         return;
     }
 
-    g_rs_fw   = width;
-    g_rs_fh   = height;
-    g_rs_band = band;
-    g_rs_gb   = (int)font_glyph_bytes();
+    g_rs.fw   = width;
+    g_rs.fh   = height;
+    g_rs.band = band;
+    g_rs.gb   = (int)font_glyph_bytes();
     render_cache_invalidate();
 }
 
@@ -119,7 +120,7 @@ static IRAM_ATTR void render_chunk_body(color_t *dst, int pos_px, int n_bytes)
         return;
     }
 
-    const int fh         = g_rs_fh;
+    const int fh         = g_rs.fh;
     const int start_scan = pos_px / DISPLAY_WIDTH;
     const int num_scans  = (n_bytes >> 1) / DISPLAY_WIDTH;  /* n_bytes/2 = px */
     const int char_row   = start_scan / fh;
@@ -160,7 +161,7 @@ static IRAM_ATTR void render_chunk_body(color_t *dst, int pos_px, int n_bytes)
     };
     /* Right margin beyond the text area, in uint32 (pixel-pair) words.
      * Zero for 8x16/10x20; 4 words (8 px) for 12x24 (66*12 = 792 < 800). */
-    cx.margin_words = (DISPLAY_WIDTH - cx.ncols * g_rs_fw) >> 1;
+    cx.margin_words = (DISPLAY_WIDTH - cx.ncols * g_rs.fw) >> 1;
 
     /* Decode + resolve this row into the column cache (no-op when the
      * row's first band already built it), then scan and decorate. */
@@ -193,29 +194,31 @@ static IRAM_ATTR void render_chunk_body(color_t *dst, int pos_px, int n_bytes)
  * 8% of the u32 wrap, and any longer window overflows. The ISR's two-word
  * add can tear under a cross-core read, so the reader spins until the chunk
  * count is stable around the read. */
-static DRAM_ATTR volatile uint64_t s_bench_cyc = 0;
-static DRAM_ATTR volatile uint32_t s_bench_n   = 0;
-static DRAM_ATTR volatile uint32_t s_bench_max = 0;
+static DRAM_ATTR struct {
+    volatile uint64_t cyc;
+    volatile uint32_t n;
+    volatile uint32_t max;
+} s_bench = {};
 
 void display_render_bench_get(uint32_t *avg_cycles, uint32_t *max_cycles, uint32_t *chunks)
 {
     uint64_t cyc;
     uint32_t n, n2;
     do {
-        n   = s_bench_n;
-        cyc = s_bench_cyc;
-        n2  = s_bench_n;
+        n   = s_bench.n;
+        cyc = s_bench.cyc;
+        n2  = s_bench.n;
     } while (n != n2);
     if (avg_cycles) *avg_cycles = n ? (uint32_t)(cyc / n) : 0;
-    if (max_cycles) *max_cycles = s_bench_max;
+    if (max_cycles) *max_cycles = s_bench.max;
     if (chunks)     *chunks     = n;
 }
 
 void display_render_bench_reset(void)
 {
-    s_bench_cyc = 0;
-    s_bench_n   = 0;
-    s_bench_max = 0;
+    s_bench.cyc = 0;
+    s_bench.n   = 0;
+    s_bench.max = 0;
 }
 
 void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
@@ -223,9 +226,9 @@ void IRAM_ATTR display_render_chunk(color_t *dst, int pos_px, int n_bytes)
     const uint32_t t0 = esp_cpu_get_cycle_count();
     render_chunk_body(dst, pos_px, n_bytes);
     const uint32_t dt = esp_cpu_get_cycle_count() - t0;
-    s_bench_cyc += dt;
-    s_bench_n++;
-    if (dt > s_bench_max) s_bench_max = dt;
+    s_bench.cyc += dt;
+    s_bench.n++;
+    if (dt > s_bench.max) s_bench.max = dt;
 }
 #else
 void display_render_bench_get(uint32_t *avg_cycles, uint32_t *max_cycles, uint32_t *chunks)

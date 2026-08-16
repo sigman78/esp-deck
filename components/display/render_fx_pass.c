@@ -18,10 +18,12 @@
 #define BELL_TOTAL   40    /* 4 half-periods → exactly two on/off flashes */
 #define BELL_HALF    10    /* frames per on (or off) half at ~60 fps      */
 
-static DRAM_ATTR volatile int s_bell_frames = 0;     /* frames the tag stays up */
-static DRAM_ATTR bool         s_bell_show   = false; /* latched at frame tick   */
+static DRAM_ATTR struct {
+    volatile int frames;   /* armed from any task via display_bell()  */
+    bool         show;     /* ISR-only, latched at the frame tick     */
+} s_bell = {};
 
-void display_bell(void) { s_bell_frames = BELL_TOTAL; }
+void display_bell(void) { s_bell.frames = BELL_TOTAL; }
 
 /* Tick per-frame counters — called once per frame (scanline 0). */
 IRAM_ATTR void render_fx_frame_tick(void)
@@ -31,11 +33,11 @@ IRAM_ATTR void render_fx_frame_tick(void)
     if (g_fx_collapse_left > 0) g_fx_collapse_left--;
     if (g_fx_static_left   > 0) g_fx_static_left--;
     /* Visual bell: latch this frame's on/off flash phase. */
-    if (s_bell_frames > 0) {
-        s_bell_show = ((BELL_TOTAL - s_bell_frames) / BELL_HALF) % 2 == 0;
-        s_bell_frames--;
+    if (s_bell.frames > 0) {
+        s_bell.show = ((BELL_TOTAL - s_bell.frames) / BELL_HALF) % 2 == 0;
+        s_bell.frames--;
     } else {
-        s_bell_show = false;
+        s_bell.show = false;
     }
 }
 
@@ -193,7 +195,7 @@ IRAM_ATTR void render_fx_static(color_t *dst, int start_scan, int num_scans)
     /* Seed by BAND (not char row): with sub-row bands a per-row seed would
      * draw the same snow lines in both halves of the row, and the pairing
      * reads as structure instead of noise. */
-    uint32_t h = ((uint32_t)(start_scan / g_rs_band) * 2654435761u)
+    uint32_t h = ((uint32_t)(start_scan / g_rs.band) * 2654435761u)
                ^ ((uint32_t)g_fx_frame * 2246822519u);
     for (int k = 0; k < nl; k++) {
         h = h * 1664525u + 1013904223u;
@@ -219,7 +221,7 @@ IRAM_ATTR void render_fx_static(color_t *dst, int start_scan, int num_scans)
 IRAM_ATTR void render_fx_bell_tag(color_t *dst, int char_row, int glyph_row0,
                                   int num_scans)
 {
-    if (char_row != 0 || !s_bell_show || glyph_row0 >= 16)
+    if (char_row != 0 || !s_bell.show || glyph_row0 >= 16)
         return;
 
     static DRAM_ATTR const uint16_t bell[16] = {

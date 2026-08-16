@@ -56,7 +56,7 @@ RENDER_FORCE_INLINE uint32_t scan_gpair(unsigned row, int w, int p,
 
 IRAM_ATTR void render_scan_band(const scan_ctx_t *cx)
 {
-    switch (g_rs_fw) {
+    switch (g_rs.fw) {
 #if FONT_RT_8X16
     case 8:  scan_band_8x16(cx);  break;
 #endif
@@ -77,9 +77,9 @@ IRAM_ATTR void render_underline_pass(const scan_ctx_t *cx)
 {
     if (!cx->any_ul)
         return;
-    const int fw        = g_rs_fw;
+    const int fw        = g_rs.fw;
     const int col_words = fw >> 1;
-    int ul_first = (g_rs_fh - 2) - cx->glyph_row0;   /* band-relative */
+    int ul_first = (g_rs.fh - 2) - cx->glyph_row0;   /* band-relative */
     if (ul_first < 0) ul_first = 0;
     if (ul_first >= cx->num_scans)
         return;
@@ -104,7 +104,7 @@ IRAM_ATTR void render_dim_pass(const scan_ctx_t *cx)
 {
     if (!cx->any_dim)
         return;
-    const int fw        = g_rs_fw;
+    const int fw        = g_rs.fw;
     const int col_words = fw >> 1;
     for (int c = 0; c < cx->ncols; c++) {
         if (!cx->dim[c]) continue;
@@ -124,28 +124,29 @@ IRAM_ATTR void render_dim_pass(const scan_ctx_t *cx)
  * ---------------------------------------------------------------------- */
 #define CURSOR_BLINK_FRAMES  15   /* toggle every 15 frames ≈ 250 ms at 60 fps */
 
-static DRAM_ATTR int           s_cursor_x       = 0;
-static DRAM_ATTR int           s_cursor_y       = 0;
-static DRAM_ATTR cursor_mode_t s_cursor_mode    = CURSOR_NONE;
-static DRAM_ATTR uint32_t      s_blink_count    = 0;
-static DRAM_ATTR bool          s_cursor_visible = true;
+static DRAM_ATTR struct {
+    int           x, y;
+    cursor_mode_t mode;
+    uint32_t      blink_count;
+    bool          visible;
+} s_cursor = { .mode = CURSOR_NONE, .visible = true };
 
 void display_set_cursor(int x, int y, cursor_mode_t mode)
 {
-    if (x != s_cursor_x || y != s_cursor_y) {
-        s_blink_count    = 0;
-        s_cursor_visible = true;
+    if (x != s_cursor.x || y != s_cursor.y) {
+        s_cursor.blink_count = 0;
+        s_cursor.visible     = true;
     }
-    s_cursor_x    = x;
-    s_cursor_y    = y;
-    s_cursor_mode = mode;
+    s_cursor.x    = x;
+    s_cursor.y    = y;
+    s_cursor.mode = mode;
 }
 
 IRAM_ATTR void render_cursor_tick(void)
 {
-    if (++s_blink_count >= CURSOR_BLINK_FRAMES) {
-        s_blink_count    = 0;
-        s_cursor_visible = !s_cursor_visible;
+    if (++s_cursor.blink_count >= CURSOR_BLINK_FRAMES) {
+        s_cursor.blink_count = 0;
+        s_cursor.visible     = !s_cursor.visible;
     }
 }
 
@@ -155,17 +156,17 @@ IRAM_ATTR void render_cursor_tick(void)
  * and cell offsets are multiples of 4 bytes). */
 IRAM_ATTR void render_cursor_pass(const scan_ctx_t *cx, int char_row)
 {
-    if (s_cursor_mode == CURSOR_NONE || !s_cursor_visible ||
-            s_cursor_y != char_row || s_cursor_x < 0 || s_cursor_x >= cx->ncols)
+    if (s_cursor.mode == CURSOR_NONE || !s_cursor.visible ||
+            s_cursor.y != char_row || s_cursor.x < 0 || s_cursor.x >= cx->ncols)
         return;
 
-    const int fw        = g_rs_fw;
+    const int fw        = g_rs.fw;
     const int col_words = fw >> 1;
-    const int px_start  = s_cursor_x * fw;
+    const int px_start  = s_cursor.x * fw;
     int first = 0;
 
-    if (s_cursor_mode == CURSOR_UNDERSCORE) {
-        first = (g_rs_fh - 2) - cx->glyph_row0;   /* band-relative */
+    if (s_cursor.mode == CURSOR_UNDERSCORE) {
+        first = (g_rs.fh - 2) - cx->glyph_row0;   /* band-relative */
         if (first < 0) first = 0;
     }
     for (int n = first; n < cx->num_scans; n++) {

@@ -44,10 +44,13 @@
  * Active cell geometry — owned by display_render.c (set once at boot via
  * display_render_set_font), read by every module on every band.
  * ---------------------------------------------------------------------- */
-extern DRAM_ATTR int g_rs_fw;    /* cell width               */
-extern DRAM_ATTR int g_rs_fh;    /* cell height              */
-extern DRAM_ATTR int g_rs_band;  /* bounce band height, scanlines */
-extern DRAM_ATTR int g_rs_gb;    /* glyph stride in the row cache, bytes */
+typedef struct {
+    int fw;      /* cell width                            */
+    int fh;      /* cell height                           */
+    int band;    /* bounce band height, in scanlines      */
+    int gb;      /* glyph stride in the row cache, bytes  */
+} render_geom_t;
+extern DRAM_ATTR render_geom_t g_rs;
 
 /* ------------------------------------------------------------------------
  * Per-band scan context — filled by the chunk skeleton + cache resolve,
