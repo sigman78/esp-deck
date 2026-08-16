@@ -240,8 +240,8 @@ static IRAM_ATTR void build_row_cache(int cr, int scan_on)
         (s_overlay.buf && cr < s_overlay.rows)
         ? (s_overlay.buf + cr * s_overlay.cols) : NULL;
 
-    const uint8_t mono     = g_fx_cfg.mono;
-    const uint8_t bold_pop = g_fx_cfg.bold_pop;
+    const uint8_t mono     = g_fx_snap.mono;
+    const uint8_t bold_pop = g_fx_snap.bold_pop;
     bool any_ul = false;
 #if OVERLAY_DIM_DITHER
     bool any_dim = false;
@@ -251,11 +251,11 @@ static IRAM_ATTR void build_row_cache(int cr, int scan_on)
 #if DISPLAY_FX_ROW_GLOW
     /* Row-recency back glow: resolve this row's tier once per band.
      * 0 = none, 1 = subtle (12.5% accent), 2 = strong (25% accent). */
-    if (g_fx_cfg.glow && cr < DISPLAY_FX_MAX_ROWS) {
-        const uint8_t gf  = g_fx_cfg.glow_frames;
+    if (g_fx_snap.glow && cr < DISPLAY_FX_MAX_ROWS) {
+        const uint8_t gf  = g_fx_snap.glow_frames;
         const uint8_t age = (uint8_t)(g_fx_frame - g_fx_row_stamp[cr]);
         if (age < gf)
-            glow_tier = (g_fx_cfg.glow_strength && age * 2 < gf) ? 2 : 1;
+            glow_tier = (g_fx_snap.glow_strength && age * 2 < gf) ? 2 : 1;
         else if (age > 128)
             /* Re-pin long-expired stamps so the uint8 frame counter can't
              * wrap back into the glow window and re-tint a stale row. Races

@@ -53,6 +53,7 @@ void display_render_set_font(int width, int height)
     g_rs.band = band;
     g_rs.gb   = (int)font_glyph_bytes();
     render_cache_invalidate();
+    render_fx_snapshot();   /* seed g_fx_snap before the first scan */
 }
 
 /* ANSI-256 colour → RGB565. IRAM: callable from the ISR (in practice the
@@ -157,7 +158,7 @@ static IRAM_ATTR void render_chunk_body(color_t *dst, int pos_px, int n_bytes)
         .ncols      = render_cache_text_cols(),
         .num_scans  = num_scans,
         .glyph_row0 = glyph_row0,
-        .scan_on    = g_fx_cfg.scanlines ? 1 : 0,
+        .scan_on    = g_fx_snap.scanlines ? 1 : 0,
     };
     /* Right margin beyond the text area, in uint32 (pixel-pair) words.
      * Zero for 8x16/10x20; 4 words (8 px) for 12x24 (66*12 = 792 < 800). */

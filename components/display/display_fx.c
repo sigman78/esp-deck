@@ -28,7 +28,8 @@ DRAM_ATTR display_fx_cfg_t g_fx_cfg = {
     .wobble          = 2,    /* medium ±4 px — prototype default, on trial */
 };
 
-DRAM_ATTR volatile uint8_t g_fx_frame = 0;
+DRAM_ATTR volatile uint8_t g_fx_frame   = 0;
+DRAM_ATTR volatile uint8_t g_fx_cfg_gen = 0;
 
 /* Wobble LUT starts flat (matches .wobble = 0); display_fx_set rebuilds it
  * whenever a config is applied. */
@@ -110,7 +111,9 @@ void display_fx_set(const display_fx_cfg_t *cfg)
         g_fx_wobble_lut[i] = (int8_t)lrintf(
             2.0f * (float)c.wobble * sinf((float)i * (6.2831853f / 256.0f)));
 
-    g_fx_cfg = c;   /* byte fields; a torn update is a one-frame glitch */
+    g_fx_cfg_gen++;   /* odd: write in flight — the frame snapshot skips */
+    g_fx_cfg = c;
+    g_fx_cfg_gen++;   /* even: consistent — picked up at the next frame  */
 }
 
 void display_fx_wipe(void)

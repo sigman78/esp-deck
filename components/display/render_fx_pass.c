@@ -12,6 +12,25 @@
 #include "display_fx_internal.h"
 
 /* -------------------------------------------------------------------------
+ * Per-frame config snapshot — the renderer's view of g_fx_cfg. Copied at
+ * the frame tick so an fx change lands on a frame boundary: no mid-frame
+ * seam (rows rebuilt before/after a toggle within one frame), no torn
+ * per-band reads.
+ * ---------------------------------------------------------------------- */
+DRAM_ATTR display_fx_cfg_t g_fx_snap = {};   /* set_font seeds it pre-scan */
+
+IRAM_ATTR void render_fx_snapshot(void)
+{
+    /* Seqlock read, no spinning: if display_fx_set is mid-write (odd gen,
+     * or gen moved during the copy) keep LAST frame's snapshot — the ISR
+     * preempts the writer on this core, so waiting could never finish. */
+    const uint8_t g1 = g_fx_cfg_gen;
+    const display_fx_cfg_t tmp = g_fx_cfg;
+    if ((g1 & 1) == 0 && g1 == g_fx_cfg_gen)
+        g_fx_snap = tmp;
+}
+
+/* -------------------------------------------------------------------------
  * Visual bell: a brief red tag flashing in the top-right corner, drawn by
  * the ISR over the top band (works in-session with no overlay).
  * ---------------------------------------------------------------------- */
@@ -28,6 +47,7 @@ void display_bell(void) { s_bell.frames = BELL_TOTAL; }
 /* Tick per-frame counters — called once per frame (scanline 0). */
 IRAM_ATTR void render_fx_frame_tick(void)
 {
+    render_fx_snapshot();
     g_fx_frame++;
     if (g_fx_wipe_left     > 0) g_fx_wipe_left--;
     if (g_fx_collapse_left > 0) g_fx_collapse_left--;
@@ -131,7 +151,7 @@ IRAM_ATTR void render_fx_clip_apply(color_t *dst, int band_y0, int num_scans,
  * ---------------------------------------------------------------------- */
 IRAM_ATTR void render_fx_wobble(color_t *dst, int start_scan, int num_scans)
 {
-    if (!g_fx_cfg.wobble)
+    if (!g_fx_snap.wobble)
         return;
 
     /* Vertical envelope: sin(2*pi * (k+1) / 17) * 127, k = 0..15 —
@@ -190,7 +210,7 @@ IRAM_ATTR void render_fx_static(color_t *dst, int start_scan, int num_scans)
     if (g_fx_static_left <= 0 || num_scans <= 0)
         return;
 
-    int nl = g_fx_cfg.static_lines;
+    int nl = g_fx_snap.static_lines;
     if (nl > 4) nl = 4;
     /* Seed by BAND (not char row): with sub-row bands a per-row seed would
      * draw the same snow lines in both halves of the row, and the pairing

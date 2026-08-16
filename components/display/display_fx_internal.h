@@ -14,8 +14,18 @@
 
 #define DISPLAY_FX_MAX_ROWS 32   /* >= DISPLAY_HEIGHT / FONT_HEIGHT (30) */
 
-/* Active config (clamped copy; written by display_fx_set, read by ISR). */
+/* Active config (clamped copy; written by display_fx_set). The renderer
+ * does NOT read this per band: it snapshots it once per frame at the frame
+ * tick (see g_fx_snap in render_internal.h), so config changes land on
+ * frame boundaries only. */
 extern DRAM_ATTR display_fx_cfg_t g_fx_cfg;
+
+/* Config generation, seqlock-style: display_fx_set increments to ODD
+ * before rewriting g_fx_cfg and to EVEN after. The renderer's snapshot
+ * SKIPS the copy when a write is in flight (keeping last frame's config)
+ * instead of spinning — it runs in the ISR, which preempts the writer on
+ * the same core, so a spin would deadlock. */
+extern DRAM_ATTR volatile uint8_t g_fx_cfg_gen;
 
 /* Frame counter — incremented by the renderer once per frame (band 0);
  * read cross-context by display_fx_touch_row. */

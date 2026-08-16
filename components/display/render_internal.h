@@ -14,6 +14,7 @@
 #define RENDER_INTERNAL_H
 
 #include "display.h"
+#include "display_fx.h"
 #include <stdbool.h>
 
 /* Sized for the WIDEST selectable grid (8x16 -> 100). One shared set of
@@ -105,6 +106,13 @@ typedef struct {
     int     ea0, ea1, eb0, eb1;  /* bright edge line ranges              */
     color_t ecol;                /* edge color                           */
 } fx_clip_t;
+
+/* Per-frame snapshot of g_fx_cfg, taken at the frame tick (owned by
+ * render_fx_pass.c): every per-row/per-band path reads THIS, never the
+ * live config, so an fx change applies at a frame boundary — no mid-frame
+ * seam, no torn per-band reads. */
+extern DRAM_ATTR display_fx_cfg_t g_fx_snap;
+void render_fx_snapshot(void);                      /* refresh g_fx_snap  */
 
 void render_fx_frame_tick(void);                    /* counters + bell    */
 void render_fx_clip_window(fx_clip_t *out);
