@@ -173,6 +173,23 @@ ISR time for zero simplification — the per-row cache stays. To re-run the
 numbers after render/decoder work: enable `CYBERDECK_BENCH_STRESS`
 (+ `DISPLAY_ISR_BENCH`), flash, and read the 5-second `bench_stress` log lines.
 
+Two follow-up smoothing ideas were measured (branch `research/prebuild-task`):
+
+- *Splitting the rebuild within a row* (band 1 decodes only the rows it
+  scans, band 2 completes) is a measured dead end: Terminus glyph content is
+  top-heavy and the per-glyph fixed costs don't split, so band 1's floor is
+  382/399 µs (≤3% below the spike) — and the row-limit branch alone slowed
+  the `-O2` decode loop ~20%.
+- *A lock-step prebuild task* (core-1 task, priority above `main_task`,
+  builds the next row's whole cache into a spare bank on an ISR doorbell;
+  the ISR flips banks or falls back to a sync rebuild) removes the burst
+  from the ISR entirely — measured worst chunks 399/241/272 µs at
+  8x16/10x20/12x24 (47/45/43% of period), avg==max within 2%, zero
+  fallbacks in steady state, −23% average ISR CPU; costs ~4.3 KB DRAM +
+  the task handshake. Kept unmerged as commit `a956418` on that branch —
+  it strictly dominates the retired banking, so if ISR headroom is ever
+  needed, land *that*, don't resurrect the look-ahead.
+
 ---
 
 ## Runtime data flow
