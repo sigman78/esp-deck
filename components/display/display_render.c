@@ -1,12 +1,8 @@
 /*
- * display_render.c — shared rendering core, compiled for BOTH the ESP32
- * target (bounce-buffer ISR) and the PC simulator (SDL2 frame loop).
- * No SDL or esp_lcd headers — only display.h and font.h.
- *
- * This file is the SKELETON: public geometry API, the per-chunk pipeline
- * (in order: frame tick → clip window → cache resolve → band scan →
- * output passes → effect passes) and the optional cycle bench. The work
- * lives in the sibling modules — see render_internal.h for the map.
+ * display_render.c — render-core skeleton, compiled for BOTH the ESP32
+ * target (bounce-buffer ISR) and the PC simulator (SDL2 frame loop):
+ * public geometry API, the per-chunk pipeline, the optional cycle bench.
+ * The work lives in the sibling modules — render_internal.h is the map.
  */
 
 #include "render_internal.h"
@@ -14,11 +10,7 @@
 #include "display_fx_internal.h"
 #include "font.h"
 
-/* -------------------------------------------------------------------------
- * Active cell geometry. Chosen once at boot (the font size is a stored
- * setting applied on reboot) and then read by the ISR on every band, so it
- * lives in DRAM rather than behind a call into the font component.
- * ---------------------------------------------------------------------- */
+/* Active cell geometry — set once at boot, read by the ISR on every band. */
 DRAM_ATTR render_geom_t g_rs = {
     .fw   = 8,
     .fh   = 16,
@@ -34,9 +26,8 @@ int display_text_rows(void)   { return DISPLAY_HEIGHT / g_rs.fh; }
 void display_render_set_font(int width, int height)
 {
     /* Bands must be even (scanline-parity effects), divide the cell height
-     * (never straddle a character row) and divide the panel height. Checked
-     * at runtime because the size is no longer a build constant; a bad
-     * value keeps the previous geometry instead of tearing in the ISR. */
+     * and divide the panel height; a bad value keeps the previous geometry
+     * instead of tearing in the ISR. */
     const int band = (height > 16) ? (height / 2) : height;
 
     if (width <= 0 || height <= 0 ||
@@ -56,11 +47,10 @@ void display_render_set_font(int width, int height)
     render_fx_snapshot();   /* seed g_fx_snap before the first scan */
 }
 
-/* ANSI-256 colour → RGB565. IRAM: callable from the ISR (in practice the
- * terminal converts at SGR-parse time; this is not per-pixel work). */
+/* ANSI-256 colour → RGB565. IRAM so the ISR may call it, though in
+ * practice the terminal converts at SGR-parse time. */
 color_t IRAM_ATTR display_ansi_to_rgb565(uint8_t ansi_color)
 {
-    /* 0-15: standard 16 colours */
     static DRAM_ATTR const color_t ansi_palette[16] = {
         RGB565(0,   0,   0  ),  /*  0 Black             */
         RGB565(128, 0,   0  ),  /*  1 Red               */
@@ -84,8 +74,7 @@ color_t IRAM_ATTR display_ansi_to_rgb565(uint8_t ansi_color)
         return ansi_palette[ansi_color];
     }
 
-    /* 16-231: 6×6×6 RGB cube */
-    if (ansi_color <= 231) {
+    if (ansi_color <= 231) {   /* 16-231: 6×6×6 RGB cube */
         uint8_t idx = ansi_color - 16;
         uint8_t r = (idx / 36) * 51;
         uint8_t g = ((idx / 6) % 6) * 51;
@@ -115,7 +104,6 @@ static IRAM_ATTR void render_chunk_body(color_t *dst, int pos_px, int n_bytes)
 {
     if (!dst) return;
 
-    /* Cell buffer not yet registered — fill black. */
     if (!render_cache_has_cells()) {
         fill_black(dst, n_bytes);
         return;
@@ -125,26 +113,25 @@ static IRAM_ATTR void render_chunk_body(color_t *dst, int pos_px, int n_bytes)
     const int start_scan = pos_px / DISPLAY_WIDTH;
     const int num_scans  = (n_bytes >> 1) / DISPLAY_WIDTH;  /* n_bytes/2 = px */
     const int char_row   = start_scan / fh;
-    /* First glyph scanline of this band; non-zero only with sub-row bands.
-     * Always a multiple of the (even) band height, so scanline-parity
-     * effects stay aligned. */
+    /* First glyph scanline of the band — a multiple of the (even) band
+     * height, so scanline-parity effects stay aligned. */
     const int glyph_row0 = start_scan % fh;
 
-    /* Per-frame counters tick once per frame (scanline 0 = new frame). */
+    /* Scanline 0 = new frame: tick the per-frame counters. */
     if (start_scan == 0) {
         render_fx_frame_tick();
         render_cursor_tick();
     }
 
-    /* Below the text area — fill black. */
+    /* Below the text area — black. */
     if (char_row >= render_cache_text_rows()) {
         fill_black(dst, n_bytes);
         return;
     }
 
-    /* Wipe / collapse transitions clip the visible scanline window. A band
-     * fully outside it skips rendering — and must drop the row cache, so a
-     * later band can never scan a cache this path skipped rebuilding. */
+    /* Wipe/collapse transitions clip the visible window. A hidden band
+     * skips rendering and must drop the row cache — a later band may never
+     * scan a cache this path skipped rebuilding. */
     fx_clip_t clip;
     render_fx_clip_window(&clip);
     if (render_fx_band_hidden(&clip, start_scan, num_scans)) {
@@ -160,15 +147,12 @@ static IRAM_ATTR void render_chunk_body(color_t *dst, int pos_px, int n_bytes)
         .glyph_row0 = glyph_row0,
         .scan_on    = g_fx_snap.scanlines ? 1 : 0,
     };
-    /* Right margin beyond the text area, in uint32 (pixel-pair) words.
-     * Zero for 8x16/10x20; 4 words (8 px) for 12x24 (66*12 = 792 < 800). */
+    /* Black margin right of the grid, in pixel-pair words (12x24 only). */
     cx.margin_words = (DISPLAY_WIDTH - cx.ncols * g_rs.fw) >> 1;
 
-    /* Decode + resolve this row into the column cache (no-op when the
-     * row's first band already built it), then scan and decorate. */
     render_cache_resolve(char_row, cx.scan_on, &cx);
 
-    render_scan_band(&cx);            /* the hot loop — render_scan.inc  */
+    render_scan_band(&cx);            /* the hot loop — render_scan.inc */
     render_underline_pass(&cx);
 #if OVERLAY_DIM_DITHER
     render_dim_pass(&cx);
@@ -182,19 +166,14 @@ static IRAM_ATTR void render_chunk_body(color_t *dst, int pos_px, int n_bytes)
     render_fx_bell_tag(dst, char_row, glyph_row0, num_scans);
 }
 
-/* -------------------------------------------------------------------------
- * Public entry — optionally wrapped in a cycle-count bench (CONFIG_
- * DISPLAY_ISR_BENCH, default y): per-chunk CPU cycles accumulated in DRAM,
- * drained by display_render_bench_get()/_reset() from any task. ~20
- * cycles/chunk overhead when enabled.
- * ---------------------------------------------------------------------- */
+/* Public entry — optionally wrapped in the per-chunk cycle bench
+ * (CONFIG_DISPLAY_ISR_BENCH), drained by display_render_bench_get(). */
 #ifdef CONFIG_DISPLAY_ISR_BENCH
 #include "esp_cpu.h"
 
-/* Cycle total must be 64-bit: a 30 s window at ~113k cycles/chunk is within
- * 8% of the u32 wrap, and any longer window overflows. The ISR's two-word
- * add can tear under a cross-core read, so the reader spins until the chunk
- * count is stable around the read. */
+/* Cycle total must be 64-bit (a 30 s window nears the u32 wrap). The ISR's
+ * two-word add can tear under a cross-core read, so the reader spins until
+ * the chunk count is stable around the read. */
 static DRAM_ATTR struct {
     volatile uint64_t cyc;
     volatile uint32_t n;

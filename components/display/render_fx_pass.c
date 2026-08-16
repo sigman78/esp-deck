@@ -1,39 +1,28 @@
 /*
- * render_fx_pass.c — effect APPLICATION on rendered bands: the wipe /
- * collapse clip window, CRT line wobble, the signal-loss static burst and
- * the visual-bell tag, plus the once-per-frame countdown tick.
- *
- * Effect STATE (config, LUTs, countdowns) is owned by display_fx.c and
- * shared via display_fx_internal.h; this file only consumes it, from ISR
- * context. All passes are bounded per-band work — none of them is hot.
+ * render_fx_pass.c — effect APPLICATION on rendered bands: clip window,
+ * wobble, static burst, bell tag, and the once-per-frame tick. Effect
+ * STATE is owned by display_fx.c (display_fx_internal.h); all passes are
+ * bounded per-band work — none is hot.
  */
 
 #include "render_internal.h"
 #include "display_fx_internal.h"
 
-/* -------------------------------------------------------------------------
- * Per-frame config snapshot — the renderer's view of g_fx_cfg. Copied at
- * the frame tick so an fx change lands on a frame boundary: no mid-frame
- * seam (rows rebuilt before/after a toggle within one frame), no torn
- * per-band reads.
- * ---------------------------------------------------------------------- */
+/* The renderer's per-frame view of g_fx_cfg (see render_internal.h). */
 DRAM_ATTR display_fx_cfg_t g_fx_snap = {};   /* set_font seeds it pre-scan */
 
 IRAM_ATTR void render_fx_snapshot(void)
 {
-    /* Seqlock read, no spinning: if display_fx_set is mid-write (odd gen,
-     * or gen moved during the copy) keep LAST frame's snapshot — the ISR
-     * preempts the writer on this core, so waiting could never finish. */
+    /* Seqlock read, no spinning: on an in-flight write keep last frame's
+     * snapshot — the ISR preempts the writer on this core, so waiting
+     * could never finish. */
     const uint8_t g1 = g_fx_cfg_gen;
     const display_fx_cfg_t tmp = g_fx_cfg;
     if ((g1 & 1) == 0 && g1 == g_fx_cfg_gen)
         g_fx_snap = tmp;
 }
 
-/* -------------------------------------------------------------------------
- * Visual bell: a brief red tag flashing in the top-right corner, drawn by
- * the ISR over the top band (works in-session with no overlay).
- * ---------------------------------------------------------------------- */
+/* Visual bell: a red tag flashed in the top-right corner by the ISR. */
 #define BELL_TOTAL   40    /* 4 half-periods → exactly two on/off flashes */
 #define BELL_HALF    10    /* frames per on (or off) half at ~60 fps      */
 
@@ -61,11 +50,8 @@ IRAM_ATTR void render_fx_frame_tick(void)
     }
 }
 
-/* -------------------------------------------------------------------------
- * Wipe / collapse clip window: while one is active, only scanlines in
- * [wv0, wv1) show content; the rest go black, with bright edge lines at
- * [ea0, ea1) / [eb0, eb1).
- * ---------------------------------------------------------------------- */
+/* Wipe / collapse clip window: while active, only scanlines in [wv0, wv1)
+ * show content; the rest go black, with bright edge lines. */
 IRAM_ATTR void render_fx_clip_window(fx_clip_t *c)
 {
     c->active = false;
@@ -142,38 +128,31 @@ IRAM_ATTR void render_fx_clip_apply(color_t *dst, int band_y0, int num_scans,
     }
 }
 
-/* -------------------------------------------------------------------------
- * CRT line wobble — a ~16-scanline S-wiggle sweeps down the screen; the
- * vertical envelope is one full signed sine and bulge depth follows a
- * temporal sine from the LUT. At most 16 shifted lines per FRAME. The
- * shift is in-place WITHIN the line — an offset render origin would spill
- * across band boundaries (the sync-tear lesson).
- * ---------------------------------------------------------------------- */
+/* CRT line wobble — a ~16-scanline S-wiggle sweeping down the screen, at
+ * most 16 shifted lines per frame. The shift is in-place WITHIN the line:
+ * an offset render origin would spill across band boundaries. */
 IRAM_ATTR void render_fx_wobble(color_t *dst, int start_scan, int num_scans)
 {
     if (!g_fx_snap.wobble)
         return;
 
-    /* Vertical envelope: sin(2*pi * (k+1) / 17) * 127, k = 0..15 —
-     * a full period: bulge right, then bulge left (for positive dx). */
+    /* wob_env = sin(2*pi*(k+1)/17)*127: one full vertical period. dxa adds
+     * ±25% amplitude drift (~10 Hz LCG); yc walks the wiggle top down the
+     * screen over the 256-frame cycle (>479 = resting). */
     static DRAM_ATTR const int8_t wob_env[16] = {
          46,  86, 114, 126, 122, 101,  67,  23,
         -23, -67, -101, -122, -126, -114, -86, -46,
     };
     const int dx = g_fx_wobble_lut[g_fx_frame];
-    /* Analog grit: amplitude drifts ±25% (re-rolled ~10 Hz) so no two
-     * sweeps look identical. Same LCG recipe as the static burst. */
     const uint32_t hf = (uint32_t)(g_fx_frame >> 2) * 2246822519u;
     const int dxa = (dx * (12 + (int)((hf >> 7) & 7))) >> 4;
-    /* Wiggle top: 0..637 over the 256-frame cycle; >479 = resting. */
     const int yc = (int)(((unsigned)g_fx_frame * 5u) >> 1);
     const int n0 = yc - start_scan;
     for (int k = 0; k < 16 && dx != 0; k++) {
         const int n = n0 + k;
         if (n < 0 || n >= num_scans) continue;     /* other band / off */
-        /* Per-row ±1 px jitter (~20 Hz) roughens the clean S-curve.
-         * Hashed from absolute y + frame, so the sub-row bands of one
-         * frame always agree at their seam. */
+        /* ±1 px jitter hashed from absolute y + frame — sub-row bands of
+         * one frame agree at their seam. */
         const uint32_t hr = ((uint32_t)(start_scan + n) * 2654435761u)
                           ^ ((uint32_t)(g_fx_frame >> 1) * 2246822519u);
         int d = (dxa * (int)wob_env[k] + 64) >> 7;
@@ -191,13 +170,9 @@ IRAM_ATTR void render_fx_wobble(color_t *dst, int start_scan, int num_scans)
     }
 }
 
-/* -------------------------------------------------------------------------
- * Signal-loss static burst — grayscale snow on a few pseudo-random
+/* Signal-loss static burst — grayscale snow on a few pseudo-random
  * scanlines; transient by design (the one per-pixel-ish pass allowed).
- * ---------------------------------------------------------------------- */
-
-/* 16 packed pixel-pairs of "snow", indexed by a cheap LCG so no RNG state
- * is needed in the ISR. DRAM-resident. */
+ * The table is 16 packed pixel-pairs indexed by a cheap LCG. */
 static DRAM_ATTR const uint32_t s_fx_noise[16] = {
     0x0000FFFFu, 0xFFFF0000u, 0x00000000u, 0xFFFFFFFFu,
     0x84108410u, 0x00008410u, 0x84100000u, 0xC618C618u,
@@ -212,9 +187,8 @@ IRAM_ATTR void render_fx_static(color_t *dst, int start_scan, int num_scans)
 
     int nl = g_fx_snap.static_lines;
     if (nl > 4) nl = 4;
-    /* Seed by BAND (not char row): with sub-row bands a per-row seed would
-     * draw the same snow lines in both halves of the row, and the pairing
-     * reads as structure instead of noise. */
+    /* Seed by BAND, not char row — a per-row seed would repeat the same
+     * snow in both halves of a tall row, reading as structure. */
     uint32_t h = ((uint32_t)(start_scan / g_rs.band) * 2654435761u)
                ^ ((uint32_t)g_fx_frame * 2246822519u);
     for (int k = 0; k < nl; k++) {
@@ -233,11 +207,8 @@ IRAM_ATTR void render_fx_static(color_t *dst, int start_scan, int num_scans)
     }
 }
 
-/* -------------------------------------------------------------------------
- * Bell tag — a hand-drawn 16x16 white bell on a red 32px tag in the hard
- * top-right corner. The tag spans the whole first character row; each band
- * of that row draws its slice (glyph_row0 offsets into the bitmap).
- * ---------------------------------------------------------------------- */
+/* Bell tag — a 16x16 white bell on a red 32px tag, top-right corner; each
+ * band of row 0 draws its slice (glyph_row0 offsets into the bitmap). */
 IRAM_ATTR void render_fx_bell_tag(color_t *dst, int char_row, int glyph_row0,
                                   int num_scans)
 {

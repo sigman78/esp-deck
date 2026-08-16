@@ -1,27 +1,16 @@
 /*
- * render_scan.inc — the HOT band-scan loop, "templatized" the C way.
- * #include this file once per font size (see render_scan.c) after defining:
+ * render_scan.inc — the HOT band-scan loop, "templatized" the C way:
+ * #include once per font size (see render_scan.c) after defining
  *
  *   SCAN_W    cell width in pixels (integer literal: 8, 10, 12)
  *   SCAN_ROW  glyph row type: uint8_t (W <= 8) or uint16_t
  *   SCAN_FN   name of the emitted function
  *
- * Each instantiation is a real, named, debuggable function in which the
- * width, row type, glyph stride and stores-per-column are compile-time
- * constants — the per-pixel path matches a fixed-size build (~13
- * cycles/pixel measured; this loop IS the ISR's render floor, so treat
- * any edit as hot-path work and re-run the CYBERDECK_BENCH_STRESS
- * numbers).
- *
- * Structure notes, both load-bearing at -Os:
- *   - columns go in PAIRS with hoisted row/color loads (load latency
- *     hides behind the first column's stores);
- *   - the pixel loops need RENDER_UNROLL — -Os never unrolls on its own,
- *     and a rolled emit loop costs a compare+branch per pixel pair.
- *
- * The glyph stride is 2*W*sizeof(SCAN_ROW): every cell height is exactly
- * 2*W for the sizes we ship, so the stride folds to a constant here (the
- * generic g_rs.gb is not needed in this loop).
+ * This loop IS the ISR's render floor (~13 cycles/pixel) — treat any edit
+ * as hot-path work and re-run the CYBERDECK_BENCH_STRESS numbers. Two
+ * load-bearing choices at -Os: columns go in PAIRS with hoisted loads,
+ * and the pixel loops need RENDER_UNROLL. The glyph stride folds to the
+ * constant 2*W*sizeof(SCAN_ROW) because cell height == 2*W for all sizes.
  */
 
 static IRAM_ATTR void SCAN_FN(const scan_ctx_t *cx)
@@ -32,8 +21,8 @@ static IRAM_ATTR void SCAN_FN(const scan_ctx_t *cx)
 
     for (int n = 0; n < cx->num_scans; n++) {
         const int gl = cx->glyph_row0 + n;
-        /* CRT scanlines: odd scanlines read the pre-dimmed color variant.
-         * Bands start on even scanlines, so n's parity is global parity. */
+        /* Odd scanlines read the pre-dimmed variant; bands start on even
+         * scanlines, so n's parity is global parity. */
         const int sel = n & cx->scan_on & 1;
         const uint16_t *bgv = cx->bg[sel];
         const uint16_t *xfv = cx->xf[sel];

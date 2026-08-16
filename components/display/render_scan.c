@@ -6,13 +6,9 @@
 
 #include "render_internal.h"
 
-/* Branchless pixel pair → one little-endian uint32 (2×RGB565).
- * Leftmost pixel = top bit of the glyph row:
- *   bit   = (row >> (W-1-p)) & 1
- *   mask  = 0xFFFF when set, 0x0000 when clear   (0u - bit)
- *   pixel = bg ^ (xf & mask)                     (xf = fg ^ bg)
- * selects fg or bg with no branch. Forced inline: the -Os inliner is shy
- * and this sits in the innermost loop. */
+/* Branchless pixel pair → one little-endian uint32 (2×RGB565), leftmost
+ * pixel = top bit: mask = 0u - bit (0xFFFF/0x0000), pixel = bg ^ (xf &
+ * mask) with xf = fg^bg. Forced inline — innermost loop, shy -Os inliner. */
 RENDER_FORCE_INLINE uint32_t scan_gpair(unsigned row, int w, int p,
                                         uint16_t bg, uint16_t xf)
 {
@@ -70,9 +66,8 @@ IRAM_ATTR void render_scan_band(const scan_ctx_t *cx)
     }
 }
 
-/* Underline post-pass — force fg on the last two scanlines of the CELL
- * (they live in the row's last band). Touches only flagged columns; the
- * whole pass is skipped when the row has none (the common case). */
+/* Underline post-pass — force fg on the cell's last two scanlines.
+ * Touches only flagged columns; skipped entirely when the row has none. */
 IRAM_ATTR void render_underline_pass(const scan_ctx_t *cx)
 {
     if (!cx->any_ul)
@@ -97,9 +92,8 @@ IRAM_ATTR void render_underline_pass(const scan_ctx_t *cx)
 }
 
 #if OVERLAY_DIM_DITHER
-/* Dithered dim post-pass — black out a checkerboard on scrim columns.
- * Cell sizes are even, so the parity reduces to the band scanline: even n
- * blacks the odd pixels (high half of each pair), odd n the even ones. */
+/* Dithered dim post-pass — checkerboard blackout on scrim columns (cell
+ * widths are even, so pair parity reduces to the band scanline's). */
 IRAM_ATTR void render_dim_pass(const scan_ctx_t *cx)
 {
     if (!cx->any_dim)
@@ -118,10 +112,7 @@ IRAM_ATTR void render_dim_pass(const scan_ctx_t *cx)
 }
 #endif
 
-/* -------------------------------------------------------------------------
- * Cursor — state updated by the terminal via display_set_cursor(); blink
- * driven by the per-frame tick (~2 Hz at 60 fps).
- * ---------------------------------------------------------------------- */
+/* Cursor — updated via display_set_cursor(); blink from the frame tick. */
 #define CURSOR_BLINK_FRAMES  15   /* toggle every 15 frames ≈ 250 ms at 60 fps */
 
 static DRAM_ATTR struct {
@@ -150,10 +141,8 @@ IRAM_ATTR void render_cursor_tick(void)
     }
 }
 
-/* Cursor overlay — XOR the cursor region, guaranteeing contrast. The
- * underscore lives on the last two scanlines of the CELL; a block cursor
- * spans every band of its row. Word alignment is guaranteed (row stride
- * and cell offsets are multiples of 4 bytes). */
+/* Cursor overlay — XOR the region (guaranteed contrast). Underscore =
+ * cell's last two scanlines; block spans every band of its row. */
 IRAM_ATTR void render_cursor_pass(const scan_ctx_t *cx, int char_row)
 {
     if (s_cursor.mode == CURSOR_NONE || !s_cursor.visible ||

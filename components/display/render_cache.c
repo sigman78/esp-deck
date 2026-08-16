@@ -1,31 +1,20 @@
 /*
  * render_cache.c — the per-row column cache: cell/overlay buffers in,
- * decoded glyph rows + resolved colors out.
- *
- * build_row_cache() runs ONCE per character row (per frame) and is the
- * only place cells are read and glyphs decoded; the band scan then works
- * on plain arrays. Warm path: ~130-150 us per row on a fully painted
- * row (decode dominates), against 534-854 us chunk periods.
+ * decoded glyph rows + resolved colors out. build_row_cache() runs once
+ * per character row per frame; the band scan then reads plain arrays.
  */
 
 #include "render_internal.h"
 #include "display_fx_internal.h"
 #include "font.h"
 
-/* -------------------------------------------------------------------------
- * Cell buffer — registered once by vterm_init via display_set_text_buffer.
- * Plain static state (DRAM on ESP32, regular BSS on host) so the ISR can
- * reach it.
- * ---------------------------------------------------------------------- */
+/* Terminal cell buffer — registered once by vterm_init. */
 static DRAM_ATTR struct {
     const terminal_cell_t *buf;
     int cols, rows;
 } s_cells = {};
 
-/* -------------------------------------------------------------------------
- * Overlay buffer — optional second compositing layer.
- * Written by the main task; read by the ISR.
- * ---------------------------------------------------------------------- */
+/* Overlay buffer — optional second compositing layer (shell chrome). */
 static DRAM_ATTR struct {
     display_overlay_cell_t *buf;   /* written LAST in the setter — the ISR
                                     * must never see a fresh pointer with
@@ -34,10 +23,8 @@ static DRAM_ATTR struct {
     color_t fg, bg;
 } s_overlay = { .fg = COLOR_BLACK, .bg = COLOR_CYAN };
 
-/* Overlay accent palettes (index 0 → s_overlay.fg), DRAM for the ISR.
- * Dual palette: TEXT accents use VGA bright tones; INVERSE bars use muted
- * companions of the same hues (full-saturation bars read as motley).
- * WHITE stays pure in both — QR codes need true white modules. */
+/* Overlay accent palettes (index 0 → s_overlay.fg). TEXT accents are VGA
+ * bright tones; INVERSE bars use muted companions of the same hues. */
 static DRAM_ATTR const color_t s_overlay_pal[OVERLAY_PAL_SIZE] = {
     0,                        /* 0: default → replaced by s_overlay.fg */
     RGB565( 85, 255,  85),    /* 1 green   (VGA bright green)   */
@@ -92,20 +79,11 @@ IRAM_ATTR bool render_cache_has_cells(void)
     return s_cells.buf != NULL && s_cells.cols > 0 && s_cells.rows > 0;
 }
 
-/* -------------------------------------------------------------------------
- * Column cache as parallel arrays. bg/xf carry TWO variants selected per
- * scanline ([0] normal, [1] scanline-dimmed) so the hot loop pays no
- * per-pixel effect cost. Glyphs cannot be cached by pointer — the font
- * tables are compressed (PackBits row-RLE) — so each column's glyph is
- * DECODED once per row into s_cc.rows (g_rs.gb stride) and the scan reads
- * plain rows.
- *
- * ONE bank, rebuilt synchronously on the first chunk of each character
- * row; a row's second chunk (10x20/12x24) reuses it via the validity
- * tags. Bench history and the retired alternatives (double-banked
- * look-ahead, per-band rebuild, in-row decode splitting) are documented
- * in docs/ARCHITECTURE.md — measured, don't re-litigate without new data.
- * ---------------------------------------------------------------------- */
+/* Column cache. bg/xf carry two variants selected per scanline so the hot
+ * loop pays no per-pixel effect cost; glyphs are DECODED into rows[] (the
+ * compressed font has nothing to point at). One bank, rebuilt on a row's
+ * first chunk, reused by its second via the validity tags — the measured
+ * history behind this shape is in docs/ARCHITECTURE.md. */
 static DRAM_ATTR struct {
     _Alignas(4) uint8_t rows[FONT_MAX_CACHE_BYTES];  /* decoded glyphs  */
     uint16_t bg[2][RENDER_MAX_COLS];                 /* [variant][col]  */
@@ -114,12 +92,10 @@ static DRAM_ATTR struct {
 #if OVERLAY_DIM_DITHER
     uint8_t  dim[RENDER_MAX_COLS];                   /* scrim flags     */
 #endif
-    /* Validity tags + per-row summaries (the summaries let whole
-     * post-passes be skipped when clear). */
     int      row;         /* char row held, -1 = none */
     int      scan;        /* dim variant populated?   */
     uint8_t  frame;       /* g_fx_frame at build      */
-    bool     any_ul;
+    bool     any_ul;      /* pass-skip summaries      */
 #if OVERLAY_DIM_DITHER
     bool     any_dim;
 #endif
@@ -130,13 +106,7 @@ IRAM_ATTR void render_cache_invalidate(void)
     s_cc.row = -1;
 }
 
-/* -------------------------------------------------------------------------
- * Carry-safe RGB565 helpers (per-field shift/mask math — a masked
- * right-shift can only shrink a 565 field, never bleed into a neighbour).
- * ---------------------------------------------------------------------- */
-
-/* Scanline dim: 93.75% brightness, the one level that read as CRT texture
- * on hardware — everything stronger (87.5% and below) read as bars. */
+/* Scanline dim: 93.75% brightness via carry-safe per-field shift/mask. */
 static inline uint16_t fx_dim565(uint16_t p)
 {
     return (uint16_t)(p - ((p >> 4) & 0x0861));
@@ -164,17 +134,15 @@ typedef struct {
     uint8_t dim;        /* OVERLAY_DIM_DITHER scrim request */
 } cell_colors_t;
 
-/* Overlay (chrome) cell: accent palettes, INVERSE bars, focus wash.
- * `bold` stays 0 — bold-pop is a terminal effect and must not recolor
- * overlay chrome; the glyph itself may still use the bold face. */
+/* Overlay (chrome) cell. `bold` stays 0 — bold-pop must not recolor
+ * chrome; the glyph itself may still use the bold face. */
 static IRAM_ATTR void resolve_overlay_cell(uint8_t ov_attrs, uint8_t ov_color,
                                            cell_colors_t *out)
 {
     color_t fg, bg;
     if (ov_attrs & OVERLAY_ATTR_INVERSE) {
-        /* Solid bar: muted accent bg. Colored bars (1-6) carry a pale
-         * tint of their own hue as text; gray/white (0,7) keep dark
-         * text — QR modules must stay dark-on-white. */
+        /* Solid bar. Colored bars (1-6) get a pale tint of their hue as
+         * text; gray/white keep dark text (QR modules stay dark-on-white). */
         bg = s_overlay_bar[ov_color];
         if (ov_color >= 1 && ov_color <= 6 && !(ov_attrs & OVERLAY_ATTR_BRIGHT))
             fg = (color_t)(((bg >> 2) & 0x39E7) + 0x7BEF + 0x39E7);
@@ -184,8 +152,7 @@ static IRAM_ATTR void resolve_overlay_cell(uint8_t ov_attrs, uint8_t ov_color,
         fg = ov_color ? s_overlay_pal[ov_color] : s_overlay.fg;
         bg = s_overlay.bg;
     }
-    /* Focus glow: wash the bg 50% toward white (carry-safe half-sum) —
-     * the focused bar turns pastel, text stays dark. */
+    /* Focus wash: bg 50% toward white (carry-safe half-sum). */
     if (ov_attrs & OVERLAY_ATTR_BRIGHT)
         bg = (color_t)(((bg >> 1) & 0x7BEF) + 0x7BEF);
     out->fg = fg;
@@ -195,7 +162,7 @@ static IRAM_ATTR void resolve_overlay_cell(uint8_t ov_attrs, uint8_t ov_color,
     out->dim       = 0;
 }
 
-/* Terminal cell: cell colors + attrs, row glow, modal scrim. */
+/* Terminal cell: colors + attrs, row glow, modal scrim. */
 static IRAM_ATTR void resolve_terminal_cell(const terminal_cell_t *cell,
                                             int glow_tier, uint8_t ov_attrs,
                                             cell_colors_t *out)
@@ -208,8 +175,7 @@ static IRAM_ATTR void resolve_terminal_cell(const terminal_cell_t *cell,
     out->dim       = 0;
 
 #if DISPLAY_FX_ROW_GLOW
-    /* Back glow tints the terminal bg toward the warm accent, before any
-     * scrim dim so a modal's scrim also dims the glow. */
+    /* Glow before the scrim, so a modal's scrim also dims the glow. */
     if (glow_tier == 1)
         bg = (color_t)((bg - ((bg >> 3) & 0x18E3)) + g_fx_glow_acc[0]);
     else if (glow_tier == 2)
@@ -229,10 +195,8 @@ static IRAM_ATTR void resolve_terminal_cell(const terminal_cell_t *cell,
     out->bg = bg;
 }
 
-/* Fill the column cache with the resolved fg/bg/glyph for character row
- * @p cr. @p scan_on (0/1) selects whether the scanline-dim variant [1] is
- * also produced (captured once per band so the fill and the scanline loop
- * always agree, even if the config changes mid-band). */
+/* Fill the column cache for character row @p cr. @p scan_on selects
+ * whether the scanline-dim variant [1] is also produced. */
 static IRAM_ATTR void build_row_cache(int cr, int scan_on)
 {
     const terminal_cell_t *row_cells = s_cells.buf + cr * s_cells.cols;
@@ -249,17 +213,15 @@ static IRAM_ATTR void build_row_cache(int cr, int scan_on)
 
     int glow_tier = 0;
 #if DISPLAY_FX_ROW_GLOW
-    /* Row-recency back glow: resolve this row's tier once per band.
-     * 0 = none, 1 = subtle (12.5% accent), 2 = strong (25% accent). */
+    /* Row-recency glow tier: 0 none, 1 subtle, 2 strong. */
     if (g_fx_snap.glow && cr < DISPLAY_FX_MAX_ROWS) {
         const uint8_t gf  = g_fx_snap.glow_frames;
         const uint8_t age = (uint8_t)(g_fx_frame - g_fx_row_stamp[cr]);
         if (age < gf)
             glow_tier = (g_fx_snap.glow_strength && age * 2 < gf) ? 2 : 1;
         else if (age > 128)
-            /* Re-pin long-expired stamps so the uint8 frame counter can't
-             * wrap back into the glow window and re-tint a stale row. Races
-             * display_fx_touch_row benignly (a lost touch self-heals). */
+            /* Re-pin long-expired stamps so the uint8 counter can't wrap
+             * back into the glow window (races touch_row benignly). */
             g_fx_row_stamp[cr] = (uint8_t)(g_fx_frame - gf);
     }
 #endif
@@ -277,12 +239,9 @@ static IRAM_ATTR void build_row_cache(int cr, int scan_on)
         } else {
             const terminal_cell_t *cell = &row_cells[c];
             resolve_terminal_cell(cell, glow_tier, ov_attrs, &cc);
-            /* Blanks skip the decode: U+0020 is blank in Terminus and
-             * screens run well over half blank, so a plain zero-fill (no
-             * memset — ISR runs with the flash cache disabled) beats
-             * decoding an all-zero glyph. Word stores: the cache is
-             * 4-aligned and every glyph stride (16/40/48 B) is a multiple
-             * of 4. */
+            /* Blanks (over half of a real screen) skip the decode: word
+             * zero-fill — the cache is 4-aligned, every stride is 4n, and
+             * memset is off-limits with the flash cache disabled. */
             if (cell->cp == 0x20 || cell->cp == 0) {
                 uint32_t *d32 = (uint32_t *)dst;
                 for (int i = 0; i < g_rs.gb >> 2; i++) d32[i] = 0;
@@ -291,9 +250,8 @@ static IRAM_ATTR void build_row_cache(int cr, int scan_on)
             }
         }
 
-        /* Mono phosphor mode flattens everything (incl. overlay + glow)
-         * onto one ramp; bold pop then brightens within the ramp
-         * (carry-safe OR — sets lower field bits, never overflows). */
+        /* Mono flattens everything onto one ramp; bold pop then brightens
+         * within it (carry-safe OR). */
         color_t fg = cc.fg, bg = cc.bg;
         if (mono) {
             fg = fx_mono565(fg, mono);
