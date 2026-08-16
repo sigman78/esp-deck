@@ -85,9 +85,9 @@ void display_get_text_size(int *cols, int *rows)
     if (rows) *rows = s_cells.rows;
 }
 
-int render_cache_text_rows(void) { return s_cells.rows; }
-int render_cache_text_cols(void) { return s_cells.cols; }
-bool render_cache_has_cells(void)
+IRAM_ATTR int render_cache_text_rows(void) { return s_cells.rows; }
+IRAM_ATTR int render_cache_text_cols(void) { return s_cells.cols; }
+IRAM_ATTR bool render_cache_has_cells(void)
 {
     return s_cells.buf != NULL && s_cells.cols > 0 && s_cells.rows > 0;
 }
@@ -125,7 +125,7 @@ static DRAM_ATTR struct {
 #endif
 } s_cc = { .row = -1 };
 
-void render_cache_invalidate(void)
+IRAM_ATTR void render_cache_invalidate(void)
 {
     s_cc.row = -1;
 }
