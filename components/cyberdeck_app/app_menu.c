@@ -9,6 +9,7 @@
 #include "app_widgets.h"
 #include "app_menu_defs.h"
 #include "display_fx.h"
+#include "keystore.h"
 #include "ssh_client.h"
 #include "wifi_manager.h"
 
@@ -134,6 +135,32 @@ static int font_menu_items(const char *out[], const char *bodies[])
     return FONT_MENU_TILES;
 }
 
+/* ------------------------------------------------------------- KEYSTORE */
+
+#define KS_MENU_TILES 5
+
+/* Store state resolved when the page OPENS, not per render: render_menu
+ * runs ~10 Hz and an ABSENT store would stat the filesystem every frame. */
+static keystore_state_t s_ks_snap;
+
+static int ks_menu_items(const char *out[], const char *bodies[])
+{
+    out[0]    = "Lock now";
+    bodies[0] = s_ks_snap == KEYSTORE_UNLOCKED ? "unlocked"
+              : s_ks_snap == KEYSTORE_LOCKED   ? "locked"
+                                               : "no keystore";
+    out[1]    = s_ks_snap == KEYSTORE_ABSENT ? "Create keystore"
+                                             : "Change code";
+    bodies[1] = "";
+    out[2]    = "Lock on boot";
+    bodies[2] = app.unlock.trig_boot ? "on" : "off";
+    out[3]    = "Lock on wake";
+    bodies[3] = app.unlock.trig_wake ? "on" : "off";
+    out[4]    = "Back";
+    bodies[4] = "";
+    return KS_MENU_TILES;
+}
+
 /* Step the EFFECTS tunable at @p sel, persist, and (for the event effects)
  * arm a one-shot preview so the change is seen immediately. */
 /* fx changes apply live (display_fx_set) but the fx.ini flash write is
@@ -237,9 +264,12 @@ static void render_menu(void)
     int count;
     const char *fnti[FONT_MENU_TILES];
     const char *fntb[FONT_MENU_TILES];
+    const char *ksi[KS_MENU_TILES];
+    const char *ksb[KS_MENU_TILES];
     const bool picker = menu_is_picker(sc);
     const bool fxpage = (sc == MS_EFFECTS);
     const bool fntpage = (sc == MS_FONT);
+    const bool kspage = (sc == MS_KEYSTORE);
     if (picker) {
         title = sc == MS_DELPROFILE  ? "DELETE PROFILE"
               : sc == MS_EDITPROFILE ? "EDIT PROFILE"
@@ -259,6 +289,12 @@ static void render_menu(void)
         count  = font_menu_items(fnti, fntb);
         items  = fnti;
         bodies = fntb;
+        cols   = NULL;
+    } else if (kspage) {
+        title  = "KEYSTORE";
+        count  = ks_menu_items(ksi, ksb);
+        items  = ksi;
+        bodies = ksb;
         cols   = NULL;
     } else {
         menu_def_t d = menu_def(sc);
@@ -327,6 +363,8 @@ static void render_menu(void)
                               : (font_size_t)i == font_active_size()
                                                              ? OVERLAY_COL_GREEN
                                                              : OVERLAY_COL_CYAN;
+        else if (kspage)  col = i == g.count - 1 ? OVERLAY_COL_BLUE
+                                                 : OVERLAY_COL_CYAN;
         else              col = cols[i];
         ui_pen(col);
         /* Focus is carried by the tile itself (washed bar + lit rail);
@@ -417,6 +455,7 @@ void menu_goto(int sc)
     app.menu.sel    = 0;
     app.menu.armed  = false;
     if (sc == MS_FONT) s_font_pending = FONT_SIZE_COUNT;  /* re-read on open */
+    if (sc == MS_KEYSTORE) s_ks_snap = keystore_state();  /* see ks_menu_items */
     menu_clear_note();
     render_menu();
 }
@@ -534,10 +573,11 @@ static void menu_activate(uint64_t now)
             if (!app.cfg.ble) { menu_note(now, MENU_MSG_MS, false,
                                         "no BLE keyboard support"); break; }
             menu_goto(MS_KEYBOARD); return;
-        case 3: menu_goto(MS_EFFECTS); return;
-        case 4: menu_goto(MS_FONT);    return;
-        case 5: menu_goto(MS_SYSTEM);  return;
-        case 6: menu_back(now);        return;   /* Back */
+        case 3: menu_goto(MS_EFFECTS);  return;
+        case 4: menu_goto(MS_FONT);     return;
+        case 5: menu_goto(MS_KEYSTORE); return;
+        case 6: menu_goto(MS_SYSTEM);   return;
+        case 7: menu_back(now);         return;   /* Back */
         }
         break;
 
@@ -545,6 +585,32 @@ static void menu_activate(uint64_t now)
         if (sel >= FX_MENU_TILES - 1) { menu_back(now); return; }  /* Back */
         fx_menu_cycle(sel);
         return;
+
+    case MS_KEYSTORE:
+        switch (sel) {
+        case 0:                                   /* lock now */
+            if (s_ks_snap == KEYSTORE_UNLOCKED) {
+                keystore_lock();
+                s_ks_snap = keystore_state();
+                menu_note(now, MENU_MSG_MS, false, "keystore locked");
+            } else {
+                menu_note(now, MENU_MSG_MS, false,
+                          s_ks_snap == KEYSTORE_LOCKED ? "already locked"
+                                                       : "no keystore yet");
+            }
+            return;
+        case 1: unlock_open_setpin(now);          return;  /* create/change */
+        case 2:                                   /* toggle: prompt at boot */
+            app.unlock.trig_boot = !app.unlock.trig_boot;
+            storage_lock_save(app.unlock.trig_boot, app.unlock.trig_wake);
+            return;
+        case 3:                                   /* toggle: lock at saver */
+            app.unlock.trig_wake = !app.unlock.trig_wake;
+            storage_lock_save(app.unlock.trig_boot, app.unlock.trig_wake);
+            return;
+        case 4: menu_back(now);                   return;  /* Back */
+        }
+        break;
 
     case MS_FONT: {
         if (sel >= FONT_SIZE_COUNT) { menu_back(now); return; }    /* Back */

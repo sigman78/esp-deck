@@ -1,10 +1,13 @@
 # Storage auth: PIN unlock and the wrapped key store
 
-**Status: backend landed (roadmap step 1).** The key store, storage
-integration, sim-CLI provisioning, and adopt-on-unlock are implemented and
-tested; the unlock UI and lock triggers (step 2) are not. Code:
+**Status: roadmap steps 1 + 2 landed.** The key store, storage integration,
+sim-CLI provisioning, adopt-on-unlock, the unlock screen (`ST_UNLOCK` PIN
+pad with the set/change-code flow), the lazy connect gate, and the lock
+triggers (boot / saver-wake, `lock.ini`, menu KEYSTORE page) are implemented
+and tested; failed-attempt backoff is not yet. Code:
 `components/storage/keystore.{h,c}` (both builds), integration in
-`storage.c`, CLI in `sim/keystore_cli.c`, tests in `tests/keystore/`.
+`storage.c`, UI in `cyberdeck_app/app_unlock.c` + menu/saver/boot hooks,
+CLI in `sim/keystore_cli.c`, tests in `tests/keystore/`.
 With no `keystore.kv1` present, behavior is bit-identical to before.
 
 Sim CLI (runs headless against `sim_storage/`, exits before SDL):
@@ -249,11 +252,19 @@ littlefs image never needs plaintext:
   costs an attacker <10 % of the search space — acceptable for the
   auto-submit feel. Slot 1 may hold a full passphrase (keyboard-entered) for
   the stronger-offline-story crowd.
-- **Lock triggers, independently configurable**: on boot (default off), on
-  screen-saver wake (default on), lazy on first key-profile use (default
-  on). Password profiles never prompt.
-- **Failed attempts**: exponential backoff after 5, counter persisted across
-  reboots. No auto-wipe.
+- **Lock triggers, independently configurable** (`lock.ini`, toggles on the
+  menu's KEYSTORE page): on boot (default off), on screen-saver wake
+  (default on), lazy on first key-profile use (always on). Password
+  profiles never prompt. Wake semantics: the store LOCKS (MK wiped) the
+  moment the saver engages — a lifted deck is already cold — and the wake
+  lands on the code pad; Esc skips to HOME, which is deliberate: the
+  security is the MK wipe (key connects still gate lazily), the wake prompt
+  is convenience. The saver only runs on an idle HOME, so a live session is
+  never interrupted.
+- **Set/change code on-device**: the same pad walks OLD → NEW → CONFIRM
+  (create skips OLD) from the menu; change = two derivations (~2 s).
+- **Failed attempts** (not yet implemented): exponential backoff after 5,
+  counter persisted across reboots. No auto-wipe.
 - Empty/absent keystore = feature off, zero behavior change.
 
 ### RAM hygiene
@@ -283,17 +294,19 @@ of stack headroom, never inline in a UI tick.
 
 1. ~~Key store + sim CLI (testable end-to-end, no UI).~~ **Done** (adopt
    path included — it's backend, not UI).
-2. Unlock screen + lock triggers — the usability gate; nothing on-device
-   works without it.
+2. ~~Unlock screen + lock triggers.~~ **Done** (PIN pad + set/change-code
+   flow, lazy connect gate, boot/wake triggers, `lock.ini`, menu page).
+   Failed-attempt backoff moved to its own step below.
 3. **Device-bound slot (type 3)** — pulled ahead of flash encryption: the
    largest security jump per line of code (kills offline brute-force
    outright), removes the unlock-time RAM/stack pressure, and commits only
    one eFuse block. Includes the HMAC-iteration bench and slot adoption.
-4. Wrap profile passwords / WiFi PSK via `content_type`.
-5. Flash encryption + secure boot — still the endgame, now scoped to what
+4. Failed-attempt backoff (exponential after 5, NVS-persisted counter).
+5. Wrap profile passwords / WiFi PSK via `content_type`.
+6. Flash encryption + secure boot — still the endgame, now scoped to what
    the bound slot cannot cover: adopt-path remnants in reclaimed LittleFS
    blocks, everything else on flash, rollback/reflash protection.
-6. (Independent) remote ssh-agent transport for true off-device custody.
+7. (Independent) remote ssh-agent transport for true off-device custody.
 
 ## Open questions
 

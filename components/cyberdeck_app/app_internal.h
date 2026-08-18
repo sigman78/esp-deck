@@ -157,9 +157,14 @@ typedef struct {                    /* app_unlock.c */
                                      * on submit/leave                     */
     int      len;
     uint8_t  expected;              /* auto-submit length (0 = Enter only) */
+    uint8_t  mode;                  /* entry phase (um_mode in app_unlock)  */
+    uint8_t  ret;                   /* where to land after (ur_ret)         */
+    bool     creating;              /* set-code flow on an ABSENT store     */
     bool     deriving;              /* KDF worker running; input swallowed */
-    bool     resume;                /* re-arm app.conn.active on success   */
-    uint64_t denied_until;          /* "ACCESS DENIED" flash window        */
+    const char *note;               /* status-row flash (static string)    */
+    uint64_t note_until;
+    bool     trig_boot;             /* lock.ini: prompt at boot            */
+    bool     trig_wake;             /* lock.ini: lock at saver, prompt at wake */
 } unlock_state_t;
 
 struct app_state {

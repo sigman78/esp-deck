@@ -191,6 +191,7 @@ esp_err_t cyberdeck_app_init(const cyberdeck_app_config_t *cfg, uint64_t now_ms)
     app.pf.edit_idx    = -1;
     app.pf.key_sel     = -1;
     app.menu.reorder_grab = -1;
+    storage_lock_load(&app.unlock.trig_boot, &app.unlock.trig_wake);
     boot_enter(now_ms);
     saver_reset(now_ms);   /* idle timer starts at boot */
 

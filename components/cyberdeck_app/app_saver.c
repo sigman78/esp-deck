@@ -6,6 +6,7 @@
 #include "app_internal.h"
 #include "app_screens.h"
 #include "app_widgets.h"
+#include "keystore.h"
 
 #include <string.h>
 
@@ -200,11 +201,20 @@ bool saver_on_input(uint64_t now)
     if (!app.saver.on) return false;
     app.saver.on = false;
     if (app.toast[0] && now >= app.toast_until) app.toast[0] = '\0';
-    render_home();
     /* Only swallow once the rain has been up for a moment: the main loop
      * ticks before it drains input, so a keypress aimed at a HOME visible
      * milliseconds ago must still act, not vanish into a wake. */
-    return now - app.saver.since >= 1000;
+    bool swallow = now - app.saver.since >= 1000;
+    /* Wake gate: the store locked when the rain went up; a real wake lands
+     * on the code pad instead of HOME. Esc skips to HOME — the security is
+     * the MK wipe (key connects still gate lazily), not this screen. */
+    if (swallow && app.unlock.trig_wake &&
+        keystore_state() == KEYSTORE_LOCKED) {
+        unlock_open(now, false);
+        return true;
+    }
+    render_home();
+    return swallow;
 }
 
 bool saver_tick_home(uint64_t now)
@@ -218,6 +228,9 @@ bool saver_tick_home(uint64_t now)
         if (!app.saver.on) {
             app.saver.on    = true;   /* input handling keys off what's on screen */
             app.saver.since = now;
+            /* The wake trigger arms HERE: the deck locks as the rain goes
+             * up, so a lifted deck is already cold. No-op when locked. */
+            if (app.unlock.trig_wake) keystore_lock();
         }
         render_saver();
     }

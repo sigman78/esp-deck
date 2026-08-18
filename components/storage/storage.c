@@ -496,6 +496,58 @@ esp_err_t storage_font_save(const char *name)
 }
 
 /* -------------------------------------------------------------------------
+ * Keystore lock triggers — lock.ini
+ *
+ *   boot=0
+ *   wake=1
+ * ---------------------------------------------------------------------- */
+
+static void lock_path(char *buf, size_t bufsz)
+{
+    snprintf(buf, bufsz, "%s/lock.ini", storage_platform_mount_point());
+}
+
+esp_err_t storage_lock_load(bool *on_boot, bool *on_wake)
+{
+    if (!on_boot || !on_wake) return ESP_ERR_INVALID_ARG;
+    *on_boot = false;                 /* docs/storage_auth.md defaults */
+    *on_wake = true;
+
+    char path[128];
+    lock_path(path, sizeof(path));
+    FILE *f = fopen(path, "r");
+    if (!f) return ESP_ERR_NOT_FOUND;
+
+    char line[64];
+    while (fgets(line, sizeof(line), f)) {
+        rtrim(line);
+        char key[32], val[32];
+        if (!parse_kv(line, key, sizeof(key), val, sizeof(val))) continue;
+        if (strcmp(key, "boot") == 0) *on_boot = val[0] == '1';
+        if (strcmp(key, "wake") == 0) *on_wake = val[0] == '1';
+    }
+    fclose(f);
+    return ESP_OK;
+}
+
+esp_err_t storage_lock_save(bool on_boot, bool on_wake)
+{
+    char path[128];
+    lock_path(path, sizeof(path));
+
+    atomic_file_t af;
+    FILE *f = atomic_open(&af, path);
+    if (!f) return ESP_FAIL;
+
+    fprintf(f, "boot=%d\nwake=%d\n", on_boot ? 1 : 0, on_wake ? 1 : 0);
+
+    if (atomic_close(&af) != ESP_OK) return ESP_FAIL;
+    ESP_LOGI(TAG, "Saved lock triggers (boot=%d wake=%d)",
+             on_boot ? 1 : 0, on_wake ? 1 : 0);
+    return ESP_OK;
+}
+
+/* -------------------------------------------------------------------------
  * Known SSH host keys — known_hosts.ini, flat "host:port=fp" lines
  * ---------------------------------------------------------------------- */
 
@@ -954,7 +1006,7 @@ esp_err_t storage_factory_reset(void)
     const char *mp = storage_platform_mount_point();
     static const char *files[] = {
         "profiles.ini", "wifi.ini", "known_hosts.ini", "ble_devices.ini",
-        "fx.ini", "keystore.kv1",
+        "fx.ini", "keystore.kv1", "lock.ini",
     };
     char path[160];
     for (int i = 0; i < (int)(sizeof(files) / sizeof(files[0])); i++) {

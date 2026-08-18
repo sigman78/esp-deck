@@ -18,6 +18,7 @@
 
 #include "esp_err.h"
 #include "display_fx.h"   /* display_fx_cfg_t (fx.ini settings) */
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -158,6 +159,26 @@ esp_err_t storage_font_load(char *buf, size_t buf_len);
  * Save the font size by name (atomic replace). Applied on next boot.
  */
 esp_err_t storage_font_save(const char *name);
+
+/* -------------------------------------------------------------------------
+ * Keystore lock triggers (lock.ini)
+ *
+ * When the deck demands the unlock code (docs/storage_auth.md): at boot
+ * (default off) and at screensaver wake (default on — the store locks when
+ * the saver engages). The lazy on-first-key-use prompt is always on.
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Read the lock-trigger toggles. Outputs always get a value: the defaults
+ * (boot off, wake on) when the file or a key is missing — in which case
+ * ESP_ERR_NOT_FOUND is returned, ESP_OK otherwise.
+ */
+esp_err_t storage_lock_load(bool *on_boot, bool *on_wake);
+
+/**
+ * Save the lock-trigger toggles (atomic replace).
+ */
+esp_err_t storage_lock_save(bool on_boot, bool on_wake);
 
 /* -------------------------------------------------------------------------
  * Known SSH host keys (TOFU pinning)

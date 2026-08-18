@@ -342,6 +342,24 @@ static void test_pin_len_hint_for_autosubmit(void)
     TEST_ASSERT_EQUAL_INT(0, keystore_pin_len());
 }
 
+static void test_lock_trigger_settings(void)
+{
+    bool boot = true, wake = false;
+    /* Missing file: documented defaults (boot off, wake on) + NOT_FOUND */
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NOT_FOUND, storage_lock_load(&boot, &wake));
+    TEST_ASSERT_FALSE(boot);
+    TEST_ASSERT_TRUE(wake);
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, storage_lock_save(true, false));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, storage_lock_load(&boot, &wake));
+    TEST_ASSERT_TRUE(boot);
+    TEST_ASSERT_FALSE(wake);
+
+    /* Factory reset drops lock.ini with everything else */
+    storage_factory_reset();
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NOT_FOUND, storage_lock_load(&boot, &wake));
+}
+
 /* ------------------------------------------------------------------
  * Adoption + storage integration
  * ---------------------------------------------------------------- */
@@ -450,6 +468,7 @@ int main(void)
     RUN_TEST(test_cross_store_transplant_rejected);
     RUN_TEST(test_change_pin_rewraps_slot_only);
     RUN_TEST(test_pin_len_hint_for_autosubmit);
+    RUN_TEST(test_lock_trigger_settings);
     RUN_TEST(test_adopt_plaintext_on_unlock);
     RUN_TEST(test_storage_set_key_wraps_when_unlocked);
     RUN_TEST(test_list_keys_unions_pem_and_kw1);
