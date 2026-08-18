@@ -45,7 +45,7 @@ profiles.
 | Threat | Covered? |
 |--------|----------|
 | Lost/stolen deck, casual use of profiles | yes — locked UI, wrapped keys |
-| Flash dump, offline PIN brute-force | partially — Argon2id makes it slow (days for 6 digits, out of reach for a passphrase slot); fully closed later by flash encryption |
+| Flash dump, offline PIN brute-force | portable slots: partially — Argon2id makes it slow (hours-to-days for 6 digits on a GPU rig, out of reach for a passphrase slot). Device-bound slot (type 3): fully — every guess must run on the physical chip, serialized (~11 days for 6 digits, no parallelism) |
 | Runtime code execution on the device | no — an unlocked deck holds the master key in RAM |
 | Malicious reflash / rollback of the store | no — requires flash encryption + secure boot |
 
@@ -66,7 +66,19 @@ profiles.
 - **Flash encryption now** — closes the flash-dump hole but not the
   picked-up-unlocked-deck hole, needs eFuse commitment, and is device-only
   (no sim story). Planned as a *later layer under* this design, not instead
-  of it.
+  of it. The device-bound slot (below) delivers the keystore-specific part
+  of this win first, for a fraction of the commitment.
+- **Alternative software KDFs** (scrypt, bcrypt, PBKDF2) — rejected: none
+  beats Argon2id's offline story on this hardware, and no software KDF fixes
+  the real weakness, the 4–6 digit search space. A GPU runs any of them
+  50–100× faster per guess than the deck can afford per honest unlock. The
+  escape hatch is changing the trust anchor (hardware binding), not the hash.
+- **DS-peripheral custody of the SSH key itself** — the S3's Digital
+  Signature peripheral can sign with an eFuse-encrypted RSA key that never
+  enters RAM, and libssh2's `libssh2_userauth_publickey()` takes a custom
+  sign callback, so it is genuinely wireable. Deferred: RSA-only (no ed25519
+  hardware on S3), keys become unexportable, and it protects only the key —
+  not profile passwords or the PSK.
 
 ## Design
 
@@ -77,8 +89,8 @@ key (MK)** wraps every key file; MK itself is stored wrapped by
 `Argon2id(PIN, salt)` in one of up to four **slots**. Consequences:
 
 - PIN change rewraps one 48-byte record, never the key files.
-- A second unlock method (long passphrase, later an eFuse-bound key) is just
-  another slot wrapping the same MK.
+- A second unlock method (long passphrase, the device-bound eFuse slot below)
+  is just another slot wrapping the same MK.
 - Anything holding MK can wrap keys — which is what makes the provisioning
   story below work.
 
@@ -95,7 +107,8 @@ per attempt on the S3 @ 240 MHz (`CYBERDECK_BENCH_ARGON2` boot sweep: 4 MiB
 allocatable — the whole PSRAM is 8 MiB). Memory is pinned at the hardware
 ceiling and passes tune the time; the header makes params per-store, so
 retuning needs no format change. Memory-hardness is the point: 4 MiB per
-guess blunts GPU cracking of a flash dump.
+guess blunts GPU cracking of a flash dump. (This matters for *portable*
+slots only — the device-bound slot below sidesteps the GPU entirely.)
 
 ### `keystore.kv1` — store header (storage root)
 
@@ -107,11 +120,11 @@ offset  size  field
 6       2     reserved = 0
 8       16    store_uuid            random at init
 24      —     slot[4], 100 B each:
-        1     slot_type             0 empty · 1 pin · 2 passphrase · 3 reserved (efuse)
-        1     argon2_alg            2 = Argon2id
-        4     argon2_blocks_kib     default 4096
-        4     argon2_passes         default 3
-        1     argon2_lanes          default 1
+        1     slot_type             0 empty · 1 pin · 2 passphrase · 3 device-bound pin (eFuse HMAC)
+        1     kdf_alg               2 = Argon2id · 3 = iterated eFuse-HMAC
+        4     kdf_p1                Argon2: blocks KiB (4096) · HMAC: iterations
+        4     kdf_p2                Argon2: passes (2) · HMAC: 0
+        1     kdf_p3                Argon2: lanes (1) · HMAC: 0
         1     reserved
         16    salt                  random per slot
         24    nonce                 random per (re)wrap
@@ -121,8 +134,72 @@ offset  size  field
 Unlock = derive KEK from the passcode, AEAD-unwrap MK. **The Poly1305 tag is
 the PIN verifier** — there is no separate PIN hash to attack, and a wrong PIN
 is cleanly distinguishable from a corrupt store. Slot AAD:
-`magic ‖ version ‖ store_uuid ‖ slot_index ‖ slot_type ‖ argon2 params`
-(params tampering only DoSes — they are inputs to the derivation).
+`magic ‖ version ‖ store_uuid ‖ slot_index ‖ slot_type ‖ kdf params`
+(params tampering only DoSes — they are inputs to the derivation). The byte
+layout is unchanged from v1; the `kdf_*` fields are the old `argon2_*` fields
+reinterpreted per `kdf_alg`, so type-3 slots need no format bump.
+
+### Slot type 3 — device-bound PIN (eFuse HMAC)
+
+The S3's **HMAC peripheral** computes `HMAC-SHA256(K, msg)` where `K` is a
+256-bit key burned into an eFuse block (purpose `HMAC_UP`) with software
+readout disabled: firmware can *use* the key, never *read* it
+(`esp_hmac_calculate()`). A slot whose KEK depends on it can only be opened —
+or brute-forced — on this physical chip.
+
+KEK derivation for a type-3 slot:
+
+    x = SHA256(store_uuid ‖ salt ‖ PIN)
+    repeat kdf_p1 times:  x = HMAC-SHA256_efuse(x)
+    KEK = x
+
+**The iteration loop must live entirely inside the hardware boundary.** Any
+split design — memory-hard KDF on one side, a single HMAC call on the other —
+fails in a non-obvious way: an attacker with the device batches the cheap
+peripheral step for all 10⁶ PINs in seconds, then runs the expensive half
+offline on GPUs. Iterating the peripheral itself makes every guess cost the
+full on-device time with no way to outsource any of it. Tune `kdf_p1` so the
+loop takes ~0.5–1 s (bench `esp_hmac_calculate` per-call overhead first — the
+call cost, not SHA throughput, will dominate).
+
+What this buys, and what it costs:
+
+- **Offline brute-force dies.** A flash dump without the chip is
+  uncrackable at any budget. With the chip, guessing is fully serialized:
+  10⁶ PINs × ~1 s ≈ 11 days on exactly one device, no parallelism, no GPUs
+  to rent. Reflashing does not help — the loop is part of the verification
+  math, not a policy check.
+- **The RAM and compute pressure disappears.** Memory-hardness exists to
+  slow attackers who can parallelize; a hardware-bound secret makes that
+  moot. The loop needs no PSRAM work area and trivial stack — the 4 MiB
+  allocation and the ≥4 KB worker-stack constraint are Argon2-slot concerns
+  only.
+- **Weakest-slot principle.** Offline security equals the weakest slot in
+  the header: a portable Argon2 *PIN* slot sitting next to a bound slot
+  hands the attacker the portable one to crack and voids the bound slot's
+  win. Policy: when the bound slot is added, the portable PIN slot is
+  dropped. A portable **passphrase** slot may stay — its search space
+  carries its own weight — and doubles as the chip-death recovery path
+  (masters also stay in `~/.ssh` per the provisioning doctrine).
+- **Slot adoption.** Sim-provisioned stores arrive with a portable PIN slot
+  (the PC has no eFuse). On first successful on-device unlock the deck adds
+  the bound slot wrapping the same MK and drops the portable PIN slot —
+  the same migrate-at-unlock pattern as pem adoption. The sim cannot open
+  the store afterwards; `sim_storage/` remains the provisioning source and
+  re-flashing storage simply re-runs the adoption.
+- **eFuse commitment.** First bound-slot creation burns a random key into
+  one of the six `BLOCK_KEY` eFuses and read-protects it — irreversible,
+  per-device. Flash encryption and secure boot later claim their own blocks
+  (1–2 and 1 respectively); six is enough. Losing the chip loses the bound
+  slot by design; recovery is the passphrase slot or re-provisioning.
+- **Trust boundary.** The scheme stands on eFuse read-protection. Physical
+  extraction (decap, voltage glitching) is out of scope, same as the
+  existing runtime-code-exec exclusion.
+
+Sim story: the sim implements `kdf_alg = 3` with a software HMAC keyed from a
+host-side `sim_efuse.bin` (generated once per sim install). Same code path,
+byte-identical formats, no real security on the host — it exists so the slot
+logic and adoption flow are testable off-device.
 
 ### `keys/<id>.kw1` — wrapped key file (replaces `<id>.pem`)
 
@@ -195,9 +272,10 @@ of stack headroom, never inline in a UI tick.
 
 ## Known limitations (accepted for v1)
 
-- Offline brute-force of a dumped flash is slowed, not stopped; a 6-digit
-  PIN falls to a patient attacker. Passphrase slot for those who care;
-  flash encryption closes it properly later.
+- Offline brute-force of a dumped flash is slowed, not stopped, while the
+  PIN lives in a *portable* slot; a 6-digit PIN falls to a patient attacker.
+  Closed once the device-bound slot (type 3) replaces the portable PIN slot;
+  passphrase slot for the interim.
 - No true shredding on LittleFS (adopt path); no rollback protection.
 - The sim host's `sim_storage/` is only as safe as the PC (same as `~/.ssh`).
 
@@ -205,10 +283,17 @@ of stack headroom, never inline in a UI tick.
 
 1. ~~Key store + sim CLI (testable end-to-end, no UI).~~ **Done** (adopt
    path included — it's backend, not UI).
-2. Unlock screen + lock triggers.
-3. Wrap profile passwords / WiFi PSK via `content_type`.
-4. Flash encryption: eFuse-bound wrap of the same MK in slot 3.
-5. (Independent) remote ssh-agent transport for true off-device custody.
+2. Unlock screen + lock triggers — the usability gate; nothing on-device
+   works without it.
+3. **Device-bound slot (type 3)** — pulled ahead of flash encryption: the
+   largest security jump per line of code (kills offline brute-force
+   outright), removes the unlock-time RAM/stack pressure, and commits only
+   one eFuse block. Includes the HMAC-iteration bench and slot adoption.
+4. Wrap profile passwords / WiFi PSK via `content_type`.
+5. Flash encryption + secure boot — still the endgame, now scoped to what
+   the bound slot cannot cover: adopt-path remnants in reclaimed LittleFS
+   blocks, everything else on flash, rollback/reflash protection.
+6. (Independent) remote ssh-agent transport for true off-device custody.
 
 ## Open questions
 
@@ -218,4 +303,11 @@ of stack headroom, never inline in a UI tick.
   timing ever changes.
 - Backoff persistence location (NVS vs a store field) — must survive storage
   reflash or it resets with the image; NVS leans right.
-- Whether profile passwords move under MK in v1 or stay plaintext until (3).
+- Whether profile passwords move under MK in v1 or stay plaintext until (4).
+- `esp_hmac_calculate` per-call overhead on the S3 → iteration count for a
+  ~0.5–1 s type-3 unlock (extend the bench before picking the default).
+- eFuse burn policy: auto-burn on first bound-slot creation vs an explicit
+  provisioning step, and a guard for dev units that should stay unburned
+  (Kconfig gate leans right).
+- Whether slot adoption (portable PIN → bound PIN on first device unlock)
+  should ask, or just happen like pem adoption does.
