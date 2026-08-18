@@ -55,11 +55,13 @@ static const char *TAG = "keystore";
 
 #define KS_ALG_ARGON2ID     2
 
-/* Argon2id defaults: 4 MiB work area, 3 passes, 1 lane — ~1 s target on the
- * S3 (PSRAM-bandwidth-bound; per-store params in the header allow retuning
- * without a format change). */
+/* Argon2id defaults: 4 MiB work area, 2 passes, 1 lane — measured 1.09 s on
+ * the S3 @ 240 MHz (CYBERDECK_BENCH_ARGON2 sweep: 4 MiB x1 = 645 ms, x2 =
+ * 1090 ms, x3 = 1566 ms; 8 MiB is not allocatable). 4 MiB is the hardware
+ * ceiling, so memory stays maxed and passes tune the time. Per-store params
+ * in the header allow retuning without a format change. */
 #define KS_ARGON2_BLOCKS_KIB  4096
-#define KS_ARGON2_PASSES      3
+#define KS_ARGON2_PASSES      2
 #define KS_ARGON2_LANES       1
 
 typedef struct {

@@ -89,10 +89,13 @@ by the libssh2 fork: `crypto_argon2` (Argon2id), `crypto_aead_lock/unlock`
 (XChaCha20-Poly1305, 24-byte nonce), `crypto_wipe`. No new dependencies; the
 sim and device are bit-compatible by construction.
 
-Argon2id defaults: **4 MiB work area, 3 passes, 1 lane** — targeting ~1 s per
-attempt on the S3 (PSRAM-bandwidth-bound; measure and tune, the header makes
-params per-store). Memory-hardness is the point: 4 MiB per guess blunts GPU
-cracking of a flash dump.
+Argon2id defaults: **4 MiB work area, 2 passes, 1 lane** — measured **1.09 s**
+per attempt on the S3 @ 240 MHz (`CYBERDECK_BENCH_ARGON2` boot sweep: 4 MiB
+×1 = 645 ms, ×2 = 1090 ms, ×3 = 1566 ms; an 8 MiB work area is not
+allocatable — the whole PSRAM is 8 MiB). Memory is pinned at the hardware
+ceiling and passes tune the time; the header makes params per-store, so
+retuning needs no format change. Memory-hardness is the point: 4 MiB per
+guess blunts GPU cracking of a flash dump.
 
 ### `keystore.kv1` — store header (storage root)
 
@@ -185,6 +188,11 @@ PEM in a persistent SPIRAM buffer — with the store it moves to internal RAM
 and is wiped once auth completes. `storage_get_key()` keeps its signature and
 grows a "locked" error so `app_connect` can bounce to the unlock screen.
 
+One measured constraint for the unlock worker: `crypto_argon2` keeps a
+~1 KiB working block (plus hash state) on the caller's stack — it overflowed
+the 3.5 KB main task during the bench. Unlock must run on a task with ≥4 KB
+of stack headroom, never inline in a UI tick.
+
 ## Known limitations (accepted for v1)
 
 - Offline brute-force of a dumped flash is slowed, not stopped; a 6-digit
@@ -204,7 +212,10 @@ grows a "locked" error so `app_connect` can bounce to the unlock screen.
 
 ## Open questions
 
-- Argon2 params after measuring real S3 PSRAM throughput (tune to ~1 s).
+- ~~Argon2 params after measuring real S3 PSRAM throughput (tune to ~1 s).~~
+  Measured (see Primitives): 4 MiB × 2 passes = 1.09 s. The
+  `CYBERDECK_BENCH_ARGON2` Kconfig re-runs the sweep if the clock or PSRAM
+  timing ever changes.
 - Backoff persistence location (NVS vs a store field) — must survive storage
   reflash or it resets with the image; NVS leans right.
 - Whether profile passwords move under MK in v1 or stay plaintext until (3).
