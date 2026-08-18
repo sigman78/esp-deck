@@ -1,8 +1,26 @@
 # Storage auth: PIN unlock and the wrapped key store
 
-**Status: proposal — prototyping.** Nothing below is implemented yet; this
-records the goals, the alternatives weighed, and the decisions made before
-code lands.
+**Status: backend landed (roadmap step 1).** The key store, storage
+integration, sim-CLI provisioning, and adopt-on-unlock are implemented and
+tested; the unlock UI and lock triggers (step 2) are not. Code:
+`components/storage/keystore.{h,c}` (both builds), integration in
+`storage.c`, CLI in `sim/keystore_cli.c`, tests in `tests/keystore/`.
+With no `keystore.kv1` present, behavior is bit-identical to before.
+
+Sim CLI (runs headless against `sim_storage/`, exits before SDL):
+
+    cyberdeck_sim --keystore-status
+    cyberdeck_sim --keystore-init            --pin 1234
+    cyberdeck_sim --import-key <pem> [id]    --pin 1234   # + copies <pem>.pub
+    cyberdeck_sim --export-key <id>          --pin 1234   # PEM -> stdout
+    cyberdeck_sim --unlock-test              --pin 1234   # times Argon2id, verifies every .kw1
+    cyberdeck_sim --change-pin --pin 1234 --new-pin 567890
+
+Two implementation choices worth recording: `storage_set_key` on a
+locked-but-present store still writes plaintext (adopted at next unlock)
+rather than failing web import; and `storage_get_key` returns
+`ESP_ERR_INVALID_STATE` for a wrapped key while locked — today's UI shows
+"key unreadable", step 2 turns that into the unlock screen.
 
 The deck stores SSH private keys in the `storage` partition (LittleFS on
 device, `sim_storage/` on the host). Today they are plaintext PEM files:
@@ -177,8 +195,9 @@ grows a "locked" error so `app_connect` can bounce to the unlock screen.
 
 ## Roadmap
 
-1. Key store + sim CLI (testable end-to-end, no UI).
-2. Unlock screen + lock triggers + adopt path.
+1. ~~Key store + sim CLI (testable end-to-end, no UI).~~ **Done** (adopt
+   path included — it's backend, not UI).
+2. Unlock screen + lock triggers.
 3. Wrap profile passwords / WiFi PSK via `content_type`.
 4. Flash encryption: eFuse-bound wrap of the same MK in slot 3.
 5. (Independent) remote ssh-agent transport for true off-device custody.
