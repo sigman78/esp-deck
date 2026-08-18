@@ -125,7 +125,7 @@ offset  size  field
         4     kdf_p1                Argon2: blocks KiB (4096) · HMAC: iterations
         4     kdf_p2                Argon2: passes (2) · HMAC: 0
         1     kdf_p3                Argon2: lanes (1) · HMAC: 0
-        1     reserved
+        1     pin_len               auto-submit hint; 0 = passphrase/unknown
         16    salt                  random per slot
         24    nonce                 random per (re)wrap
         48    wrapped_mk            32 B MK ciphertext + 16 B tag

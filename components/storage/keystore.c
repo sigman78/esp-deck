@@ -70,6 +70,9 @@ typedef struct {
     uint32_t blocks_kib;
     uint32_t passes;
     uint8_t  lanes;
+    uint8_t  pin_len;             /* auto-submit hint (byte 11, ex-reserved);
+                                   * 0 for passphrase slots. NOT in the AAD —
+                                   * tampering only breaks auto-submit UX  */
     uint8_t  salt[16];
     uint8_t  nonce[24];
     uint8_t  wrapped_mk[48];      /* 32 B MK ciphertext + 16 B tag */
@@ -189,6 +192,7 @@ static void hdr_serialize(const ks_header_t *h, uint8_t out[KS_HDR_SIZE])
         put_le32(s + 2, sl->blocks_kib);
         put_le32(s + 6, sl->passes);
         s[10] = sl->lanes;
+        s[11] = sl->pin_len;
         memcpy(s + 12, sl->salt, 16);
         memcpy(s + 28, sl->nonce, 24);
         memcpy(s + 52, sl->wrapped_mk, 48);
@@ -212,6 +216,7 @@ static esp_err_t hdr_parse(const uint8_t in[KS_HDR_SIZE], ks_header_t *h)
         sl->blocks_kib = get_le32(s + 2);
         sl->passes     = get_le32(s + 6);
         sl->lanes      = s[10];
+        sl->pin_len    = s[11];
         memcpy(sl->salt,       s + 12, 16);
         memcpy(sl->nonce,      s + 28, 24);
         memcpy(sl->wrapped_mk, s + 52, 48);
@@ -325,6 +330,7 @@ static esp_err_t slot_wrap_mk(int idx, const char *pin)
 {
     ks_slot_t *sl = &s_ks.hdr.slot[idx];
     sl->type       = pin_slot_type(pin);
+    sl->pin_len    = sl->type == KS_SLOT_PIN ? (uint8_t)strlen(pin) : 0;
     sl->alg        = KS_ALG_ARGON2ID;
     sl->blocks_kib = KS_ARGON2_BLOCKS_KIB;
     sl->passes     = KS_ARGON2_PASSES;
@@ -372,6 +378,18 @@ keystore_state_t keystore_state(void)
     esp_err_t e = ks_load();
     if (e == ESP_ERR_NOT_FOUND) return KEYSTORE_ABSENT;
     return KEYSTORE_LOCKED;      /* present (or present-but-corrupt) */
+}
+
+uint8_t keystore_pin_len(void)
+{
+    if (ks_load() != ESP_OK) return 0;
+    for (int i = 0; i < KS_SLOTS; i++) {
+        const ks_slot_t *sl = &s_ks.hdr.slot[i];
+        if (sl->type == KS_SLOT_PIN &&
+            sl->pin_len >= KEYSTORE_PIN_MIN && sl->pin_len <= KEYSTORE_PIN_MAX)
+            return sl->pin_len;
+    }
+    return 0;
 }
 
 esp_err_t keystore_create(const char *pin)

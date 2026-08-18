@@ -50,6 +50,14 @@ typedef enum {
 keystore_state_t keystore_state(void);
 
 /**
+ * Configured PIN length for the pad's auto-submit, readable while LOCKED
+ * (it is a header hint, not a secret — knowing it costs an attacker <10 %
+ * of the search space). 0 = unknown (pre-hint store) or passphrase-only:
+ * the unlock UI then submits on Enter alone.
+ */
+uint8_t keystore_pin_len(void);
+
+/**
  * Create a new store: random MK + uuid, @p pin wrapped into slot 0.
  * The store is left UNLOCKED. Refuses to overwrite an existing store
  * (ESP_ERR_INVALID_STATE) — delete keystore.kv1 first if you mean it.

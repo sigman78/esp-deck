@@ -326,6 +326,22 @@ static void test_change_pin_rewraps_slot_only(void)
     TEST_ASSERT_EQUAL_size_t(strlen(TEST_PEM), n);
 }
 
+static void test_pin_len_hint_for_autosubmit(void)
+{
+    TEST_ASSERT_EQUAL_INT(0, keystore_pin_len());          /* absent store  */
+    TEST_ASSERT_EQUAL_INT(ESP_OK, keystore_create("1234"));
+    keystore_lock();
+    keystore_reset_cache();                                /* "reboot"      */
+    TEST_ASSERT_EQUAL_INT(4, keystore_pin_len());          /* works LOCKED  */
+
+    TEST_ASSERT_EQUAL_INT(ESP_OK, keystore_change_pin("1234", "567890"));
+    TEST_ASSERT_EQUAL_INT(6, keystore_pin_len());
+
+    /* Passphrase slot: no hint — the unlock UI submits on Enter alone */
+    TEST_ASSERT_EQUAL_INT(ESP_OK, keystore_change_pin("567890", "open sesame"));
+    TEST_ASSERT_EQUAL_INT(0, keystore_pin_len());
+}
+
 /* ------------------------------------------------------------------
  * Adoption + storage integration
  * ---------------------------------------------------------------- */
@@ -433,6 +449,7 @@ int main(void)
     RUN_TEST(test_rename_attack_killed_by_aad);
     RUN_TEST(test_cross_store_transplant_rejected);
     RUN_TEST(test_change_pin_rewraps_slot_only);
+    RUN_TEST(test_pin_len_hint_for_autosubmit);
     RUN_TEST(test_adopt_plaintext_on_unlock);
     RUN_TEST(test_storage_set_key_wraps_when_unlocked);
     RUN_TEST(test_list_keys_unions_pem_and_kw1);
