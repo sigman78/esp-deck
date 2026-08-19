@@ -112,13 +112,14 @@ void boot_enter(uint64_t now)
     app.state    = ST_BOOT;
 }
 
-/* Splash over (elapsed or skipped): HOME, or the code pad first when the
- * boot lock trigger is on and a store is present (lock.ini, default off). */
+/* Splash over (elapsed or skipped): HOME — behind the DEVICE gate whenever
+ * a keystore exists (two-gates model: a store on the deck means the deck
+ * is locked; no store = feature off, straight to HOME). */
 static void boot_done(uint64_t now)
 {
     display_fx_wipe();   /* raster-reveal whatever comes up next */
-    if (app.unlock.trig_boot && keystore_state() == KEYSTORE_LOCKED)
-        unlock_open(now, false);
+    if (keystore_state() == KEYSTORE_LOCKED)
+        unlock_open_gate(now);
     else
         enter_home(now);
 }

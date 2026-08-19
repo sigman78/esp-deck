@@ -143,22 +143,34 @@ static int font_menu_items(const char *out[], const char *bodies[])
  * runs ~10 Hz and an ABSENT store would stat the filesystem every frame. */
 static keystore_state_t s_ks_snap;
 
+/* The page is CONTEXTUAL — impossible actions are hidden, not no-op'd
+ * (no "Lock deck" or "Remove code" without a store). Two-gates model: a
+ * store on the deck means the deck locks at boot/wake; there is nothing
+ * to configure. s_ks_act maps the rendered slot to its action. */
+enum { KSA_LOCK, KSA_SETPIN, KSA_REMOVE, KSA_BACK };
+static uint8_t s_ks_act[KS_MENU_TILES];
+
 static int ks_menu_items(const char *out[], const char *bodies[])
 {
-    out[0]    = "Lock now";
-    bodies[0] = s_ks_snap == KEYSTORE_UNLOCKED ? "unlocked"
-              : s_ks_snap == KEYSTORE_LOCKED   ? "locked"
-                                               : "no keystore";
-    out[1]    = s_ks_snap == KEYSTORE_ABSENT ? "Create keystore"
-                                             : "Change code";
-    bodies[1] = "";
-    out[2]    = "Lock on boot";
-    bodies[2] = app.unlock.trig_boot ? "on" : "off";
-    out[3]    = "Lock on wake";
-    bodies[3] = app.unlock.trig_wake ? "on" : "off";
-    out[4]    = "Back";
-    bodies[4] = "";
-    return KS_MENU_TILES;
+    int n = 0;
+    if (s_ks_snap != KEYSTORE_ABSENT) {
+        out[n]      = "Lock deck";     /* panic button: wipe MK, raise pad */
+        bodies[n]   = s_ks_snap == KEYSTORE_UNLOCKED ? "unlocked" : "locked";
+        s_ks_act[n++] = KSA_LOCK;
+    }
+    out[n]      = s_ks_snap == KEYSTORE_ABSENT ? "Create keystore"
+                                               : "Change code";
+    bodies[n]   = s_ks_snap == KEYSTORE_ABSENT ? "locks the deck" : "";
+    s_ks_act[n++] = KSA_SETPIN;
+    if (s_ks_snap != KEYSTORE_ABSENT) {
+        out[n]      = "Remove code";
+        bodies[n]   = "keys to plain";
+        s_ks_act[n++] = KSA_REMOVE;
+    }
+    out[n]      = "Back";
+    bodies[n]   = "";
+    s_ks_act[n++] = KSA_BACK;
+    return n;
 }
 
 /* Step the EFFECTS tunable at @p sel, persist, and (for the event effects)
@@ -587,28 +599,15 @@ static void menu_activate(uint64_t now)
         return;
 
     case MS_KEYSTORE:
-        switch (sel) {
-        case 0:                                   /* lock now */
-            if (s_ks_snap == KEYSTORE_UNLOCKED) {
-                keystore_lock();
-                s_ks_snap = keystore_state();
-                menu_note(now, MENU_MSG_MS, false, "keystore locked");
-            } else {
-                menu_note(now, MENU_MSG_MS, false,
-                          s_ks_snap == KEYSTORE_LOCKED ? "already locked"
-                                                       : "no keystore yet");
-            }
+        if (sel < 0 || sel >= KS_MENU_TILES) break;
+        switch (s_ks_act[sel]) {          /* slot -> action (contextual page) */
+        case KSA_LOCK:                    /* panic button: park the deck */
+            keystore_lock();
+            unlock_open_gate(now);
             return;
-        case 1: unlock_open_setpin(now);          return;  /* create/change */
-        case 2:                                   /* toggle: prompt at boot */
-            app.unlock.trig_boot = !app.unlock.trig_boot;
-            storage_lock_save(app.unlock.trig_boot, app.unlock.trig_wake);
-            return;
-        case 3:                                   /* toggle: lock at saver */
-            app.unlock.trig_wake = !app.unlock.trig_wake;
-            storage_lock_save(app.unlock.trig_boot, app.unlock.trig_wake);
-            return;
-        case 4: menu_back(now);                   return;  /* Back */
+        case KSA_SETPIN: unlock_open_setpin(now); return;  /* create/change */
+        case KSA_REMOVE: unlock_open_remove(now); return;  /* proves code   */
+        case KSA_BACK: menu_back(now);            return;  /* Back */
         }
         break;
 

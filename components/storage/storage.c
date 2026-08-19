@@ -496,58 +496,6 @@ esp_err_t storage_font_save(const char *name)
 }
 
 /* -------------------------------------------------------------------------
- * Keystore lock triggers — lock.ini
- *
- *   boot=0
- *   wake=1
- * ---------------------------------------------------------------------- */
-
-static void lock_path(char *buf, size_t bufsz)
-{
-    snprintf(buf, bufsz, "%s/lock.ini", storage_platform_mount_point());
-}
-
-esp_err_t storage_lock_load(bool *on_boot, bool *on_wake)
-{
-    if (!on_boot || !on_wake) return ESP_ERR_INVALID_ARG;
-    *on_boot = false;                 /* docs/storage_auth.md defaults */
-    *on_wake = true;
-
-    char path[128];
-    lock_path(path, sizeof(path));
-    FILE *f = fopen(path, "r");
-    if (!f) return ESP_ERR_NOT_FOUND;
-
-    char line[64];
-    while (fgets(line, sizeof(line), f)) {
-        rtrim(line);
-        char key[32], val[32];
-        if (!parse_kv(line, key, sizeof(key), val, sizeof(val))) continue;
-        if (strcmp(key, "boot") == 0) *on_boot = val[0] == '1';
-        if (strcmp(key, "wake") == 0) *on_wake = val[0] == '1';
-    }
-    fclose(f);
-    return ESP_OK;
-}
-
-esp_err_t storage_lock_save(bool on_boot, bool on_wake)
-{
-    char path[128];
-    lock_path(path, sizeof(path));
-
-    atomic_file_t af;
-    FILE *f = atomic_open(&af, path);
-    if (!f) return ESP_FAIL;
-
-    fprintf(f, "boot=%d\nwake=%d\n", on_boot ? 1 : 0, on_wake ? 1 : 0);
-
-    if (atomic_close(&af) != ESP_OK) return ESP_FAIL;
-    ESP_LOGI(TAG, "Saved lock triggers (boot=%d wake=%d)",
-             on_boot ? 1 : 0, on_wake ? 1 : 0);
-    return ESP_OK;
-}
-
-/* -------------------------------------------------------------------------
  * Known SSH host keys — known_hosts.ini, flat "host:port=fp" lines
  * ---------------------------------------------------------------------- */
 
@@ -821,12 +769,33 @@ esp_err_t storage_set_key(const char *key_id, const char *pem, size_t len)
     return ESP_OK;
 }
 
+esp_err_t storage_shred_file(const char *path)
+{
+    FILE *f = fopen(path, "r+b");
+    if (!f) return ESP_ERR_NOT_FOUND;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    if (sz > 0) {
+        static const uint8_t zeros[256];
+        fseek(f, 0, SEEK_SET);
+        for (long off = 0; off < sz; off += (long)sizeof(zeros)) {
+            size_t n = (size_t)(sz - off) < sizeof(zeros)
+                     ? (size_t)(sz - off) : sizeof(zeros);
+            if (fwrite(zeros, 1, n, f) != n) break;
+        }
+        fflush(f);
+    }
+    fclose(f);
+    remove(path);
+    return ESP_OK;
+}
+
 esp_err_t storage_delete_key(const char *key_id)
 {
     if (!key_id || !key_id[0]) return ESP_ERR_INVALID_ARG;
     char path[160];
     key_path(key_id, path, sizeof(path));                     /* .pem */
-    remove(path);
+    storage_shred_file(path);              /* plaintext key material */
     snprintf(path, sizeof(path), "%s/keys/%s.kw1",
              storage_platform_mount_point(), key_id);         /* wrapped     */
     remove(path);
@@ -985,7 +954,7 @@ static void wipe_keys_dir(void)
     do {
         if (fd.name[0] == '.') continue;                      /* skip . / .. */
         snprintf(path, sizeof(path), "%s/%s", dir, fd.name);
-        remove(path);
+        storage_shred_file(path);            /* may hold plaintext keys */
     } while (_findnext(h, &fd) == 0);
     _findclose(h);
 #else
@@ -995,7 +964,7 @@ static void wipe_keys_dir(void)
     while ((e = readdir(d)) != NULL) {
         if (e->d_name[0] == '.') continue;                    /* skip . / .. */
         snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
-        remove(path);
+        storage_shred_file(path);            /* may hold plaintext keys */
     }
     closedir(d);
 #endif
@@ -1004,6 +973,8 @@ static void wipe_keys_dir(void)
 esp_err_t storage_factory_reset(void)
 {
     const char *mp = storage_platform_mount_point();
+    /* profiles.ini and wifi.ini hold plaintext passwords/PSKs — shred them
+     * (best-effort, see storage_shred_file); the rest is not sensitive. */
     static const char *files[] = {
         "profiles.ini", "wifi.ini", "known_hosts.ini", "ble_devices.ini",
         "fx.ini", "keystore.kv1", "lock.ini",
@@ -1011,7 +982,8 @@ esp_err_t storage_factory_reset(void)
     char path[160];
     for (int i = 0; i < (int)(sizeof(files) / sizeof(files[0])); i++) {
         snprintf(path, sizeof(path), "%s/%s", mp, files[i]);
-        remove(path);
+        if (i < 2) storage_shred_file(path);
+        else       remove(path);
     }
     wipe_keys_dir();
     keystore_reset_cache();   /* wipe the in-RAM MK + stale header cache */

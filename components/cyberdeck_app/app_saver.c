@@ -205,15 +205,17 @@ bool saver_on_input(uint64_t now)
      * ticks before it drains input, so a keypress aimed at a HOME visible
      * milliseconds ago must still act, not vanish into a wake. */
     bool swallow = now - app.saver.since >= 1000;
-    /* Wake gate: the store locked when the rain went up; a real wake lands
-     * on the code pad instead of HOME. Esc skips to HOME — the security is
-     * the MK wipe (key connects still gate lazily), not this screen. */
-    if (swallow && app.unlock.trig_wake &&
-        keystore_state() == KEYSTORE_LOCKED) {
-        unlock_open(now, false);
+    /* DEVICE gate (two-gates model): a keystore on the deck means the deck
+     * is locked — the store went cold when the rain came up, and a real
+     * wake lands on the non-skippable device pad, never on HOME. */
+    if (swallow && keystore_state() == KEYSTORE_LOCKED) {
+        unlock_open_gate(now);
         return true;
     }
-    render_home();
+    /* Rain can cover HOME or the gate pad; repaint whichever is under it
+     * (an early keypress inside the 1 s grace still acts on that screen). */
+    if (app.state == ST_UNLOCK) app.next_anim = 0;
+    else                        render_home();
     return swallow;
 }
 
@@ -228,9 +230,29 @@ bool saver_tick_home(uint64_t now)
         if (!app.saver.on) {
             app.saver.on    = true;   /* input handling keys off what's on screen */
             app.saver.since = now;
-            /* The wake trigger arms HERE: the deck locks as the rain goes
-             * up, so a lifted deck is already cold. No-op when locked. */
-            if (app.unlock.trig_wake) keystore_lock();
+            /* The deck locks as the rain goes up, so a lifted deck is
+             * already cold. No-op when locked or without a store. */
+            keystore_lock();
+        }
+        render_saver();
+    }
+    return true;
+}
+
+/* Same idle rain, ticked from the DEVICE gate pad (ST_UNLOCK): the pad is
+ * non-skippable and must not sit lit forever — the rain covers it, and
+ * saver_on_input routes the wake straight back onto the pad. */
+bool saver_tick_gate(uint64_t now)
+{
+    if (now - app.saver.last_input <= SAVER_IDLE_MS) {
+        app.saver.on = false;
+        return false;
+    }
+    if (now >= app.next_anim) {
+        app.next_anim = now + ANIM_PERIOD_MS;
+        if (!app.saver.on) {
+            app.saver.on    = true;
+            app.saver.since = now;
         }
         render_saver();
     }

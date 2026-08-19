@@ -163,8 +163,16 @@ typedef struct {                    /* app_unlock.c */
     bool     deriving;              /* KDF worker running; input swallowed */
     const char *note;               /* status-row flash (static string)    */
     uint64_t note_until;
-    bool     trig_boot;             /* lock.ini: prompt at boot            */
-    bool     trig_wake;             /* lock.ini: lock at saver, prompt at wake */
+    int8_t   press;                 /* pad slot lit by a press...          */
+    uint64_t press_until;           /* ...until then (0 = none lit)        */
+    uint64_t last_input;            /* idle-cancel clock (IDLE_CANCEL_MS)  */
+    char     reveal_ch;             /* newest typed char, echoed briefly...*/
+    uint64_t reveal_until;          /* ...while defining a code (0 = off)  */
+    /* Two-gates model: a keystore on the deck means the deck is LOCKED.
+     * gate = this pad is the DEVICE gate (boot/wake): non-skippable, no
+     * idle-cancel, the saver rains over it. Otherwise it's a cancellable
+     * keystore prompt (connect fallback / menu flows). */
+    bool     gate;
 } unlock_state_t;
 
 struct app_state {
