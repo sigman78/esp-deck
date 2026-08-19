@@ -87,11 +87,97 @@ bool ble_has_bond(void)
     return n > 0;
 }
 
-void kick_wifi(void)
+/* One-time migration: a WiFi credential a past firmware persisted into
+ * the driver's NVS was captured at wifi init — fold it into storage (the
+ * secrets bundle when the store is open, which it is on the post-unlock
+ * path that calls this) unless the SSID is already known. */
+void wifi_migrate_nvs_cred(void)
 {
-    wifi_profile_t nets[STORAGE_WIFI_MAX];
+    /* Credential buffers live in .bss (wiped after use) — the main task
+     * stack is 3.5 KB and this runs on the kick_wifi call chain. */
+    static wifi_profile_t nv;
+    if (!wifi_manager_take_nvs_cred(&nv)) return;
+
+    static wifi_profile_t nets[STORAGE_WIFI_MAX];
     int n = 0;
     storage_wifi_load(nets, &n, STORAGE_WIFI_MAX);
+    bool known = false;
+    for (int i = 0; i < n && !known; i++)
+        known = strcmp(nets[i].ssid, nv.ssid) == 0;
+    if (!known && n < STORAGE_WIFI_MAX) {
+        nets[n++] = nv;
+        if (storage_wifi_save(nets, n) == ESP_OK) {
+            ESP_LOGW(TAG, "Migrated WiFi credential '%s' from driver NVS "
+                          "into storage", nv.ssid);
+            /* Saved and verifiable — ONLY NOW may the NVS copy go. */
+            wifi_manager_clear_nvs_cred();
+        }
+    } else if (known) {
+        wifi_manager_clear_nvs_cred();   /* already in storage: redundant */
+    }
+    memset(&nv, 0, sizeof(nv));
+    memset(nets, 0, sizeof(nets));
+}
+
+/* One-time seed: a Kconfig fallback credential with a real PSK moves into
+ * storage, so sdkconfig can be blanked afterwards — a firmware image must
+ * not carry a usable pre-shared key in .rodata. Idempotent: a known SSID
+ * (plaintext or @bundle marker row) is never re-seeded. */
+static void wifi_seed_fallback(void)
+{
+    if (!app.cfg.fallback_wifi_ssid || !app.cfg.fallback_wifi_ssid[0] ||
+        !app.cfg.fallback_wifi_password || !app.cfg.fallback_wifi_password[0])
+        return;
+
+    static wifi_profile_t nets[STORAGE_WIFI_MAX];   /* .bss, wiped below */
+    int n = 0;
+    storage_wifi_load(nets, &n, STORAGE_WIFI_MAX);
+    for (int i = 0; i < n; i++)
+        if (strcmp(nets[i].ssid, app.cfg.fallback_wifi_ssid) == 0) {
+            memset(nets, 0, sizeof(nets));
+            return;
+        }
+    if (n >= STORAGE_WIFI_MAX) { memset(nets, 0, sizeof(nets)); return; }
+    memset(&nets[n], 0, sizeof(nets[n]));
+    snprintf(nets[n].ssid, sizeof(nets[n].ssid), "%s",
+             app.cfg.fallback_wifi_ssid);
+    snprintf(nets[n].password, sizeof(nets[n].password), "%s",
+             app.cfg.fallback_wifi_password);
+    n++;
+    if (storage_wifi_save(nets, n) == ESP_OK)
+        ESP_LOGW(TAG, "Seeded fallback WiFi '%s' into storage — blank "
+                      "CONFIG_WIFI_PASSWORD now", app.cfg.fallback_wifi_ssid);
+    memset(nets, 0, sizeof(nets));
+}
+
+void kick_wifi(void)
+{
+    /* Init is idempotent and captures any credential a past firmware left
+     * in the driver's NVS; the migration folds it into storage — the
+     * bundle when the store is open, plaintext wifi.ini otherwise (a
+     * store-less deck keeps working; a locked one adopts at unlock). */
+    wifi_manager_init();
+    wifi_migrate_nvs_cred();
+    wifi_seed_fallback();
+
+    static wifi_profile_t nets[STORAGE_WIFI_MAX];   /* .bss, wiped below */
+    int n = 0;
+    storage_wifi_load(nets, &n, STORAGE_WIFI_MAX);
+
+    /* Rows still wearing the @bundle marker are unreadable until unlock —
+     * joining with the literal marker (or as an open net) would only
+     * thrash the AP. They rejoin at the post-unlock kick. */
+    int usable = 0, gated = 0;
+    for (int i = 0; i < n; i++) {
+        if (strcmp(nets[i].password, STORAGE_PW_BUNDLED) == 0) {
+            gated++;
+            continue;
+        }
+        if (usable != i) nets[usable] = nets[i];
+        usable++;
+    }
+    if (gated) ESP_LOGI(TAG, "%d WiFi network(s) await unlock", gated);
+    n = usable;
 
     if (n == 0 && app.cfg.fallback_wifi_ssid && app.cfg.fallback_wifi_ssid[0]) {
         memset(&nets[0], 0, sizeof(nets[0]));
@@ -103,10 +189,11 @@ void kick_wifi(void)
     }
 
     if (n > 0) {
-        wifi_manager_connect(nets, n);
-    } else {
+        wifi_manager_connect(nets, n);     /* copies what it needs */
+    } else if (gated == 0) {               /* gated nets already logged */
         ESP_LOGW(TAG, "no WiFi profiles (wifi.ini empty, no fallback)");
     }
+    memset(nets, 0, sizeof(nets));
 }
 
 /* -------------------------------------------------------------- toasts */

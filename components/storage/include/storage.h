@@ -49,6 +49,14 @@ typedef struct {
     char            key_id[32];     /* Key identifier (auth == KEY)   */
 } conn_profile_t;
 
+/* Marker written into an ini password= field whose real value diverted
+ * into the secrets bundle — distinguishes "diverted, unlock to read" from
+ * a genuinely empty password (open WiFi network / no passphrase). Loads
+ * replace it with the bundle value when the store is open; consumers that
+ * see it raw (locked-boot WiFi kick, connect resolve) must treat it as
+ * "not usable yet", never as a literal credential. */
+#define STORAGE_PW_BUNDLED "@bundle"
+
 #define STORAGE_WIFI_MAX 8
 
 typedef struct {

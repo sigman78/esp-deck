@@ -32,6 +32,21 @@ esp_err_t storage_scan_key_ext(const char *ext,
  */
 esp_err_t storage_shred_file(const char *path);
 
+/**
+ * Raw ini writers — the bodies of storage_save_profiles/storage_wifi_save
+ * WITHOUT the secrets-bundle diversion. Used by keystore.c's remove-code
+ * restore, which must write plaintext back on purpose.
+ */
+esp_err_t storage_profiles_write_raw(const conn_profile_t *profiles, int count);
+esp_err_t storage_wifi_write_raw(const wifi_profile_t *profiles, int count);
+
+/**
+ * True if profiles.ini or wifi.ini still carries a non-empty plaintext
+ * password= value — i.e. credentials written while the store was locked
+ * or absent, waiting for bundle adoption at the next unlock.
+ */
+bool storage_secrets_pending(void);
+
 #ifdef __cplusplus
 }
 #endif
