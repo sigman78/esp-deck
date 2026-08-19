@@ -13,6 +13,19 @@ extern "C" {
 #endif
 
 /**
+ * True if @p key_id is safe to interpolate into a keys/<id>.<ext> path:
+ * non-empty, fits STORAGE_KEY_ID_LEN, and carries no path separator, no
+ * Windows drive letter / NTFS alternate-data-stream colon.
+ *
+ * Every entry point that builds a key path must gate on this. key_id values
+ * are NOT all self-generated: they come back from profiles.ini, a plain text
+ * file that a hand edit, a restored backup or a pre-sanitizer profile can put
+ * "../../keystore" into — which would otherwise turn storage_delete_key()
+ * into an arbitrary unlink and storage_get_key() into an arbitrary read.
+ */
+bool storage_key_id_ok(const char *key_id);
+
+/**
  * Scan <mount>/keys/ for files ending in @p ext (e.g. ".pem", ".kw1") and
  * append their stems to @p out, skipping stems already present (dedupe) and
  * stems that don't fit STORAGE_KEY_ID_LEN. *count is read AND updated —

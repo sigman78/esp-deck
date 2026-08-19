@@ -795,6 +795,78 @@ static void test_backoff_survives_reboot(void)
     keystore_set_uptime_hook(NULL);
 }
 
+/* A key id reaching a filename must never escape keys/. These values come
+ * back from profiles.ini, which a hand edit or a restored backup controls —
+ * unguarded, storage_delete_key() was an arbitrary unlink. */
+static void test_key_id_path_traversal_rejected(void)
+{
+    static const char *const EVIL[] = {
+        "../../keystore", "../secrets", "a/b", "a\\b", "C:evil", "",
+    };
+    char   buf[128];
+    size_t got = 0;
+
+    for (int i = 0; i < (int)(sizeof(EVIL) / sizeof(EVIL[0])); i++) {
+        TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG,
+                              storage_set_key(EVIL[i], "x", 1));
+        TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG,
+                              storage_get_key(EVIL[i], buf, sizeof(buf), &got));
+        TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG,
+                              storage_delete_key(EVIL[i]));
+        TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG,
+                              storage_key_info(EVIL[i], NULL, 0, NULL, 0));
+        TEST_ASSERT_FALSE(keystore_is_wrapped(EVIL[i]));
+    }
+    /* An over-long id is rejected too (it would truncate into a collision) */
+    char toolong[STORAGE_KEY_ID_LEN + 8];
+    memset(toolong, 'k', sizeof(toolong) - 1);
+    toolong[sizeof(toolong) - 1] = '\0';
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_INVALID_ARG,
+                          storage_set_key(toolong, "x", 1));
+
+    /* ...and an ordinary id still works, so the gate isn't over-tight */
+    TEST_ASSERT_EQUAL_INT(ESP_OK, storage_set_key("ok-id_1", "pem", 3));
+    TEST_ASSERT_EQUAL_INT(ESP_OK,
+                          storage_get_key("ok-id_1", buf, sizeof(buf), &got));
+    TEST_ASSERT_EQUAL_UINT(3, got);
+}
+
+/* A set that cannot fit must leave the cache EXACTLY as it found it. The
+ * first cut of this function cut the old entry before discovering the new
+ * one didn't fit, so the cache silently lost a line the file still had —
+ * and the next successful set wrote that loss through to flash. */
+static void test_secret_set_overflow_leaves_cache_intact(void)
+{
+    TEST_ASSERT_EQUAL_INT(ESP_OK, keystore_create("1234"));
+
+    char big[512];
+    memset(big, 'v', sizeof(big) - 1);
+    big[sizeof(big) - 1] = '\0';
+
+    /* Fill most of the 2048-byte bundle, then keep "victim" as the entry
+     * whose survival we care about. */
+    TEST_ASSERT_EQUAL_INT(ESP_OK, keystore_secret_set("pad1", big));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, keystore_secret_set("pad2", big));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, keystore_secret_set("pad3", big));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, keystore_secret_set("victim", "keepme"));
+
+    /* Replacing "victim" with something far too large must fail cleanly:
+     * the six bytes it frees nowhere near cover the 512 it wants. */
+    TEST_ASSERT_EQUAL_INT(ESP_ERR_NO_MEM, keystore_secret_set("victim", big));
+
+    char out[64];
+    TEST_ASSERT_EQUAL_INT(ESP_OK, keystore_secret_get("victim", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("keepme", out);
+
+    /* The real damage was deferred: a LATER successful set persists the
+     * cache, so victim has to survive a store + reload round trip. */
+    TEST_ASSERT_EQUAL_INT(ESP_OK, keystore_secret_set("pad3", NULL)); /* remove */
+    keystore_lock();
+    TEST_ASSERT_EQUAL_INT(ESP_OK, keystore_unlock("1234"));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, keystore_secret_get("victim", out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("keepme", out);
+}
+
 /* ------------------------------------------------------------------ */
 
 int main(void)
@@ -831,5 +903,7 @@ int main(void)
     RUN_TEST(test_secrets_adoption_from_plaintext_ini);
     RUN_TEST(test_remove_restores_secret_plaintext);
     RUN_TEST(test_secrets_prune_and_list_exclusion);
+    RUN_TEST(test_key_id_path_traversal_rejected);
+    RUN_TEST(test_secret_set_overflow_leaves_cache_intact);
     return UNITY_END();
 }

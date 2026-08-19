@@ -41,6 +41,16 @@ static void key_path(const char *key_id, char *buf, size_t bufsz)
              storage_platform_mount_point(), key_id);
 }
 
+/* Path-safety gate for every key id that reaches a filename — see the
+ * rationale in storage_priv.h. Lives here rather than in keystore.c because
+ * the vault is strippable (keystore_stub.c) and these checks are not. */
+bool storage_key_id_ok(const char *key_id)
+{
+    if (!key_id || !key_id[0]) return false;
+    if (strlen(key_id) >= STORAGE_KEY_ID_LEN) return false;
+    return strpbrk(key_id, "/\\:") == NULL;
+}
+
 /* -------------------------------------------------------------------------
  * INI parse helpers
  * ---------------------------------------------------------------------- */
@@ -870,7 +880,7 @@ esp_err_t storage_get_key(const char *key_id,
                            size_t      buf_len,
                            size_t     *written)
 {
-    if (!key_id || !buf || buf_len == 0 || !written)
+    if (!storage_key_id_ok(key_id) || !buf || buf_len == 0 || !written)
         return ESP_ERR_INVALID_ARG;
 
     /* Wrapped key takes precedence: keys/<id>.kw1 (see keystore.h). While
@@ -923,7 +933,8 @@ esp_err_t storage_get_key(const char *key_id,
 
 esp_err_t storage_set_key(const char *key_id, const char *pem, size_t len)
 {
-    if (!key_id || !pem || len == 0) return ESP_ERR_INVALID_ARG;
+    if (!storage_key_id_ok(key_id) || !pem || len == 0)
+        return ESP_ERR_INVALID_ARG;
 
     char path[160];
     key_path(key_id, path, sizeof(path));
@@ -981,7 +992,7 @@ esp_err_t storage_shred_file(const char *path)
 
 esp_err_t storage_delete_key(const char *key_id)
 {
-    if (!key_id || !key_id[0]) return ESP_ERR_INVALID_ARG;
+    if (!storage_key_id_ok(key_id)) return ESP_ERR_INVALID_ARG;
     char path[160];
     key_path(key_id, path, sizeof(path));                     /* .pem */
     storage_shred_file(path);              /* plaintext key material */
@@ -1088,7 +1099,7 @@ esp_err_t storage_key_info(const char *key_id,
 {
     if (type && type_len)       type[0] = '\0';
     if (comment && comment_len) comment[0] = '\0';
-    if (!key_id || !key_id[0]) return ESP_ERR_INVALID_ARG;
+    if (!storage_key_id_ok(key_id)) return ESP_ERR_INVALID_ARG;
 
     char path[160];
     snprintf(path, sizeof(path), "%s/keys/%s.pub",

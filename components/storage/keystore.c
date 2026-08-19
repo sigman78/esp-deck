@@ -678,13 +678,8 @@ esp_err_t keystore_change_pin(const char *old_pin, const char *new_pin)
  * Public API — wrapped key files
  * ---------------------------------------------------------------------- */
 
-static bool key_id_ok(const char *key_id)
-{
-    if (!key_id || !key_id[0]) return false;
-    if (strlen(key_id) >= STORAGE_KEY_ID_LEN) return false;
-    if (strchr(key_id, '/') || strchr(key_id, '\\')) return false;
-    return true;
-}
+/* Path safety is storage_key_id_ok() (storage_priv.h) — one gate shared with
+ * the plaintext storage_*_key entry points, which used to have none. */
 
 /* Key AAD: magic ‖ version ‖ content_type ‖ store_uuid ‖ key_id — binding
  * the id and store uuid into the tag kills renaming and transplants. */
@@ -703,7 +698,7 @@ static size_t kw_aad(uint8_t content_type, const char *key_id,
 esp_err_t keystore_wrap(const char *key_id, uint8_t content_type,
                         const void *plaintext, size_t len)
 {
-    if (!key_id_ok(key_id) || !plaintext || len == 0 || len > KW_CT_MAX)
+    if (!storage_key_id_ok(key_id) || !plaintext || len == 0 || len > KW_CT_MAX)
         return ESP_ERR_INVALID_ARG;
     if (!s_ks.unlocked) return ESP_ERR_INVALID_STATE;
 
@@ -740,7 +735,7 @@ esp_err_t keystore_wrap(const char *key_id, uint8_t content_type,
 esp_err_t keystore_unwrap(const char *key_id, void *buf, size_t buf_len,
                           size_t *written, uint8_t *content_type)
 {
-    if (!key_id_ok(key_id) || !buf || !written) return ESP_ERR_INVALID_ARG;
+    if (!storage_key_id_ok(key_id) || !buf || !written) return ESP_ERR_INVALID_ARG;
     *written = 0;
 
     char path[160];
@@ -799,7 +794,7 @@ esp_err_t keystore_unwrap(const char *key_id, void *buf, size_t buf_len,
 
 bool keystore_is_wrapped(const char *key_id)
 {
-    if (!key_id_ok(key_id)) return false;
+    if (!storage_key_id_ok(key_id)) return false;
     char path[160];
     kw_path(key_id, path, sizeof(path));
     FILE *f = fopen(path, "rb");
@@ -816,6 +811,26 @@ bool keystore_is_wrapped(const char *key_id)
  * ---------------------------------------------------------------------- */
 
 #define KS_SECRETS_MAX 2048
+
+/* The bundle must hold everything the diversion layer can ever put in it —
+ * one line per profile and per WiFi net, each at its field's maximum. If it
+ * cannot, keystore_secret_set() starts returning ESP_ERR_NO_MEM and
+ * storage_save_profiles() falls back to leaving that password in the ini as
+ * PLAINTEXT: a silent downgrade of exactly what the vault exists to protect.
+ * Derived from the structs, so raising STORAGE_MAX_PROFILES / STORAGE_WIFI_MAX
+ * (or a field width) breaks the build here instead of the guarantee. */
+_Static_assert(STORAGE_MAX_PROFILES *
+                   (sizeof("profile:") - 1 +
+                    sizeof(((conn_profile_t *)0)->name) - 1 + 1 +
+                    sizeof(((conn_profile_t *)0)->password) - 1 + 1) +
+               STORAGE_WIFI_MAX *
+                   (sizeof("wifi:") - 1 +
+                    sizeof(((wifi_profile_t *)0)->ssid) - 1 + 1 +
+                    sizeof(((wifi_profile_t *)0)->password) - 1 + 1)
+               < KS_SECRETS_MAX,
+               "secrets bundle too small for the worst-case profile/wifi set "
+               "— raise KS_SECRETS_MAX (passwords would silently stay "
+               "plaintext in the ini otherwise)");
 
 static char   s_sec[KS_SECRETS_MAX];
 static size_t s_sec_len;
@@ -913,21 +928,31 @@ esp_err_t keystore_secret_set(const char *skey, const char *value)
     esp_err_t e = secrets_load();
     if (e != ESP_OK) return e;
 
-    size_t vlen = 0;
-    char *v = secrets_find(skey, &vlen);
+    size_t vlen  = 0;
+    char  *v     = secrets_find(skey, &vlen);
+    char  *line  = NULL, *next = NULL;
     if (v) {                                   /* replace = cut + append */
-        char *line = v - strlen(skey) - 1;
-        char *next = v + vlen;
+        line = v - strlen(skey) - 1;
+        next = v + vlen;
         if (*next == '\n') next++;
-        secrets_cut(line, next);
     }
+
+    /* Capacity is checked BEFORE the cut, and the cut's own bytes count
+     * toward the budget. Bailing out after cutting used to leave the cache
+     * one entry shorter than the file it came from, and the next successful
+     * set persisted that divergence — a credential silently gone from flash
+     * while the caller only ever saw ESP_ERR_NO_MEM on some other key. */
     if (value && value[0]) {
-        size_t need = strlen(skey) + 1 + strlen(value) + 2;
-        if (s_sec_len + need >= sizeof(s_sec)) return ESP_ERR_NO_MEM;
+        size_t need  = strlen(skey) + 1 + strlen(value) + 2;
+        size_t freed = line ? (size_t)(next - line) : 0;
+        if (s_sec_len - freed + need >= sizeof(s_sec))
+            return ESP_ERR_NO_MEM;             /* cache untouched */
+    }
+    if (line) secrets_cut(line, next);
+    if (value && value[0])
         s_sec_len += (size_t)snprintf(s_sec + s_sec_len,
                                       sizeof(s_sec) - s_sec_len,
                                       "%s=%s\n", skey, value);
-    }
     return secrets_store();
 }
 
