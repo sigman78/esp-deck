@@ -672,6 +672,7 @@ static void menu_activate(uint64_t now)
         switch (s_ks_act[sel]) {          /* slot -> action (contextual page) */
         case KSA_LOCK:                    /* panic button: park the deck */
             keystore_lock();
+            app_creds_wipe();
             unlock_open_gate(now);
             return;
         case KSA_SETPIN: unlock_open_setpin(now); return;  /* create/change */

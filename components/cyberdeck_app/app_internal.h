@@ -220,6 +220,14 @@ extern struct app_state app;
 /** (Re)load stored profiles into app.profiles (+ Kconfig fallback synth). */
 void load_profiles(void);
 
+/**
+ * Scrub the plaintext credentials load_profiles() hydrated into app state.
+ * Call it with every keystore_lock() — that one wipes the master key and
+ * the secrets cache INSIDE the vault, and knows nothing about the copies
+ * out here. Metadata survives on purpose (HOME renders locked).
+ */
+void app_creds_wipe(void);
+
 /** True if a keyboard is bonded (present in the BLE registry). */
 bool ble_has_bond(void);
 

@@ -79,6 +79,28 @@ void load_profiles(void)
     }
 }
 
+/* Lock companion — see app_internal.h. keystore_lock() wipes the MK and the
+ * secrets cache inside the vault, but load_profiles() has already copied the
+ * hydrated passwords out here: the HOME list (app.profiles), the connect
+ * snapshot (app.conn.active) and the editor draft (app.pf.draft) each carry a
+ * plaintext login password or key passphrase. Without this the panic button
+ * and the idle auto-lock leave every credential sitting in .bss, and the lock
+ * only really covers the key files.
+ *
+ * Only the secret fields go: names, hosts, users and ports are explicitly
+ * not secret (docs/storage_auth.md "orthogonal model" axis 1) and HOME draws
+ * its tile grid before any unlock. The next successful unlock re-hydrates
+ * via load_profiles(). */
+void app_creds_wipe(void)
+{
+    for (int i = 0; i < MAX_PROFILES; i++)
+        keystore_wipe(app.profiles[i].password,
+                      sizeof(app.profiles[i].password));
+    keystore_wipe(app.conn.active.password,
+                  sizeof(app.conn.active.password));
+    keystore_wipe(app.pf.draft.password, sizeof(app.pf.draft.password));
+}
+
 bool ble_has_bond(void)
 {
     if (!app.cfg.ble) return false;
