@@ -17,6 +17,7 @@
 
 #include "esp_log.h"
 #include "display_fx.h"
+#include "keystore.h"     /* keystore_wipe for the cred scratch */
 #include "wifi_manager.h"
 
 static const char *TAG = "cyberdeck_app";
@@ -93,30 +94,29 @@ bool ble_has_bond(void)
  * path that calls this) unless the SSID is already known. */
 void wifi_migrate_nvs_cred(void)
 {
-    /* Credential buffers live in .bss (wiped after use) — the main task
-     * stack is 3.5 KB and this runs on the kick_wifi call chain. */
-    static wifi_profile_t nv;
-    if (!wifi_manager_take_nvs_cred(&nv)) return;
+    /* Shared cred scratch (storage.h) — never on this stack: the main
+     * task has 3.5 KB and this runs on the kick_wifi call chain. */
+    storage_cred_scratch_t *sc = storage_cred_scratch();
+    if (!wifi_manager_take_nvs_cred(&sc->one)) return;
 
-    static wifi_profile_t nets[STORAGE_WIFI_MAX];
+    wifi_profile_t *nets = sc->u.nets;
     int n = 0;
     storage_wifi_load(nets, &n, STORAGE_WIFI_MAX);
     bool known = false;
     for (int i = 0; i < n && !known; i++)
-        known = strcmp(nets[i].ssid, nv.ssid) == 0;
+        known = strcmp(nets[i].ssid, sc->one.ssid) == 0;
     if (!known && n < STORAGE_WIFI_MAX) {
-        nets[n++] = nv;
+        nets[n++] = sc->one;
         if (storage_wifi_save(nets, n) == ESP_OK) {
             ESP_LOGW(TAG, "Migrated WiFi credential '%s' from driver NVS "
-                          "into storage", nv.ssid);
+                          "into storage", sc->one.ssid);
             /* Saved and verifiable — ONLY NOW may the NVS copy go. */
             wifi_manager_clear_nvs_cred();
         }
     } else if (known) {
         wifi_manager_clear_nvs_cred();   /* already in storage: redundant */
     }
-    memset(&nv, 0, sizeof(nv));
-    memset(nets, 0, sizeof(nets));
+    keystore_wipe(sc, sizeof(*sc));
 }
 
 /* One-time seed: a Kconfig fallback credential with a real PSK moves into
@@ -129,25 +129,27 @@ static void wifi_seed_fallback(void)
         !app.cfg.fallback_wifi_password || !app.cfg.fallback_wifi_password[0])
         return;
 
-    static wifi_profile_t nets[STORAGE_WIFI_MAX];   /* .bss, wiped below */
+    wifi_profile_t *nets = storage_cred_scratch()->u.nets;
     int n = 0;
     storage_wifi_load(nets, &n, STORAGE_WIFI_MAX);
     for (int i = 0; i < n; i++)
         if (strcmp(nets[i].ssid, app.cfg.fallback_wifi_ssid) == 0) {
-            memset(nets, 0, sizeof(nets));
+            keystore_wipe(nets, sizeof(*nets) * STORAGE_WIFI_MAX);
             return;
         }
-    if (n >= STORAGE_WIFI_MAX) { memset(nets, 0, sizeof(nets)); return; }
-    memset(&nets[n], 0, sizeof(nets[n]));
-    snprintf(nets[n].ssid, sizeof(nets[n].ssid), "%s",
-             app.cfg.fallback_wifi_ssid);
-    snprintf(nets[n].password, sizeof(nets[n].password), "%s",
-             app.cfg.fallback_wifi_password);
-    n++;
-    if (storage_wifi_save(nets, n) == ESP_OK)
-        ESP_LOGW(TAG, "Seeded fallback WiFi '%s' into storage — blank "
-                      "CONFIG_WIFI_PASSWORD now", app.cfg.fallback_wifi_ssid);
-    memset(nets, 0, sizeof(nets));
+    if (n < STORAGE_WIFI_MAX) {
+        memset(&nets[n], 0, sizeof(nets[n]));
+        snprintf(nets[n].ssid, sizeof(nets[n].ssid), "%s",
+                 app.cfg.fallback_wifi_ssid);
+        snprintf(nets[n].password, sizeof(nets[n].password), "%s",
+                 app.cfg.fallback_wifi_password);
+        n++;
+        if (storage_wifi_save(nets, n) == ESP_OK)
+            ESP_LOGW(TAG, "Seeded fallback WiFi '%s' into storage — blank "
+                          "CONFIG_WIFI_PASSWORD now",
+                     app.cfg.fallback_wifi_ssid);
+    }
+    keystore_wipe(nets, sizeof(*nets) * STORAGE_WIFI_MAX);
 }
 
 void kick_wifi(void)
@@ -160,7 +162,8 @@ void kick_wifi(void)
     wifi_migrate_nvs_cred();
     wifi_seed_fallback();
 
-    static wifi_profile_t nets[STORAGE_WIFI_MAX];   /* .bss, wiped below */
+    /* Both helpers above have finished with the shared scratch. */
+    wifi_profile_t *nets = storage_cred_scratch()->u.nets;
     int n = 0;
     storage_wifi_load(nets, &n, STORAGE_WIFI_MAX);
 
@@ -193,7 +196,7 @@ void kick_wifi(void)
     } else if (gated == 0) {               /* gated nets already logged */
         ESP_LOGW(TAG, "no WiFi profiles (wifi.ini empty, no fallback)");
     }
-    memset(nets, 0, sizeof(nets));
+    keystore_wipe(nets, sizeof(*nets) * STORAGE_WIFI_MAX);
 }
 
 /* -------------------------------------------------------------- toasts */

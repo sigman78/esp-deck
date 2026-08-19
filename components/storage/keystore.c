@@ -968,18 +968,19 @@ static void ks_adopt_secrets(void)
 {
     if (!storage_secrets_pending()) return;
 
-    /* .bss scratch — ~2.7 KB is too fat for the unlock worker's stack */
-    static conn_profile_t s_profs[STORAGE_MAX_PROFILES];
-    static wifi_profile_t s_nets[STORAGE_WIFI_MAX];
+    /* Shared cred scratch (storage.h) — far too fat for the unlock
+     * worker's stack; the profiles phase finishes before the nets phase,
+     * so the union is safe. */
+    storage_cred_scratch_t *sc = storage_cred_scratch();
     int n = 0;
-    if (storage_load_profiles(s_profs, &n, STORAGE_MAX_PROFILES) == ESP_OK
-        && n > 0)
-        storage_save_profiles(s_profs, n);
-    crypto_wipe(s_profs, sizeof(s_profs));
+    if (storage_load_profiles(sc->u.profiles, &n, STORAGE_MAX_PROFILES)
+            == ESP_OK && n > 0)
+        storage_save_profiles(sc->u.profiles, n);
     n = 0;
-    if (storage_wifi_load(s_nets, &n, STORAGE_WIFI_MAX) == ESP_OK && n > 0)
-        storage_wifi_save(s_nets, n);
-    crypto_wipe(s_nets, sizeof(s_nets));
+    if (storage_wifi_load(sc->u.nets, &n, STORAGE_WIFI_MAX) == ESP_OK
+        && n > 0)
+        storage_wifi_save(sc->u.nets, n);
+    crypto_wipe(sc, sizeof(*sc));
     ESP_LOGW(TAG, "Adopted plaintext credentials into the secrets bundle");
 }
 
@@ -988,17 +989,16 @@ static void ks_adopt_secrets(void)
 static void secrets_restore_plaintext(void)
 {
     if (secrets_load() == ESP_OK && s_sec_len > 0) {
-        static conn_profile_t s_profs[STORAGE_MAX_PROFILES];
-        static wifi_profile_t s_nets[STORAGE_WIFI_MAX];
+        storage_cred_scratch_t *sc = storage_cred_scratch();
         int n = 0;
-        if (storage_load_profiles(s_profs, &n, STORAGE_MAX_PROFILES) == ESP_OK
-            && n > 0)
-            storage_profiles_write_raw(s_profs, n);
-        crypto_wipe(s_profs, sizeof(s_profs));
+        if (storage_load_profiles(sc->u.profiles, &n, STORAGE_MAX_PROFILES)
+                == ESP_OK && n > 0)
+            storage_profiles_write_raw(sc->u.profiles, n);
         n = 0;
-        if (storage_wifi_load(s_nets, &n, STORAGE_WIFI_MAX) == ESP_OK && n > 0)
-            storage_wifi_write_raw(s_nets, n);
-        crypto_wipe(s_nets, sizeof(s_nets));
+        if (storage_wifi_load(sc->u.nets, &n, STORAGE_WIFI_MAX) == ESP_OK
+            && n > 0)
+            storage_wifi_write_raw(sc->u.nets, n);
+        crypto_wipe(sc, sizeof(*sc));
     }
     char path[160];
     kw_path(KEYSTORE_SECRETS_ID, path, sizeof(path));

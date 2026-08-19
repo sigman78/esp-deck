@@ -219,17 +219,23 @@ esp_err_t wifi_manager_init(void)
      * saved it (never destroy the only copy first). If this IDF returns
      * nothing pre-start, the stale NVS copy simply survives until the
      * flash-encryption endgame — a residue, never a loss. */
-    static wifi_config_t nvs_cfg;   /* ~740 B — NOT on the 3.5 KB main stack */
-    if (esp_wifi_get_config(WIFI_IF_STA, &nvs_cfg) == ESP_OK &&
-        nvs_cfg.sta.ssid[0]) {
-        snprintf(s_nvs_cred.ssid, sizeof(s_nvs_cred.ssid), "%s",
-                 (const char *)nvs_cfg.sta.ssid);
-        snprintf(s_nvs_cred.password, sizeof(s_nvs_cred.password), "%s",
-                 (const char *)nvs_cfg.sta.password);
-        ESP_LOGW(TAG, "Captured NVS WiFi credential '%s' for migration",
-                 s_nvs_cred.ssid);
+    /* ~740 B: too big for the 3.5 KB main-task stack, one-shot — so a
+     * transient internal-heap alloc, wiped before free. */
+    wifi_config_t *nvs_cfg =
+        heap_caps_malloc(sizeof(*nvs_cfg), MALLOC_CAP_INTERNAL);
+    if (nvs_cfg) {
+        if (esp_wifi_get_config(WIFI_IF_STA, nvs_cfg) == ESP_OK &&
+            nvs_cfg->sta.ssid[0]) {
+            snprintf(s_nvs_cred.ssid, sizeof(s_nvs_cred.ssid), "%s",
+                     (const char *)nvs_cfg->sta.ssid);
+            snprintf(s_nvs_cred.password, sizeof(s_nvs_cred.password), "%s",
+                     (const char *)nvs_cfg->sta.password);
+            ESP_LOGW(TAG, "Captured NVS WiFi credential '%s' for migration",
+                     s_nvs_cred.ssid);
+        }
+        memset(nvs_cfg, 0, sizeof(*nvs_cfg));
+        heap_caps_free(nvs_cfg);
     }
-    memset(&nvs_cfg, 0, sizeof(nvs_cfg));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,

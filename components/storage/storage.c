@@ -270,6 +270,20 @@ esp_err_t storage_profiles_write_raw(const conn_profile_t *profiles, int count)
     return ESP_OK;
 }
 
+storage_cred_scratch_t *storage_cred_scratch(void)
+{
+    static storage_cred_scratch_t s;    /* .bss, internal SRAM */
+    return &s;
+}
+
+/* The save-layer's OWN staging union — deliberately separate from
+ * storage_cred_scratch(): the diverting saves below are called with that
+ * buffer as their SOURCE (adoption, restore, migration). */
+static union {
+    conn_profile_t profiles[STORAGE_MAX_PROFILES];
+    wifi_profile_t nets[STORAGE_WIFI_MAX];
+} s_save_tmp;
+
 esp_err_t storage_save_profiles(const conn_profile_t *profiles, int count)
 {
     /* Secrets-under-MK: with an UNLOCKED store, passwords divert into the
@@ -280,7 +294,7 @@ esp_err_t storage_save_profiles(const conn_profile_t *profiles, int count)
     if (keystore_state() != KEYSTORE_UNLOCKED)
         return storage_profiles_write_raw(profiles, count);
 
-    static conn_profile_t s_tmp[STORAGE_MAX_PROFILES];   /* .bss scratch */
+    conn_profile_t *s_tmp = s_save_tmp.profiles;
     const char *names[STORAGE_MAX_PROFILES];
     int n = count > STORAGE_MAX_PROFILES ? STORAGE_MAX_PROFILES : count;
     if (n > 0) memcpy(s_tmp, profiles, (size_t)n * sizeof(*profiles));
@@ -421,7 +435,7 @@ esp_err_t storage_wifi_save(const wifi_profile_t *profiles, int count)
     if (keystore_state() != KEYSTORE_UNLOCKED)
         return storage_wifi_write_raw(profiles, count);
 
-    static wifi_profile_t s_tmp[STORAGE_WIFI_MAX];       /* .bss scratch */
+    wifi_profile_t *s_tmp = s_save_tmp.nets;
     const char *names[STORAGE_WIFI_MAX];
     int n = count > STORAGE_WIFI_MAX ? STORAGE_WIFI_MAX : count;
     if (n > 0) memcpy(s_tmp, profiles, (size_t)n * sizeof(*profiles));
