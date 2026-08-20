@@ -1274,6 +1274,39 @@ void test_sb_alt_screen_entry_snaps_to_live(void)
     tsm_free(t);
 }
 
+/* ED 2 is what a full-screen app or `clear` sends on the way out; it must
+ * leave history alone. Sharing a case body with ED 3 once made quitting mc
+ * wipe the whole buffer. */
+void test_sb_ed2_keeps_history(void)
+{
+    tsm_t *t = sb_term(100, 6);
+    int before = tsm_sb_len(t);
+    TEST_ASSERT_GREATER_THAN_INT(0, before);
+    feed(t, "\x1b[2J");
+    TEST_ASSERT_EQUAL_INT(before, tsm_sb_len(t));
+    feed(t, "\x1b[J");                            /* ED 0, default param */
+    feed(t, "\x1b[1J");                           /* ED 1                */
+    TEST_ASSERT_EQUAL_INT(before, tsm_sb_len(t));
+    tsm_free(t);
+}
+
+/* The full quit-a-full-screen-app sequence, in the order a real one sends
+ * it: alt screen, redraw, clear, leave. History must come back untouched. */
+void test_sb_survives_alt_screen_app_exit(void)
+{
+    tsm_t *t = sb_term(100, 6);
+    int before = tsm_sb_len(t);
+
+    feed(t, "\x1b[?1049h");                       /* enter alt        */
+    feed(t, "panel\r\npanel\r\npanel\r\npanel");  /* app draws        */
+    feed(t, "\x1b[2J");                           /* app clears       */
+    feed(t, "\x1b[?1049l");                       /* leave alt        */
+
+    TEST_ASSERT_EQUAL_INT(before, tsm_sb_len(t));
+    TEST_ASSERT_EQUAL_INT(before, tsm_sb_scroll(t, before));
+    tsm_free(t);
+}
+
 void test_sb_ed3_clears_history(void)
 {
     tsm_t *t = sb_term(100, 6);
@@ -1478,6 +1511,8 @@ int main(void)
     RUN_TEST(test_sb_alt_screen_does_not_feed_history);
     RUN_TEST(test_sb_scroll_refused_on_alt_screen);
     RUN_TEST(test_sb_alt_screen_entry_snaps_to_live);
+    RUN_TEST(test_sb_ed2_keeps_history);
+    RUN_TEST(test_sb_survives_alt_screen_app_exit);
     RUN_TEST(test_sb_ed3_clears_history);
     RUN_TEST(test_sb_hard_reset_clears_history);
     RUN_TEST(test_sb_partial_region_scroll_is_not_history);

@@ -477,8 +477,15 @@ static void do_csi(tsm_t *t, uint8_t prefix, uint8_t intermediate, uint8_t final
             for (int r = 0; r < t->cy; r++) erase_row(t, r);
             erase_range(t, t->cy, 0, t->cx);
             break;
-        case 2: /* whole screen */
+        case 2: /* whole screen — history is NOT touched */
+            erase_screen(t);
+            break;
         case 3: /* whole screen + scrollback (xterm ED 3) */
+            /* Deliberately separate from case 2, which shares only
+             * erase_screen(): ED 2 is what every full-screen app and every
+             * `clear` sends on the way out, and wiping history there throws
+             * away the session the moment you quit mc. Only the explicit
+             * ED 3 drops it. */
             sb_clear(t);
             erase_screen(t);
             break;
