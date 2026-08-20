@@ -16,6 +16,11 @@ add_compile_definitions(
     CONFIG_SSH_KEEPALIVE_INTERVAL=60
 )
 
+# Terminal scrollback — the device takes this from Kconfig; keep the two in
+# step so history behaves the same in the simulator.
+set(CYBERDECK_SCROLLBACK_LINES 1000 CACHE STRING "Terminal scrollback lines")
+add_compile_definitions(CONFIG_VTERM_SCROLLBACK_LINES=${CYBERDECK_SCROLLBACK_LINES})
+
 # Secure-store perimeter (mirrors components/storage/CMakeLists.txt): the
 # vault is optional AND excludable; sources absent -> inert stubs.
 option(CYBERDECK_KEYSTORE "Secure store (PIN vault, secrets bundle)" ON)

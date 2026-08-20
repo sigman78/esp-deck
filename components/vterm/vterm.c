@@ -37,6 +37,12 @@ static vterm_bench_t s_bench;
 
 static const char *TAG = "vterm";
 
+/* Kconfig on device, a -D from sim/CMakeLists.txt on the host. Defaulted so
+ * a build that defines neither still compiles — with scrollback off. */
+#ifndef CONFIG_VTERM_SCROLLBACK_LINES
+#define CONFIG_VTERM_SCROLLBACK_LINES 0
+#endif
+
 /* State */
 
 static int                 s_cols;
@@ -55,6 +61,39 @@ static void tsm_response_forward(const char *data, size_t len, void *user)
         s_response_cb(data, len, s_response_user);
 }
 
+/* Copy one full row of the current view into the display buffer. */
+static inline void copy_row(int row, int l, int r)
+{
+    const tsm_cell_t *src = tsm_row(s_tsm, row) + l;
+    terminal_cell_t  *dst = s_buffer          + row * s_cols + l;
+    for (int col = l; col <= r; col++, src++, dst++) {
+        dst->cp       = src->cp;
+        dst->fg_color = src->fg;
+        dst->bg_color = src->bg;
+        dst->attrs    = src->attrs;
+    }
+}
+
+/* Repaint every row and park the cursor. Used whenever the VIEW moves
+ * rather than the content: tsm's dirty spans describe changes to the live
+ * grid, and say nothing about history sliding into frame, so there is no
+ * incremental repaint to be had here. 30 rows x 100 cols x 8 B is ~24 KB of
+ * PSRAM reads — fine for a keypress, which is the only thing that triggers
+ * it, and not something to do per flush. */
+static void repaint_all(void)
+{
+    for (int row = 0; row < s_rows; row++)
+        copy_row(row, 0, s_cols - 1);
+
+    /* The cursor lives on the live grid; while scrolled back it is not on
+     * screen, and drawing it at its live coordinates would plant a block on
+     * an unrelated line of history. */
+    if (tsm_sb_offset(s_tsm) > 0)
+        display_set_cursor(0, 0, CURSOR_NONE);
+    else
+        vterm_cursor_refresh();
+}
+
 /* Display refresh */
 
 static inline void refresh_display(void)
@@ -63,6 +102,18 @@ static inline void refresh_display(void)
 #ifdef CONFIG_VTERM_BENCH
     uint32_t t0 = esp_cpu_get_cycle_count();
 #endif
+    /* Scrolled back: what is on screen is not what tsm marked dirty. New
+     * output still lands in the live grid below the visible window, and the
+     * view rides along with the ring (tsm follows it), so the whole frame
+     * has to be redrawn. */
+    if (tsm_sb_offset(s_tsm) > 0) {
+        repaint_all();
+        tsm_clear_dirty(s_tsm);
+#ifdef CONFIG_VTERM_BENCH
+        s_bench.draw_cycles += (esp_cpu_get_cycle_count() - t0);
+#endif
+        return;
+    }
 #if DISPLAY_FX_ROW_GLOW
     /* Row-glow stamping: a bulk repaint (scroll, clear, paging) marks most
      * rows dirty in one flush — stamping those would flash the whole screen
@@ -81,14 +132,7 @@ static inline void refresh_display(void)
         if (stamp)
             display_fx_touch_row(row);   /* drives the row-recency back glow */
 #endif
-        const tsm_cell_t *src = tsm_row(s_tsm, row) + l;
-        terminal_cell_t  *dst = s_buffer          + row * s_cols + l;
-        for (int col = l; col <= r; col++, src++, dst++) {
-            dst->cp       = src->cp;
-            dst->fg_color = src->fg;
-            dst->bg_color = src->bg;
-            dst->attrs    = src->attrs;
-        }
+        copy_row(row, l, r);
     }
 #ifdef CONFIG_VTERM_BENCH
     uint32_t t1 = esp_cpu_get_cycle_count();
@@ -134,7 +178,7 @@ esp_err_t vterm_init(int cols, int rows)
         s_buffer[i].attrs    = 0;
     }
 
-    s_tsm = tsm_new(cols, rows);
+    s_tsm = tsm_new(cols, rows, CONFIG_VTERM_SCROLLBACK_LINES);
     if (!s_tsm) {
         ESP_LOGE(TAG, "tsm_new failed");
         free(s_buffer);
@@ -200,6 +244,45 @@ void vterm_reset(void)
     if (!s_initialized) return;
     tsm_reset(s_tsm);
     refresh_display();
+}
+
+/* Scrollback */
+
+int vterm_scroll(int delta)
+{
+    if (!s_initialized) return 0;
+    int before = tsm_sb_offset(s_tsm);
+    int after  = tsm_sb_scroll(s_tsm, delta);
+    /* Repaint only on an actual move — holding PageUp at the top of the
+     * history would otherwise redraw the same frame on every repeat. */
+    if (after != before) repaint_all();
+    return after;
+}
+
+int vterm_scroll_page(int dir)
+{
+    /* Half a screen: enough to feel like progress, little enough that the
+     * eye keeps its place across the jump. */
+    int half = s_rows / 2;
+    return vterm_scroll(dir * (half > 0 ? half : 1));
+}
+
+bool vterm_scroll_reset(void)
+{
+    if (!s_initialized || tsm_sb_offset(s_tsm) == 0) return false;
+    tsm_sb_reset(s_tsm);
+    repaint_all();
+    return true;
+}
+
+int vterm_scroll_offset(void)
+{
+    return s_initialized ? tsm_sb_offset(s_tsm) : 0;
+}
+
+int vterm_scroll_len(void)
+{
+    return s_initialized ? tsm_sb_len(s_tsm) : 0;
 }
 
 bool vterm_app_cursor_keys(void)

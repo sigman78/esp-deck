@@ -66,6 +66,21 @@ struct tsm_s {
     int base;
     int alt_base;
 
+    /* Scrollback: rows evicted off the top of the PRIMARY screen, newest
+     * last. A plain ring of sb_max rows; sb_head is the next slot to write.
+     * Alt-screen scrolls never feed it — a full-screen app repainting its
+     * own view is not history, and letting it in would bury the shell
+     * output the user actually wants to scroll back to.
+     *
+     * sb_off is the VIEW, not storage: 0 = live, n = showing the n rows of
+     * history above the live grid. Only tsm_row() reads it, so the parser
+     * and the renderer both stay unaware the ring exists. */
+    tsm_cell_t *sb_cells;    /* sb_max * cols, NULL when disabled */
+    int         sb_max;      /* capacity in rows (0 = scrollback off) */
+    int         sb_len;      /* rows currently stored (<= sb_max)     */
+    int         sb_head;     /* next write slot                       */
+    int         sb_off;      /* view offset above live (<= sb_len)    */
+
     /* Dirty tracking */
     tsm_row_dirty_t *dirty;  /* rows entries */
 

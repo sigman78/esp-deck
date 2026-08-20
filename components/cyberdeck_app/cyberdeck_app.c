@@ -49,6 +49,9 @@ static ui_key_t decode_key(const cyberdeck_input_t *ev, char *ch)
         }
     }
     if (len == 5 && memcmp(b, "\x1b[24~", 5) == 0) return K_F12;
+    /* Shift+PageUp / Shift+PageDown — scrollback, kept by the deck. */
+    if (len == 6 && memcmp(b, "\x1b[5;2~", 6) == 0) return K_SCROLL_UP;
+    if (len == 6 && memcmp(b, "\x1b[6;2~", 6) == 0) return K_SCROLL_DOWN;
     return K_NONE;
 }
 

@@ -28,8 +28,48 @@
 #include "ssh_client.h"
 #include "storage.h"
 #include "vterm.h"
+#include "vtkeys.h"
 #include "wifi_manager.h"
 
+
+/* SDL keysym → logical key; the byte sequences live in vtkeys.c, shared
+ * with the device's HID backend so the two backends cannot drift. */
+static vtkey_t sdl_to_vtkey(SDL_Keycode sym)
+{
+    switch (sym) {
+    case SDLK_UP:        return VTKEY_UP;
+    case SDLK_DOWN:      return VTKEY_DOWN;
+    case SDLK_LEFT:      return VTKEY_LEFT;
+    case SDLK_RIGHT:     return VTKEY_RIGHT;
+    case SDLK_HOME:      return VTKEY_HOME;
+    case SDLK_END:       return VTKEY_END;
+    case SDLK_INSERT:    return VTKEY_INSERT;
+    case SDLK_DELETE:    return VTKEY_DELETE;
+    case SDLK_PAGEUP:    return VTKEY_PGUP;
+    case SDLK_PAGEDOWN:  return VTKEY_PGDN;
+    case SDLK_F1:        return VTKEY_F1;
+    case SDLK_F2:        return VTKEY_F2;
+    case SDLK_F3:        return VTKEY_F3;
+    case SDLK_F4:        return VTKEY_F4;
+    case SDLK_F5:        return VTKEY_F5;
+    case SDLK_F6:        return VTKEY_F6;
+    case SDLK_F7:        return VTKEY_F7;
+    case SDLK_F8:        return VTKEY_F8;
+    case SDLK_F9:        return VTKEY_F9;
+    case SDLK_F10:       return VTKEY_F10;
+    case SDLK_F11:       return VTKEY_F11;
+    case SDLK_F12:       return VTKEY_F12;
+    default:             return VTKEY_NONE;
+    }
+}
+
+/* SDL modifier state → the three modifiers the wire format can carry. */
+static uint8_t sdl_to_vtmods(SDL_Keymod mod)
+{
+    return (uint8_t)(((mod & KMOD_SHIFT) ? VTMOD_SHIFT : 0u) |
+                     ((mod & KMOD_ALT)   ? VTMOD_ALT   : 0u) |
+                     ((mod & KMOD_CTRL)  ? VTMOD_CTRL  : 0u));
+}
 
 /*
  * Translate an SDL keydown event to a terminal escape sequence.
@@ -50,34 +90,20 @@ static const char *translate_key(SDL_Keycode sym, SDL_Keymod mod)
     case SDLK_BACKSPACE: return "\x7f";
     case SDLK_TAB:       return "\t";
     case SDLK_ESCAPE:    return "\x1b";
-
-    case SDLK_UP:    return vterm_app_cursor_keys() ? "\x1bOA" : "\x1b[A";
-    case SDLK_DOWN:  return vterm_app_cursor_keys() ? "\x1bOB" : "\x1b[B";
-    case SDLK_LEFT:  return vterm_app_cursor_keys() ? "\x1bOD" : "\x1b[D";
-    case SDLK_RIGHT: return vterm_app_cursor_keys() ? "\x1bOC" : "\x1b[C";
-
-    case SDLK_HOME:      return "\x1b[H";
-    case SDLK_END:       return "\x1b[F";
-    case SDLK_PAGEUP:    return "\x1b[5~";
-    case SDLK_PAGEDOWN:  return "\x1b[6~";
-    case SDLK_DELETE:    return "\x1b[3~";
-    case SDLK_INSERT:    return "\x1b[2~";
-
-    case SDLK_F1:        return "\x1bOP";
-    case SDLK_F2:        return "\x1bOQ";
-    case SDLK_F3:        return "\x1bOR";
-    case SDLK_F4:        return "\x1bOS";
-    case SDLK_F5:        return "\x1b[15~";
-    case SDLK_F6:        return "\x1b[17~";
-    case SDLK_F7:        return "\x1b[18~";
-    case SDLK_F8:        return "\x1b[19~";
-    case SDLK_F9:        return "\x1b[20~";
-    case SDLK_F10:       return "\x1b[21~";
-    case SDLK_F11:       return "\x1b[23~";
-    case SDLK_F12:       return "\x1b[24~";
-
-    default:             return NULL;
+    default:             break;
     }
+
+    vtkey_t key = sdl_to_vtkey(sym);
+    if (key == VTKEY_NONE) return NULL;
+
+    /* Encoded sequences never contain NUL, so a NUL-terminated static
+     * buffer keeps the caller's strlen() contract intact. */
+    static char seq[VTKEYS_MAX_LEN + 1];
+    size_t n = vtkeys_encode(key, sdl_to_vtmods(mod), vterm_app_cursor_keys(),
+                             (uint8_t *)seq, VTKEYS_MAX_LEN);
+    if (n == 0) return NULL;
+    seq[n] = '\0';
+    return seq;
 }
 
 static void send_key_bytes(const char *seq, size_t len, uint64_t now)
@@ -150,7 +176,8 @@ static void touch_tick(uint64_t now)
 /* -------------------------------------------------------------------------
  * --drive "tap:x,y|key:enter|hold:x,y|wait:800" — scripted input for UI
  * screenshot automation (framebuffer pixel coords; key names: enter, esc,
- * tab, up/down/left/right, f12, or a single character). Steps fire 450 ms
+ * tab, up/down/left/right, f12, sbup/sbdn for scrollback paging, or a
+ * single character). Steps fire 450 ms
  * apart (wait:N overrides the gap) starting 2.5 s after boot, injected
  * through the same paths as real input. Sim-only test hook.
  * ---------------------------------------------------------------------- */
@@ -169,6 +196,9 @@ static void drive_key(const char *name, uint64_t now)
     else if (!strcmp(name, "right")) seq = "\x1b[C";
     else if (!strcmp(name, "left"))  seq = "\x1b[D";
     else if (!strcmp(name, "f12"))   seq = "\x1b[24~";
+    /* Scrollback paging — the deck keeps these rather than forwarding. */
+    else if (!strcmp(name, "sbup"))  seq = "\x1b[5;2~";
+    else if (!strcmp(name, "sbdn"))  seq = "\x1b[6;2~";
     else if (name[0] && !name[1])    { one[0] = name[0]; seq = one; }
     if (seq) send_key_bytes(seq, strlen(seq), now);
 }

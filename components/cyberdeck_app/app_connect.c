@@ -433,6 +433,17 @@ void session_input(const cyberdeck_input_t *ev, ui_key_t k, char ch, uint64_t no
         menu_open(now);
         return;
     }
-    if (ev->type == CYBERDECK_INPUT_KEY)
-        ssh_client_send(ev->buf, ev->len);
+    if (ev->type != CYBERDECK_INPUT_KEY) return;
+
+    /* Scrollback paging is local: the remote never sees these. */
+    if (k == K_SCROLL_UP)   { vterm_scroll_page(+1); return; }
+    if (k == K_SCROLL_DOWN) { vterm_scroll_page(-1); return; }
+
+    /* Any other key means the user is done reading history — snap to live
+     * first so their input lands on a screen showing where it will appear.
+     * The keystroke is still sent: dropping it would make the first press
+     * after scrolling silently vanish. */
+    vterm_scroll_reset();
+
+    ssh_client_send(ev->buf, ev->len);
 }

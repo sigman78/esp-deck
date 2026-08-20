@@ -54,10 +54,14 @@ typedef struct {
     int count;         /* live tiles on this page (<= ncols*nrows) */
 } tilegrid_t;
 
-/* Decoded UI keys (core decodes once per event; screens get the result). */
+/* Decoded UI keys (core decodes once per event; screens get the result).
+ * K_SCROLL_* are Shift+PageUp/PageDown: the deck keeps those for its own
+ * scrollback rather than forwarding them, the same bargain every terminal
+ * emulator makes. Unshifted PageUp/PageDown still go to the remote. */
 typedef enum {
     K_NONE = 0, K_UP, K_DOWN, K_LEFT, K_RIGHT,
     K_ENTER, K_ESC, K_F12, K_CHAR, K_BACKSPACE, K_TAB,
+    K_SCROLL_UP, K_SCROLL_DOWN,
 } ui_key_t;
 
 /* ------------------------------------------------- per-module state
