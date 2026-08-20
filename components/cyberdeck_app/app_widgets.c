@@ -315,15 +315,20 @@ void draw_scrollbar(int offset, int total)
     /* Three glyphs only — space, one eighth-block, full block — so the
      * column reads as a single continuous bar. A shaded trough (U+2591)
      * looked broken here: its dither has visible texture at cell edges, so
-     * the empty part fought the fill instead of receding behind it. */
-    ui_pen(OVERLAY_COL_CYAN);
+     * the empty part fought the fill instead of receding behind it.
+     *
+     * Both halves take their color from OVERLAY_COL_GRAY, in its two roles:
+     * the fill is drawn as text (soft white), the trough as an INVERSE space
+     * whose background is the dark companion. */
+    ui_pen(OVERLAY_COL_GRAY);
     for (int y = 0; y < rows; y++) {
         const int from_bottom = rows - 1 - y;
-        uint16_t  cp;
-        if (from_bottom < full)                cp = UI_BLOCK;               /* filled   */
-        else if (from_bottom == full && rem)   cp = (uint16_t)(0x2580u + rem); /* edge  */
-        else                                   cp = ' ';                    /* trough   */
-        ui_putch(col, y, cp, 0);
+        if (from_bottom < full)
+            ui_putch(col, y, UI_BLOCK, 0);                          /* filled */
+        else if (from_bottom == full && rem)
+            ui_putch(col, y, (uint16_t)(0x2580u + rem), 0);         /* edge   */
+        else
+            ui_putch(col, y, ' ', OVERLAY_ATTR_INVERSE);            /* trough */
     }
 
     /* Lines back, as a plain number on gray: pen 0 + INVERSE resolves to the

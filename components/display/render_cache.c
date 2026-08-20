@@ -34,6 +34,7 @@ static DRAM_ATTR const color_t s_overlay_pal[OVERLAY_PAL_SIZE] = {
     RGB565(255,  85,  85),    /* 5 red     (VGA bright red)     */
     RGB565( 85,  85, 255),    /* 6 blue    (VGA bright blue)    */
     RGB565(255, 255, 255),    /* 7 white   (VGA white)          */
+    RGB565(200, 200, 200),    /* 8 gray    (soft white — chrome) */
 };
 static DRAM_ATTR const color_t s_overlay_bar[OVERLAY_PAL_SIZE] = {
     RGB565(148, 148, 148),    /* 0 default → neutral gray       */
@@ -44,6 +45,7 @@ static DRAM_ATTR const color_t s_overlay_bar[OVERLAY_PAL_SIZE] = {
     RGB565(184,  88,  80),    /* 5 terracotta                   */
     RGB565(104, 112, 192),    /* 6 periwinkle                   */
     RGB565(255, 255, 255),    /* 7 white (kept pure — QR)       */
+    RGB565( 48,  48,  48),    /* 8 dark trough (unfilled track) */
 };
 
 void display_set_text_buffer(const terminal_cell_t *buf, int cols, int rows)
