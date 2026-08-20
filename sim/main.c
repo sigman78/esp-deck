@@ -124,8 +124,13 @@ static void send_key_bytes(const char *seq, size_t len, uint64_t now)
  */
 #define TOUCH_TAP_MAX_MS    300
 #define TOUCH_LONG_PRESS_MS 500
+/* Matches SCROLL_START_PX in touch_input.c — the travel that turns an edge
+ * press into a drag rather than a tap. */
+#define TOUCH_SCROLL_START_PX 12
 
-typedef enum { TOUCH_IDLE, TOUCH_TOUCHING, TOUCH_WAITING_LIFT } touch_state_t;
+typedef enum {
+    TOUCH_IDLE, TOUCH_TOUCHING, TOUCH_SCROLLING, TOUCH_WAITING_LIFT
+} touch_state_t;
 
 static touch_state_t touch_state = TOUCH_IDLE;
 static uint64_t      touch_start;
@@ -162,6 +167,47 @@ static void touch_mouse_up(const SDL_MouseButtonEvent *b, uint64_t now)
     if (touch_state == TOUCH_TOUCHING && now - touch_start < TOUCH_TAP_MAX_MS)
         send_touch(CYBERDECK_INPUT_TAP, touch_x, touch_y, now);
     touch_state = TOUCH_IDLE;
+}
+
+/* Right-edge scroll drag, mirroring touch_input.c's STATE_SCROLLING: a press
+ * that STARTS in the strip and then travels vertically turns into a stream of
+ * SCROLL events instead of the tap it would have been. Armed by the shell
+ * through sim_set_scroll_edge (the cfg.set_scroll_edge seam), so the menu
+ * toggle governs the simulator exactly as it governs the panel. */
+static int      s_scroll_edge_px = 0;
+static uint16_t s_scroll_last_y;
+
+static void sim_set_scroll_edge(int width_px)
+{
+    s_scroll_edge_px = width_px < 0 ? 0 : width_px;
+}
+
+static void touch_mouse_motion(const SDL_MouseMotionEvent *m, uint64_t now)
+{
+    if (touch_state != TOUCH_TOUCHING && touch_state != TOUCH_SCROLLING) return;
+
+    uint16_t x, y;
+    display_window_to_fb(m->x, m->y, &x, &y);
+
+    if (touch_state == TOUCH_TOUCHING) {
+        if (s_scroll_edge_px <= 0 ||
+            (int)touch_x < DISPLAY_WIDTH - s_scroll_edge_px) return;
+        int dy = (int)y - (int)touch_y;
+        if (dy > -TOUCH_SCROLL_START_PX && dy < TOUCH_SCROLL_START_PX) return;
+        s_scroll_last_y = y;
+        touch_state     = TOUCH_SCROLLING;
+        return;
+    }
+
+    if (y == s_scroll_last_y) return;
+    cyberdeck_input_t ev = {
+        .type = CYBERDECK_INPUT_SCROLL,
+        .x    = x,
+        .y    = y,
+        .dy   = (int16_t)((int)y - (int)s_scroll_last_y),
+    };
+    s_scroll_last_y = y;
+    cyberdeck_app_handle_input(&ev, now);
 }
 
 static void touch_tick(uint64_t now)
@@ -289,6 +335,10 @@ int main(int argc, char *argv[])
         .fallback_wifi_ssid     = "SIM",
         .fallback_wifi_password = "",
         .ble = NULL,
+#if CONFIG_INPUT_TOUCH_SCROLL
+        .set_scroll_edge = sim_set_scroll_edge,
+        .scroll_edge_px  = CONFIG_INPUT_TOUCH_SCROLL_EDGE_PX,
+#endif
     };
     if (cyberdeck_app_init(&app_cfg, SDL_GetTicks64()) != ESP_OK) {
         fprintf(stderr, "cyberdeck_app_init() failed\n");
@@ -332,6 +382,10 @@ int main(int argc, char *argv[])
             case SDL_TEXTINPUT:
                 send_key_bytes(ev.text.text, strlen(ev.text.text), now);
                 got_input = true;
+                break;
+
+            case SDL_MOUSEMOTION:
+                touch_mouse_motion(&ev.motion, now);
                 break;
 
             case SDL_MOUSEBUTTONDOWN:

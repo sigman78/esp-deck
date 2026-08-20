@@ -7,6 +7,7 @@
 #include "app_screens.h"
 #include "app_widgets.h"
 #include "display_fx.h"
+#include "font.h"        /* font_height() — drag pixels to terminal rows */
 #include "keystore.h"
 #include "ssh_client.h"
 #include "vterm.h"
@@ -78,16 +79,47 @@ static void render_connecting(const char *msg, uint64_t now)
     ui_present();
 }
 
-static void render_session_toast(uint64_t now)
+/* Scrollback indicator lifetime. Long enough to read the position after the
+ * last keypress or drag, short enough that it never becomes furniture over a
+ * live session. */
+#define SCROLLBAR_LINGER_MS  1400
+
+static uint64_t s_scrollbar_until;   /* 0 = not showing */
+
+void session_scroll_seen(uint64_t now)
 {
-    if (now >= app.toast_until || !app.toast[0]) {
+    s_scrollbar_until = now + SCROLLBAR_LINGER_MS;
+}
+
+/* Session chrome: the toast and the scrollback indicator share one overlay,
+ * so they are drawn in a single clear/present pass. Drawn in this order
+ * because the toast's chip sits top-right, where a long scrollback label
+ * would otherwise collide with it. */
+static void render_session_chrome(uint64_t now)
+{
+    const bool toast_on = now < app.toast_until && app.toast[0];
+    const bool bar_on   = s_scrollbar_until && now < s_scrollbar_until &&
+                          vterm_scroll_len() > 0;
+    if (!s_scrollbar_until || now >= s_scrollbar_until) s_scrollbar_until = 0;
+
+    if (!toast_on && !bar_on) {
         if (app.state == ST_SESSION) ui_hide();
         return;
     }
-    /* Amber chip with a powerline taper — same ui_chip as the HOME toast,
-     * so the one element shown on both screens renders identically. */
+
     ui_colors(UI_FG, UI_BG);
     ui_clear();
+
+    if (bar_on)
+        draw_scrollbar(vterm_scroll_offset(), vterm_scroll_len());
+
+    if (!toast_on) {
+        ui_present();
+        return;
+    }
+
+    /* Amber chip with a powerline taper — same ui_chip as the HOME toast,
+     * so the one element shown on both screens renders identically. */
     int x = ui_cols() - ((int)strlen(app.toast) + 2) - 1;
     ui_pen(OVERLAY_COL_AMBER);
     if (app.toast_ok) {
@@ -212,7 +244,7 @@ static void enter_session(uint64_t now)
     toast(now, "%s - F12 or long-press for menu",
           HELLO[app.anim_frame % (sizeof(HELLO) / sizeof(HELLO[0]))]);
     app.toast_ok = true;       /* garnish with the spinner-to-checkmark */
-    render_session_toast(now);
+    render_session_chrome(now);
 }
 
 /* Key PEMs are read on the shell task (the connect worker has a PSRAM
@@ -403,7 +435,7 @@ void session_tick(uint64_t now)
         }
         return;
     }
-    render_session_toast(now);
+    render_session_chrome(now);
 }
 
 void connecting_input(const cyberdeck_input_t *ev, ui_key_t k, char ch, uint64_t now)
@@ -433,11 +465,25 @@ void session_input(const cyberdeck_input_t *ev, ui_key_t k, char ch, uint64_t no
         menu_open(now);
         return;
     }
+    /* Right-edge drag: content follows the finger, so dragging DOWN pulls
+     * older lines down into view — the same direction every touch surface
+     * has trained people to expect. One row per cell of travel keeps it
+     * precise; a proportional thumb-grab would be unusable given the marker
+     * is a single cell tall. */
+    if (ev->type == CYBERDECK_INPUT_SCROLL) {
+        int rows = ev->dy / font_height();
+        if (rows) {
+            vterm_scroll(rows);
+            session_scroll_seen(now);
+        }
+        return;
+    }
+
     if (ev->type != CYBERDECK_INPUT_KEY) return;
 
     /* Scrollback paging is local: the remote never sees these. */
-    if (k == K_SCROLL_UP)   { vterm_scroll_page(+1); return; }
-    if (k == K_SCROLL_DOWN) { vterm_scroll_page(-1); return; }
+    if (k == K_SCROLL_UP)   { vterm_scroll_page(+1); session_scroll_seen(now); return; }
+    if (k == K_SCROLL_DOWN) { vterm_scroll_page(-1); session_scroll_seen(now); return; }
 
     /* Any other key means the user is done reading history — snap to live
      * first so their input lands on a screen showing where it will appear.

@@ -17,7 +17,9 @@ builds as a native Windows/SDL **simulator** for fast UI iteration.
   redraws and scroll floods are measured and tuned
   ([performance notes](docs/speedupsall.md)).
 - **Scrollback** — output that scrolls off the top is kept (1000 lines by
-  default, in PSRAM), paged with **Shift+PageUp / Shift+PageDown**.
+  default, in PSRAM), paged with **Shift+PageUp / Shift+PageDown** or by
+  dragging the right edge of the screen. A position marker fades in down the
+  right edge while you scroll, placed to an eighth of a character cell.
   Full-screen apps never pollute it, and any other key snaps back to live.
 - **Bluetooth keyboard** (BLE HID) — pairing, bonding, background
   auto-reconnect, typematic repeat, and xterm modifier encoding so

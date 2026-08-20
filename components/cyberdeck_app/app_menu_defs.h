@@ -9,6 +9,10 @@
 
 #pragma once
 
+#ifdef ESP_PLATFORM
+#include "sdkconfig.h"   /* CONFIG_INPUT_TOUCH_SCROLL (sim: -D flag) */
+#endif
+
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -37,9 +41,13 @@ typedef enum {
  * arm "factory reset" from the wrong tile. */
 typedef enum {
     SYS_SAVER = 0,
+#if CONFIG_INPUT_TOUCH_SCROLL
+    SYS_TOUCHSCROLL,
+#endif
     SYS_CLEARHOSTS,
     SYS_FACTORY,
     SYS_BACK,
+    SYS_MENU_TILES,     /* count — keeps the page array sized with the enum */
 } sys_menu_item_t;
 
 typedef struct {
