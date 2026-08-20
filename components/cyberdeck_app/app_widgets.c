@@ -336,14 +336,22 @@ void draw_scrollbar(int offset, int total)
     }
 
     /* Lines back, as a plain number on gray: pen 0 + INVERSE resolves to the
-     * bar palette's neutral gray with dark text (render_cache.c). Sits at the
-     * top, immediately left of the column. */
-    char label[16];
-    int n = snprintf(label, sizeof(label), " -%d ", offset);
-    int lx = col - n;
-    if (lx >= 0) {
-        ui_pen(OVERLAY_COL_DEFAULT);
-        ui_puts(lx, 0, label, OVERLAY_ATTR_INVERSE);
+     * bar palette's neutral gray with dark text (render_cache.c). Top right,
+     * with a blank column between it and the bar so the two read as separate
+     * elements rather than one welded strip.
+     *
+     * Suppressed at the live view: "0" is the one value the bar already says
+     * unambiguously (empty), so the number would be noise exactly when the
+     * indicator is most likely to be showing for no reason. The bar itself
+     * still draws — it is what tells you scrollback exists at all. */
+    if (offset > 0) {
+        char label[16];
+        int n  = snprintf(label, sizeof(label), " %d ", offset);
+        int lx = col - 1 - n;
+        if (lx >= 0) {
+            ui_pen(OVERLAY_COL_DEFAULT);
+            ui_puts(lx, 0, label, OVERLAY_ATTR_INVERSE);
+        }
     }
     ui_pen(OVERLAY_COL_DEFAULT);
 }
