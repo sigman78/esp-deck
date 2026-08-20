@@ -121,9 +121,7 @@ static void erase_screen(tsm_t *t)
 
 /* ── Scrolling ───────────────────────────────────────────────────────────── */
 
-/* Drop all history and return to the live view. The cells are left as they
- * are: sb_len = 0 makes them unreachable, and the ring is overwritten in
- * place as it refills. */
+/* Cells are left as they are — sb_len = 0 makes them unreachable. */
 static void sb_clear(tsm_t *t)
 {
     t->sb_len  = 0;
@@ -139,11 +137,9 @@ static void sb_push_row(tsm_t *t, int row)
     if (++t->sb_head >= t->sb_max) t->sb_head = 0;
     if (t->sb_len < t->sb_max) t->sb_len++;
 
-    /* Holding a scrolled-back view still means "show me THIS content", so
-     * follow the ring as it grows — otherwise output arriving behind the
-     * user's back drags the view forward a line at a time. Once the offset
-     * reaches sb_len the oldest row is on screen and history is sliding out
-     * from under it; there is nowhere further back to hold. */
+    /* Follow the ring so a held view keeps showing the same content as new
+     * output arrives. At sb_off == sb_len history is sliding out from under
+     * it and there is nowhere further back to hold. */
     if (t->sb_off > 0 && t->sb_off < t->sb_len) t->sb_off++;
 }
 
@@ -164,11 +160,9 @@ static void scroll_up(tsm_t *t, int n)
     int bot  = t->scroll_bot;
     int span = bot - top + 1;
 
-    /* History is what scrolls off the TOP of the whole primary screen. A
-     * partial region (DECSTBM) is an app managing a pane, not the session
-     * scrolling, so those rows are not history. Pushed before any of the
-     * work below, while the rows are still addressable at their old
-     * logical positions. */
+    /* Only the full primary screen makes history: a DECSTBM region is an app
+     * managing a pane, not the session scrolling. Must run before the work
+     * below, while the rows are still at their old logical positions. */
     if (t->sb_max > 0 && !t->mode.decalt && top == 0 && bot == t->rows - 1) {
         int push = n < span ? n : span;
         for (int r = 0; r < push; r++) sb_push_row(t, r);
@@ -481,11 +475,9 @@ static void do_csi(tsm_t *t, uint8_t prefix, uint8_t intermediate, uint8_t final
             erase_screen(t);
             break;
         case 3: /* whole screen + scrollback (xterm ED 3) */
-            /* Deliberately separate from case 2, which shares only
-             * erase_screen(): ED 2 is what every full-screen app and every
-             * `clear` sends on the way out, and wiping history there throws
-             * away the session the moment you quit mc. Only the explicit
-             * ED 3 drops it. */
+            /* Must NOT share a body with case 2: ED 2 is what every
+             * full-screen app sends on exit, and clearing history there
+             * throws the session away the moment you quit mc. */
             sb_clear(t);
             erase_screen(t);
             break;
@@ -941,14 +933,11 @@ void tsm_feed(tsm_t *t, const uint8_t *data, size_t len)
 
 const tsm_cell_t *tsm_row(const tsm_t *t, int row)
 {
-    /* Live view: the common path, untouched. */
     if (t->sb_off <= 0)
         return &t->cells[phys_row(t, row) * t->cols];
 
     /* Scrolled back: the top sb_off rows come from history, the rest is the
-     * live grid shifted down by the same amount. History row i counts from
-     * the oldest STORED row, so the newest sits at sb_len-1 and the window
-     * we are showing starts sb_off rows before the end. */
+     * live grid shifted down by the same amount. */
     if (row < t->sb_off) {
         int i = t->sb_len - t->sb_off + row;
         int p = t->sb_head - t->sb_len + i;
@@ -964,9 +953,8 @@ int tsm_sb_offset(const tsm_t *t) { return t->sb_off; }
 
 int tsm_sb_scroll(tsm_t *t, int delta)
 {
-    /* The alt screen has no history of its own and its apps own the whole
-     * viewport; paging the primary screen's history in behind vim would be
-     * nonsense. Refuse rather than show a mix. */
+    /* Alt-screen apps own the whole viewport; paging the primary screen's
+     * history in behind them would show a mix of the two. */
     if (t->sb_max <= 0 || t->mode.decalt) return t->sb_off;
 
     int off = t->sb_off + delta;

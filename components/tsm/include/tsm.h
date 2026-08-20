@@ -73,11 +73,9 @@ typedef struct tsm_s tsm_t;
 /* Terminal API */
 
 /* Allocate and initialise a new terminal of cols x rows.
- * @p sb_lines is the scrollback capacity in rows (0 disables it). The ring
- * is sb_lines * cols * sizeof(tsm_cell_t) and is allocated up front, so a
- * request that does not fit fails here rather than mid-session; scrollback
- * is optional, so an oversized request degrades to a smaller ring (possibly
- * none) instead of failing the terminal.
+ * @p sb_lines is the scrollback capacity in rows (0 disables it), allocated
+ * up front. An oversized request degrades to a smaller ring — possibly none
+ * — rather than failing the terminal; see tsm_sb_capacity().
  * Returns NULL on allocation failure. */
 tsm_t *tsm_new(int cols, int rows, int sb_lines);
 
@@ -92,10 +90,10 @@ void tsm_feed(tsm_t *tsm, const uint8_t *data, size_t len);
  * the ring base, not the cells — so consecutive logical rows are NOT
  * contiguous in memory; never index past the returned row.
  *
- * While scrolled back (tsm_sb_offset() != 0) the top rows come from the
- * scrollback ring instead of the live grid; callers render the same way
- * either way. Cursor and dirty tracking always describe the LIVE grid, so
- * a scrolled-back view must be repainted in full — see tsm_sb_scroll. */
+ * While scrolled back the top rows come from the scrollback ring instead of
+ * the live grid; callers render the same way either way. Cursor and dirty
+ * tracking always describe the LIVE grid, so a scrolled-back view must be
+ * repainted in full — see tsm_sb_scroll. */
 const tsm_cell_t *tsm_row(const tsm_t *tsm, int row);
 
 /* Current cursor position and visibility. */

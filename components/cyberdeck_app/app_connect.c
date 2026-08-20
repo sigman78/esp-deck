@@ -79,9 +79,6 @@ static void render_connecting(const char *msg, uint64_t now)
     ui_present();
 }
 
-/* Scrollback indicator lifetime. Long enough to read the position after the
- * last keypress or drag, short enough that it never becomes furniture over a
- * live session. */
 #define SCROLLBAR_LINGER_MS  1400
 
 static uint64_t s_scrollbar_until;   /* 0 = not showing */
@@ -99,10 +96,8 @@ void session_scroll_seen(uint64_t now)
     s_scrollbar_until = now + SCROLLBAR_LINGER_MS;
 }
 
-/* Session chrome: the toast and the scrollback indicator share one overlay,
- * so they are drawn in a single clear/present pass. Drawn in this order
- * because the toast's chip sits top-right, where a long scrollback label
- * would otherwise collide with it. */
+/* Toast and scrollback indicator share the overlay, so one clear/present
+ * pass draws both. */
 static void render_session_chrome(uint64_t now)
 {
     const bool toast_on = now < app.toast_until && app.toast[0];
@@ -473,15 +468,10 @@ void session_input(const cyberdeck_input_t *ev, ui_key_t k, char ch, uint64_t no
         menu_open(now);
         return;
     }
-    /* Right-edge drag: content follows the finger, so dragging DOWN pulls
-     * older lines down into view — the same direction every touch surface
-     * has trained people to expect.
-     *
-     * Pixels accumulate rather than converting per event. The touch task
-     * polls at 50 ms, so a steady drag arrives as many small dy values; a
-     * plain dy/font_height() would floor each one to zero and a slow drag
-     * would not scroll at all, however far it travelled. The remainder
-     * carries its sign, so a reversal spends it in the new direction. */
+    /* Right-edge drag, content-follows-finger: down pulls older lines in.
+     * Pixels accumulate because the touch task polls at 50 ms — converting
+     * each small dy on its own would floor to zero and a slow drag would
+     * never scroll. */
     if (ev->type == CYBERDECK_INPUT_SCROLL) {
         s_scroll_accum += (int)ev->dy * SCROLL_SPEED_PCT;
         const int per_row = font_height() * 100;
@@ -496,21 +486,16 @@ void session_input(const cyberdeck_input_t *ev, ui_key_t k, char ch, uint64_t no
 
     if (ev->type != CYBERDECK_INPUT_KEY) return;
 
-    /* Scrollback paging is local: the remote never sees these — but only
-     * where there IS scrollback. Built without it (CONFIG_VTERM_SCROLLBACK_
-     * LINES = 0) the deck has no use for the keys, so they belong to the
-     * remote like any other; swallowing them would be a silent dead spot.
-     * Capacity, not length: length is 0 on a fresh session too. */
+    /* Paging is local, but only in builds that have scrollback — otherwise
+     * these keys belong to the remote. Capacity, not length: length is also
+     * 0 on a fresh session. */
     if ((k == K_SCROLL_UP || k == K_SCROLL_DOWN) && vterm_scroll_capacity() > 0) {
         vterm_scroll_page(k == K_SCROLL_UP ? +1 : -1);
         session_scroll_seen(now);
         return;
     }
 
-    /* Any other key means the user is done reading history — snap to live
-     * first so their input lands on a screen showing where it will appear.
-     * The keystroke is still sent: dropping it would make the first press
-     * after scrolling silently vanish. */
+    /* Any other key snaps to live, and is still sent. */
     vterm_scroll_reset();
 
     ssh_client_send(ev->buf, ev->len);

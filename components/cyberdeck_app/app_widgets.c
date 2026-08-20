@@ -284,15 +284,10 @@ int draw_step(int y, char num, const char *label,
 
 /* ------------------------------------------------- scrollback indicator */
 
-/* A fill, not a scrollbar. A proportional thumb would be under one cell tall
- * for most of its travel on a 30-row screen against a 1000-line buffer, so
- * it would read as noise; a column that fills from the bottom as you go back
- * answers "how far back am I" at a glance, and agrees in direction with the
- * number above it (more fill, bigger count).
- *
- * The boundary lands to an eighth of a cell: 0x2580 + n fills the bottom n/8
- * of a cell, which is exactly the shape a bottom-anchored fill needs. 240
- * steps on a 30-row screen, ~4 lines each. */
+/* U+2581..U+2588 fill the bottom n/8 of a cell. (No upper-eighth glyphs
+ * exist in Terminus, which is why the fill is anchored to the bottom.) */
+#define BLK_LOWER(n)  ((uint16_t)(0x2580u + (n)))
+
 void draw_scrollbar(int offset, int total)
 {
     if (total <= 0) return;
@@ -304,46 +299,29 @@ void draw_scrollbar(int offset, int total)
     if (offset < 0)     offset = 0;
     if (offset > total) offset = total;
 
-    /* Eighths filled, measured up from the bottom of the column. */
+    /* Fill height in eighths of a cell, measured up from the bottom. */
     int f = (int)(((long)offset * 8 * rows) / total);
-    if (f < 0)          f = 0;
-    if (f > 8 * rows)   f = 8 * rows;
+    if (f > 8 * rows) f = 8 * rows;
+    const int full = f / 8;
+    const int rem  = f % 8;
 
-    const int full = f / 8;          /* whole cells, at the bottom  */
-    const int rem  = f % 8;          /* partial cell just above them */
-
-    /* One fg/bg pair for the whole column, three glyphs: space, one
-     * eighth-block at the level, full blocks below. Every cell carries the
-     * SAME attrs, which is the point — mixing INVERSE for the trough with a
-     * plain cell at the boundary gave the boundary a different background
-     * (the overlay's global bg, black) and left a black notch exactly where
-     * the level was. Uniform attrs, uniform background, continuous bar.
-     *
-     * BRIGHT lifts the background off black and DIM then halves both
-     * channels, which lands a dark-gray trough under a medium-white fill
-     * without inventing palette entries: black -> BRIGHT -> ~(123,126,123)
-     * -> DIM -> ~(58,61,58) for the background, and white -> DIM ->
-     * ~(123,126,123) for the glyph. */
+    /* Every cell needs the SAME attrs: mixing INVERSE with plain cells gives
+     * them different backgrounds and leaves a black notch at the boundary.
+     * BRIGHT then DIM lands a dark-gray bg under a medium-white fg without
+     * adding palette entries. */
     const uint8_t bar_attrs = OVERLAY_ATTR_BRIGHT | OVERLAY_ATTR_DIM;
     ui_pen(OVERLAY_COL_WHITE);
     for (int y = 0; y < rows; y++) {
         const int from_bottom = rows - 1 - y;
         uint16_t  cp;
-        if (from_bottom < full)                cp = UI_BLOCK;                  /* filled */
-        else if (from_bottom == full && rem)   cp = (uint16_t)(0x2580u + rem); /* level  */
-        else                                   cp = ' ';                       /* trough */
+        if (from_bottom < full)                cp = UI_BLOCK;
+        else if (from_bottom == full && rem)   cp = BLK_LOWER(rem);
+        else                                   cp = ' ';
         ui_putch(col, y, cp, bar_attrs);
     }
 
-    /* Lines back, as a plain number on gray: pen 0 + INVERSE resolves to the
-     * bar palette's neutral gray with dark text (render_cache.c). Top right,
-     * with a blank column between it and the bar so the two read as separate
-     * elements rather than one welded strip.
-     *
-     * Suppressed at the live view: "0" is the one value the bar already says
-     * unambiguously (empty), so the number would be noise exactly when the
-     * indicator is most likely to be showing for no reason. The bar itself
-     * still draws — it is what tells you scrollback exists at all. */
+    /* Pen 0 + INVERSE resolves to neutral gray with dark text. Nothing at
+     * offset 0 — the empty bar already says it. */
     if (offset > 0) {
         char label[16];
         int n  = snprintf(label, sizeof(label), " %d ", offset);

@@ -76,16 +76,10 @@ int draw_step(int y, char num, const char *label,
 
 /* ------------------------------------------------- scrollback indicator */
 
-/** Draw the scrollback fill down the right edge, with the line count above
- *  it on gray.
+/** Scrollback fill down the right edge, line count on gray above it.
+ *  @p offset is rows back from live, @p total the history available.
  *
- *  @p offset is rows back from live, @p total the history available. The
- *  column fills from the bottom in proportion to how far back the view sits
- *  — a progress bar, not a scrollbar: a proportional thumb on a 30-row
- *  screen against a 1000-line buffer would be under one cell tall for most
- *  of its travel.
- *
- *  The fill boundary lands to an eighth of a cell (240 steps on a 30-row
- *  screen, ~4 lines each) using the lower-eighth block glyphs, whose shape
- *  a bottom-anchored fill needs exactly. */
+ *  A fill rather than a scrollbar: a proportional thumb would be under one
+ *  cell tall for most of its travel at 30 rows against 1000 lines. The
+ *  boundary lands to an eighth of a cell, so ~4 lines per step. */
 void draw_scrollbar(int offset, int total);

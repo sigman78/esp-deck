@@ -74,20 +74,16 @@ static inline void copy_row(int row, int l, int r)
     }
 }
 
-/* Repaint every row and park the cursor. Used whenever the VIEW moves
- * rather than the content: tsm's dirty spans describe changes to the live
- * grid, and say nothing about history sliding into frame, so there is no
- * incremental repaint to be had here. 30 rows x 100 cols x 8 B is ~24 KB of
- * PSRAM reads — fine for a keypress, which is the only thing that triggers
- * it, and not something to do per flush. */
+/* Used when the VIEW moves rather than the content: dirty spans describe
+ * the live grid and say nothing about history sliding into frame, so there
+ * is no incremental repaint to be had. */
 static void repaint_all(void)
 {
     for (int row = 0; row < s_rows; row++)
         copy_row(row, 0, s_cols - 1);
 
-    /* The cursor lives on the live grid; while scrolled back it is not on
-     * screen, and drawing it at its live coordinates would plant a block on
-     * an unrelated line of history. */
+    /* Scrolled back, the cursor is off-screen — drawing it at its live
+     * coordinates would plant a block on an unrelated line of history. */
     if (tsm_sb_offset(s_tsm) > 0)
         display_set_cursor(0, 0, CURSOR_NONE);
     else
@@ -102,10 +98,7 @@ static inline void refresh_display(void)
 #ifdef CONFIG_VTERM_BENCH
     uint32_t t0 = esp_cpu_get_cycle_count();
 #endif
-    /* Scrolled back: what is on screen is not what tsm marked dirty. New
-     * output still lands in the live grid below the visible window, and the
-     * view rides along with the ring (tsm follows it), so the whole frame
-     * has to be redrawn. */
+    /* Scrolled back, what is on screen is not what tsm marked dirty. */
     if (tsm_sb_offset(s_tsm) > 0) {
         repaint_all();
         tsm_clear_dirty(s_tsm);
@@ -253,16 +246,14 @@ int vterm_scroll(int delta)
     if (!s_initialized) return 0;
     int before = tsm_sb_offset(s_tsm);
     int after  = tsm_sb_scroll(s_tsm, delta);
-    /* Repaint only on an actual move — holding PageUp at the top of the
-     * history would otherwise redraw the same frame on every repeat. */
+    /* Only on an actual move: holding PageUp at the top of the history
+     * would otherwise redraw the same frame on every repeat. */
     if (after != before) repaint_all();
     return after;
 }
 
 int vterm_scroll_page(int dir)
 {
-    /* Half a screen: enough to feel like progress, little enough that the
-     * eye keeps its place across the jump. */
     int half = s_rows / 2;
     return vterm_scroll(dir * (half > 0 ? half : 1));
 }
