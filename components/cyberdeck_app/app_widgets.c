@@ -312,23 +312,27 @@ void draw_scrollbar(int offset, int total)
     const int full = f / 8;          /* whole cells, at the bottom  */
     const int rem  = f % 8;          /* partial cell just above them */
 
-    /* Three glyphs only — space, one eighth-block, full block — so the
-     * column reads as a single continuous bar. A shaded trough (U+2591)
-     * looked broken here: its dither has visible texture at cell edges, so
-     * the empty part fought the fill instead of receding behind it.
+    /* One fg/bg pair for the whole column, three glyphs: space, one
+     * eighth-block at the level, full blocks below. Every cell carries the
+     * SAME attrs, which is the point — mixing INVERSE for the trough with a
+     * plain cell at the boundary gave the boundary a different background
+     * (the overlay's global bg, black) and left a black notch exactly where
+     * the level was. Uniform attrs, uniform background, continuous bar.
      *
-     * Both halves take their color from OVERLAY_COL_GRAY, in its two roles:
-     * the fill is drawn as text (soft white), the trough as an INVERSE space
-     * whose background is the dark companion. */
-    ui_pen(OVERLAY_COL_GRAY);
+     * BRIGHT lifts the background off black and DIM then halves both
+     * channels, which lands a dark-gray trough under a medium-white fill
+     * without inventing palette entries: black -> BRIGHT -> ~(123,126,123)
+     * -> DIM -> ~(58,61,58) for the background, and white -> DIM ->
+     * ~(123,126,123) for the glyph. */
+    const uint8_t bar_attrs = OVERLAY_ATTR_BRIGHT | OVERLAY_ATTR_DIM;
+    ui_pen(OVERLAY_COL_WHITE);
     for (int y = 0; y < rows; y++) {
         const int from_bottom = rows - 1 - y;
-        if (from_bottom < full)
-            ui_putch(col, y, UI_BLOCK, 0);                          /* filled */
-        else if (from_bottom == full && rem)
-            ui_putch(col, y, (uint16_t)(0x2580u + rem), 0);         /* edge   */
-        else
-            ui_putch(col, y, ' ', OVERLAY_ATTR_INVERSE);            /* trough */
+        uint16_t  cp;
+        if (from_bottom < full)                cp = UI_BLOCK;                  /* filled */
+        else if (from_bottom == full && rem)   cp = (uint16_t)(0x2580u + rem); /* level  */
+        else                                   cp = ' ';                       /* trough */
+        ui_putch(col, y, cp, bar_attrs);
     }
 
     /* Lines back, as a plain number on gray: pen 0 + INVERSE resolves to the

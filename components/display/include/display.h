@@ -128,12 +128,7 @@ esp_lcd_panel_handle_t display_get_panel(void);
 #define OVERLAY_COL_RED       5
 #define OVERLAY_COL_BLUE      6
 #define OVERLAY_COL_WHITE     7
-/* Neutral, for chrome that should not read as an accent: as text it is a
- * soft white, as an INVERSE bar it is a dark trough. The two palettes are
- * indexed together but used in different roles, so one entry covers both
- * ends of a fill/track pair. */
-#define OVERLAY_COL_GRAY      8
-#define OVERLAY_PAL_SIZE      9
+#define OVERLAY_PAL_SIZE      8
 
 typedef struct {
     uint16_t cp;     /* BMP codepoint; 0 = transparent */
