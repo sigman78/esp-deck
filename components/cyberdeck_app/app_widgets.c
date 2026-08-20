@@ -312,19 +312,17 @@ void draw_scrollbar(int offset, int total)
     const int full = f / 8;          /* whole cells, at the bottom  */
     const int rem  = f % 8;          /* partial cell just above them */
 
+    /* Three glyphs only — space, one eighth-block, full block — so the
+     * column reads as a single continuous bar. A shaded trough (U+2591)
+     * looked broken here: its dither has visible texture at cell edges, so
+     * the empty part fought the fill instead of receding behind it. */
+    ui_pen(OVERLAY_COL_CYAN);
     for (int y = 0; y < rows; y++) {
         const int from_bottom = rows - 1 - y;
         uint16_t  cp;
-        if (from_bottom < full) {
-            cp = UI_BLOCK;                       /* solidly inside the fill */
-        } else if (from_bottom == full && rem) {
-            cp = (uint16_t)(0x2580u + rem);      /* the boundary, sub-cell  */
-        } else {
-            ui_pen(OVERLAY_COL_BLUE);            /* unfilled track          */
-            ui_putch(col, y, UI_SHADE1, 0);
-            continue;
-        }
-        ui_pen(OVERLAY_COL_CYAN);
+        if (from_bottom < full)                cp = UI_BLOCK;               /* filled   */
+        else if (from_bottom == full && rem)   cp = (uint16_t)(0x2580u + rem); /* edge  */
+        else                                   cp = ' ';                    /* trough   */
         ui_putch(col, y, cp, 0);
     }
 
