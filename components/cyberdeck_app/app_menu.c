@@ -189,14 +189,14 @@ static int sys_menu_items(const char *out[], const char *bodies[],
 {
     snprintf(saverbuf, bufsz, "%u min",
              (unsigned)(app.saver.idle_ms / 60000u));
-    out[0]    = "Saver + lock after";
-    bodies[0] = saverbuf;
-    out[1]    = "Clear host keys";
-    bodies[1] = "";
-    out[2]    = "Factory reset";
-    bodies[2] = "";
-    out[3]    = "Back";
-    bodies[3] = "";
+    out[SYS_SAVER]         = "Saver + lock after";
+    bodies[SYS_SAVER]      = saverbuf;
+    out[SYS_CLEARHOSTS]    = "Clear host keys";
+    bodies[SYS_CLEARHOSTS] = "";
+    out[SYS_FACTORY]       = "Factory reset";
+    bodies[SYS_FACTORY]    = "";
+    out[SYS_BACK]          = "Back";
+    bodies[SYS_BACK]       = "";
     return SYS_MENU_TILES;
 }
 
@@ -437,9 +437,9 @@ static void render_menu(void)
                                                              : OVERLAY_COL_CYAN;
         else if (kspage)  col = i == g.count - 1 ? OVERLAY_COL_BLUE
                                                  : OVERLAY_COL_CYAN;
-        else if (syspage) col = i == 0           ? OVERLAY_COL_CYAN
-                              : i == g.count - 1 ? OVERLAY_COL_BLUE
-                                                 : OVERLAY_COL_RED;
+        else if (syspage) col = i == SYS_SAVER ? OVERLAY_COL_CYAN
+                              : i == SYS_BACK  ? OVERLAY_COL_BLUE
+                                               : OVERLAY_COL_RED;
         else              col = cols[i];
         ui_pen(col);
         /* Focus is carried by the tile itself (washed bar + lit rail);
@@ -791,10 +791,10 @@ static void menu_activate(uint64_t now)
 
     case MS_SYSTEM:
         switch (sel) {
-        case 0:                                   /* saver/auto-lock timeout */
+        case SYS_SAVER:                           /* saver/auto-lock timeout */
             sys_saver_cycle();
             break;
-        case 1:                                   /* clear host keys (2-step) */
+        case SYS_CLEARHOSTS:                      /* clear host keys (2-step) */
             if (!was_armed) {
                 app.menu.armed = true;
                 menu_note(now, 0, false, "activate again to clear");
@@ -804,7 +804,7 @@ static void menu_activate(uint64_t now)
                           e == ESP_OK ? "host keys cleared" : "nothing to clear");
             }
             break;
-        case 2:                                   /* factory reset (2-step) */
+        case SYS_FACTORY:                         /* factory reset (2-step) */
             if (!was_armed) {
                 app.menu.armed = true;
                 menu_note(now, 0, false, "activate again to WIPE ALL");
@@ -815,7 +815,7 @@ static void menu_activate(uint64_t now)
                 menu_note(now, MENU_MSG_MS, false, "wiped - reboot advised");
             }
             break;
-        case 3: menu_back(now); return;           /* Back */
+        case SYS_BACK: menu_back(now); return;
         }
         break;
 

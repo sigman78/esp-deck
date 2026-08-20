@@ -19,7 +19,7 @@ typedef enum {
     MS_IMPORT,     /* SoftAP (phone) / Web (PC) / Back                        */
     MS_WIFI,       /* Reconnect / Add network / Back                          */
     MS_KEYBOARD,   /* Pair / Forget bonds / Back                             */
-    MS_SYSTEM,     /* Clear host keys / Factory reset / Back                  */
+    MS_SYSTEM,     /* Saver / Clear host keys / Factory reset / Back          */
     MS_EFFECTS,    /* dynamic bodies: every runtime render-fx tunable        */
     MS_FONT,       /* dynamic bodies: terminal font size, applied on reboot  */
     MS_KEYSTORE,   /* dynamic bodies: lock now / set code / lock triggers    */
@@ -30,6 +30,17 @@ typedef enum {
 
 #define CFG_KEYBOARD 2   /* MS_CONFIG index of "Keyboard >" (needs BLE) */
 #define CFG_KEYSTORE 5   /* MS_CONFIG index of "Keystore >" (excludable) */
+
+/* MS_SYSTEM tile indices. Named because the page mixes harmless tunables
+ * with the two destructive actions, and menu_confirm() picks those out by
+ * index — inserting a tile above them without moving the confirm gate would
+ * arm "factory reset" from the wrong tile. */
+typedef enum {
+    SYS_SAVER = 0,
+    SYS_CLEARHOSTS,
+    SYS_FACTORY,
+    SYS_BACK,
+} sys_menu_item_t;
 
 typedef struct {
     const char        *title;
