@@ -958,6 +958,7 @@ const tsm_cell_t *tsm_row(const tsm_t *t, int row)
     return &t->cells[phys_row(t, row - t->sb_off) * t->cols];
 }
 
+int tsm_sb_capacity(const tsm_t *t) { return t->sb_max; }
 int tsm_sb_len(const tsm_t *t)    { return t->sb_len; }
 int tsm_sb_offset(const tsm_t *t) { return t->sb_off; }
 

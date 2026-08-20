@@ -114,6 +114,11 @@ int tsm_rows(const tsm_t *tsm);
 
 /* ── Scrollback ──────────────────────────────────────────────────────────── */
 
+/* Ring capacity in rows: what tsm_new() actually got, which may be less than
+ * asked for, and 0 when scrollback is disabled or its allocation failed.
+ * Distinct from tsm_sb_len() — that is 0 on a fresh terminal too. */
+int tsm_sb_capacity(const tsm_t *tsm);
+
 /* Rows of history currently stored (0 .. capacity). */
 int tsm_sb_len(const tsm_t *tsm);
 

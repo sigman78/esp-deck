@@ -285,6 +285,11 @@ int vterm_scroll_len(void)
     return s_initialized ? tsm_sb_len(s_tsm) : 0;
 }
 
+int vterm_scroll_capacity(void)
+{
+    return s_initialized ? tsm_sb_capacity(s_tsm) : 0;
+}
+
 bool vterm_app_cursor_keys(void)
 {
     if (!s_initialized) return false;

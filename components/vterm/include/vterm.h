@@ -98,6 +98,11 @@ int vterm_scroll_offset(void);
 /** Rows of history currently available to scroll back through. */
 int vterm_scroll_len(void);
 
+/** Scrollback capacity, 0 when the feature is off. Use this — not
+ *  vterm_scroll_len(), which is also 0 on a fresh session — to decide
+ *  whether the deck should claim the scrollback key bindings at all. */
+int vterm_scroll_capacity(void);
+
 /**
  * Returns true when the remote has enabled application cursor key mode
  * (DECCKM, ESC [ ? 1 h).  Use this to decide whether arrow keys should

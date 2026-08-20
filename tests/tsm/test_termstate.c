@@ -1168,11 +1168,36 @@ static int row_digit(tsm_t *t, int row)
     return (int)tsm_row(t, row)[0].cp - '0';
 }
 
+/* Built with scrollback off, every entry point must be inert rather than
+ * merely unused — the ring pointer is NULL and nothing may dereference it. */
 void test_sb_disabled_stores_nothing(void)
 {
     tsm_t *t = sb_term(0, 10);
+    TEST_ASSERT_EQUAL_INT(0, tsm_sb_capacity(t));
     TEST_ASSERT_EQUAL_INT(0, tsm_sb_len(t));
     TEST_ASSERT_EQUAL_INT(0, tsm_sb_scroll(t, 5));
+    TEST_ASSERT_EQUAL_INT(0, tsm_sb_scroll(t, -5));
+    TEST_ASSERT_EQUAL_INT(0, tsm_sb_offset(t));
+    tsm_sb_reset(t);
+
+    /* The view is still the live grid, and the clear paths still work. */
+    TEST_ASSERT_EQUAL_UINT16('7', tsm_row(t, 0)[0].cp);
+    feed(t, "\x1b[3J");
+    feed(t, "\x1b" "c");
+    TEST_ASSERT_EQUAL_INT(0, tsm_sb_len(t));
+    tsm_free(t);
+}
+
+/* Capacity is what was allocated; length is what has accumulated. The app
+ * keys off capacity, so the two must not be conflated. */
+void test_sb_capacity_distinct_from_length(void)
+{
+    tsm_t *t = tsm_new(10, 3, 50);
+    TEST_ASSERT_EQUAL_INT(50, tsm_sb_capacity(t));
+    TEST_ASSERT_EQUAL_INT(0,  tsm_sb_len(t));      /* fresh: nothing yet */
+    feed(t, "a\r\nb\r\nc\r\nd");
+    TEST_ASSERT_EQUAL_INT(50, tsm_sb_capacity(t)); /* unchanged by use   */
+    TEST_ASSERT_EQUAL_INT(1,  tsm_sb_len(t));
     tsm_free(t);
 }
 
@@ -1502,6 +1527,7 @@ int main(void)
 
     /* scrollback */
     RUN_TEST(test_sb_disabled_stores_nothing);
+    RUN_TEST(test_sb_capacity_distinct_from_length);
     RUN_TEST(test_sb_accumulates_evicted_rows);
     RUN_TEST(test_sb_capacity_caps_length);
     RUN_TEST(test_sb_scroll_reveals_history);

@@ -496,9 +496,16 @@ void session_input(const cyberdeck_input_t *ev, ui_key_t k, char ch, uint64_t no
 
     if (ev->type != CYBERDECK_INPUT_KEY) return;
 
-    /* Scrollback paging is local: the remote never sees these. */
-    if (k == K_SCROLL_UP)   { vterm_scroll_page(+1); session_scroll_seen(now); return; }
-    if (k == K_SCROLL_DOWN) { vterm_scroll_page(-1); session_scroll_seen(now); return; }
+    /* Scrollback paging is local: the remote never sees these — but only
+     * where there IS scrollback. Built without it (CONFIG_VTERM_SCROLLBACK_
+     * LINES = 0) the deck has no use for the keys, so they belong to the
+     * remote like any other; swallowing them would be a silent dead spot.
+     * Capacity, not length: length is 0 on a fresh session too. */
+    if ((k == K_SCROLL_UP || k == K_SCROLL_DOWN) && vterm_scroll_capacity() > 0) {
+        vterm_scroll_page(k == K_SCROLL_UP ? +1 : -1);
+        session_scroll_seen(now);
+        return;
+    }
 
     /* Any other key means the user is done reading history — snap to live
      * first so their input lands on a screen showing where it will appear.
