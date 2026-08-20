@@ -284,58 +284,59 @@ int draw_step(int y, char num, const char *label,
 
 /* ------------------------------------------------- scrollback indicator */
 
-/* Lower-eighth block glyphs: 0x2580 + n fills the bottom n/8 of the cell,
- * so 0x2581 is ▁ and 0x2588 is a full █. The font has no UPPER eighths
- * (0x2594 is absent from Terminus and renders as '?'), but an INVERSE
- * lower-(8-k) draws exactly the upper k eighths — same glyph, swapped
- * colors. That is what gives the marker sub-cell precision at both ends.
- * Verified present and correctly proportioned in all three font sizes. */
-#define BLK_LOWER(n)  ((uint16_t)(0x2580u + (n)))
-
+/* A fill, not a scrollbar. A proportional thumb would be under one cell tall
+ * for most of its travel on a 30-row screen against a 1000-line buffer, so
+ * it would read as noise; a column that fills from the bottom as you go back
+ * answers "how far back am I" at a glance, and agrees in direction with the
+ * number above it (more fill, bigger count).
+ *
+ * The boundary lands to an eighth of a cell: 0x2580 + n fills the bottom n/8
+ * of a cell, which is exactly the shape a bottom-anchored fill needs. 240
+ * steps on a 30-row screen, ~4 lines each. */
 void draw_scrollbar(int offset, int total)
 {
     if (total <= 0) return;
 
     const int col  = ui_cols() - 1;
     const int rows = ui_rows();
-    if (col < 0 || rows < 2) return;
+    if (col < 0 || rows < 1) return;
 
-    /* Faint full-height track: without it the marker is a block floating in
-     * the dark with nothing to measure it against. */
-    ui_pen(OVERLAY_COL_BLUE);
-    for (int y = 0; y < rows; y++)
-        ui_putch(col, y, UI_SHADE1, 0);
-
-    /* Marker travel, in eighths of a cell. One cell of the track is reserved
-     * for the marker's own height, so the top of a one-cell marker ranges
-     * over [0, 8*(rows-1)]. */
-    const int span = 8 * (rows - 1);
+    if (offset < 0)     offset = 0;
     if (offset > total) offset = total;
-    /* Live (offset 0) sits at the BOTTOM, like every scrollbar at the end of
-     * its document; the oldest line sits at the top. */
-    int p = span - (int)(((long)offset * span) / total);
-    if (p < 0)    p = 0;
-    if (p > span) p = span;
 
-    const int row = p / 8;
-    const int k   = p % 8;
+    /* Eighths filled, measured up from the bottom of the column. */
+    int f = (int)(((long)offset * 8 * rows) / total);
+    if (f < 0)          f = 0;
+    if (f > 8 * rows)   f = 8 * rows;
 
-    ui_pen(OVERLAY_COL_CYAN);
-    /* Lower (8-k) eighths of `row`, then the remaining k eighths at the top
-     * of the next row as an inverted block. k == 0 lands on a cell boundary
-     * and needs only the full block. */
-    ui_putch(col, row, BLK_LOWER(8 - k), 0);
-    if (k > 0 && row + 1 < rows)
-        ui_putch(col, row + 1, BLK_LOWER(8 - k), OVERLAY_ATTR_INVERSE);
+    const int full = f / 8;          /* whole cells, at the bottom  */
+    const int rem  = f % 8;          /* partial cell just above them */
 
-    /* Exact position as a chip left of the bar: 240 stops still quantise to
-     * ~4 lines, and "how far back am I" deserves a real number. */
-    char label[16];
-    snprintf(label, sizeof(label), "-%d", offset);
-    int lx = col - 1 - ((int)strlen(label) + 2);
-    if (lx >= 0) {
+    for (int y = 0; y < rows; y++) {
+        const int from_bottom = rows - 1 - y;
+        uint16_t  cp;
+        if (from_bottom < full) {
+            cp = UI_BLOCK;                       /* solidly inside the fill */
+        } else if (from_bottom == full && rem) {
+            cp = (uint16_t)(0x2580u + rem);      /* the boundary, sub-cell  */
+        } else {
+            ui_pen(OVERLAY_COL_BLUE);            /* unfilled track          */
+            ui_putch(col, y, UI_SHADE1, 0);
+            continue;
+        }
         ui_pen(OVERLAY_COL_CYAN);
-        ui_chip(lx, 0, UI_RHALF, label, UI_LHALF, OVERLAY_ATTR_INVERSE);
+        ui_putch(col, y, cp, 0);
+    }
+
+    /* Lines back, as a plain number on gray: pen 0 + INVERSE resolves to the
+     * bar palette's neutral gray with dark text (render_cache.c). Sits at the
+     * top, immediately left of the column. */
+    char label[16];
+    int n = snprintf(label, sizeof(label), " -%d ", offset);
+    int lx = col - n;
+    if (lx >= 0) {
+        ui_pen(OVERLAY_COL_DEFAULT);
+        ui_puts(lx, 0, label, OVERLAY_ATTR_INVERSE);
     }
     ui_pen(OVERLAY_COL_DEFAULT);
 }

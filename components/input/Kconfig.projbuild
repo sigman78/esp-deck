@@ -87,4 +87,19 @@ menu "Input HAL"
             taken as a scroll drag. 48 px is about a finger width on the
             7" panel, and six character cells at the 8x16 font.
 
+    config INPUT_TOUCH_SCROLL_SPEED_PCT
+        int "Scroll drag speed (percent of 1:1)"
+        depends on INPUT_TOUCH_SCROLL
+        default 150
+        range 25 500
+        help
+            How far the view moves per unit of finger travel, as a
+            percentage. 100 is 1:1 — the text tracks the finger exactly.
+            150 (the default) moves half again as fast, which covers more
+            of a long buffer without losing the sense of dragging the
+            content itself.
+
+            Applied to accumulated pixels, so the fraction is not lost:
+            a slow drag still scrolls, it just takes more travel per row.
+
 endmenu

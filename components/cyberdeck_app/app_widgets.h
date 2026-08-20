@@ -76,17 +76,16 @@ int draw_step(int y, char num, const char *label,
 
 /* ------------------------------------------------- scrollback indicator */
 
-/** Draw the scrollback position bar down the right edge, plus a chip
- *  reading how many lines back the view sits.
+/** Draw the scrollback fill down the right edge, with the line count above
+ *  it on gray.
  *
  *  @p offset is rows back from live, @p total the history available. The
- *  marker is a fixed one-cell block, NOT a proportional thumb: with a
- *  1000-line buffer over 30 rows a proportional thumb would be under one
- *  cell tall for most of its travel, so it would show position badly and
- *  extent not at all. Position is what matters here.
+ *  column fills from the bottom in proportion to how far back the view sits
+ *  — a progress bar, not a scrollbar: a proportional thumb on a 30-row
+ *  screen against a 1000-line buffer would be under one cell tall for most
+ *  of its travel.
  *
- *  Placed at eighth-of-a-cell resolution (240 stops on a 30-row screen,
- *  ~4 lines each) using the lower-eighth block glyphs, with the marker's
- *  upper part drawn as an INVERSE lower-eighth — the font has no upper
- *  eighths, but inverting one is the same picture. */
+ *  The fill boundary lands to an eighth of a cell (240 steps on a 30-row
+ *  screen, ~4 lines each) using the lower-eighth block glyphs, whose shape
+ *  a bottom-anchored fill needs exactly. */
 void draw_scrollbar(int offset, int total);

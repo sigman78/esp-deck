@@ -86,6 +86,14 @@ static void render_connecting(const char *msg, uint64_t now)
 
 static uint64_t s_scrollbar_until;   /* 0 = not showing */
 
+/* Drag travel not yet spent, in pixel-percent (px * SCROLL_SPEED_PCT). */
+static int s_scroll_accum;
+
+#ifndef CONFIG_INPUT_TOUCH_SCROLL_SPEED_PCT
+#define CONFIG_INPUT_TOUCH_SCROLL_SPEED_PCT 100
+#endif
+#define SCROLL_SPEED_PCT  CONFIG_INPUT_TOUCH_SCROLL_SPEED_PCT
+
 void session_scroll_seen(uint64_t now)
 {
     s_scrollbar_until = now + SCROLLBAR_LINGER_MS;
@@ -467,12 +475,19 @@ void session_input(const cyberdeck_input_t *ev, ui_key_t k, char ch, uint64_t no
     }
     /* Right-edge drag: content follows the finger, so dragging DOWN pulls
      * older lines down into view — the same direction every touch surface
-     * has trained people to expect. One row per cell of travel keeps it
-     * precise; a proportional thumb-grab would be unusable given the marker
-     * is a single cell tall. */
+     * has trained people to expect.
+     *
+     * Pixels accumulate rather than converting per event. The touch task
+     * polls at 50 ms, so a steady drag arrives as many small dy values; a
+     * plain dy/font_height() would floor each one to zero and a slow drag
+     * would not scroll at all, however far it travelled. The remainder
+     * carries its sign, so a reversal spends it in the new direction. */
     if (ev->type == CYBERDECK_INPUT_SCROLL) {
-        int rows = ev->dy / font_height();
+        s_scroll_accum += (int)ev->dy * SCROLL_SPEED_PCT;
+        const int per_row = font_height() * 100;
+        int rows = s_scroll_accum / per_row;
         if (rows) {
+            s_scroll_accum -= rows * per_row;
             vterm_scroll(rows);
             session_scroll_seen(now);
         }

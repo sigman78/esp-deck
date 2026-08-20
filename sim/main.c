@@ -182,6 +182,26 @@ static void sim_set_scroll_edge(int width_px)
     s_scroll_edge_px = width_px < 0 ? 0 : width_px;
 }
 
+/* Mouse wheel → scroll, sim-only. The panel has no wheel, so this rides the
+ * same SCROLL event as the edge drag rather than inventing a second path:
+ * one notch is reported as a cell of travel, which the shell then scales by
+ * the configured drag speed exactly as it does a finger. SDL gives positive
+ * y for a push away from you, which should show older lines — the same
+ * direction as dragging the content down. */
+static void mouse_wheel(const SDL_MouseWheelEvent *w, uint64_t now)
+{
+    if (!w->y) return;
+    int notches = w->y;
+#if SDL_VERSION_ATLEAST(2, 0, 4)
+    if (w->direction == SDL_MOUSEWHEEL_FLIPPED) notches = -notches;
+#endif
+    cyberdeck_input_t ev = {
+        .type = CYBERDECK_INPUT_SCROLL,
+        .dy   = (int16_t)(notches * font_height()),
+    };
+    cyberdeck_app_handle_input(&ev, now);
+}
+
 static void touch_mouse_motion(const SDL_MouseMotionEvent *m, uint64_t now)
 {
     if (touch_state != TOUCH_TOUCHING && touch_state != TOUCH_SCROLLING) return;
@@ -386,6 +406,11 @@ int main(int argc, char *argv[])
 
             case SDL_MOUSEMOTION:
                 touch_mouse_motion(&ev.motion, now);
+                break;
+
+            case SDL_MOUSEWHEEL:
+                mouse_wheel(&ev.wheel, now);
+                got_input = true;
                 break;
 
             case SDL_MOUSEBUTTONDOWN:
