@@ -639,16 +639,40 @@ Instruction count -42.8% predicts the measurement well: `t:blank` (pure scan,
 no decode) came in at -47.2%, slightly better than the count alone, because a
 disproportionate share of what was removed was stack traffic rather than ALU.
 
+### Glyph cache — decode removed (2026-08-21)
+
+Same rule as the LUT, applied to the decoder: 3000 decodes per frame over ~95
+distinct ASCII codepoints. Decode once at `font_init`, direct-mapped by
+`(bold, cp - 0x20)`, hit = a word copy.
+
+| dense, worst chunk | 8x16 | 10x20 |
+|---|---|---|
+| `off` | 360 → **245 us** (−31.9%) | 260 → **170 us** (−34.7%) |
+| `bold` | 373 → 248 us (−33.5%) | 269 → 172 us (−36.0%) |
+| `fx:app` | 404 → **294 us** (−27.2%) | 278 → **187 us** (−32.6%) |
+| `t:blank` | 233 → 233 us (0.0%) | 171 → 171 us (0.0%) |
+
+Decode: **293 → 29.8 cyc/glyph**, share of band **34.8% → 3.5%**. At 10x20
+`off` (170) now sits ON `t:blank` (171) — a cached decode is a 40 B word copy,
+the blank path a 40 B word fill, so dense content costs what a blank screen
+does. `bold` collapses onto `dense`, the synthesize-and-smear penalty gone.
+
+Costs 2 x 95 x glyph_bytes internal DRAM (3.0 / 7.6 / 9.1 KB by size);
+allocation failure degrades to the old path.
+
 ### Where that leaves pclk
 
 Band utilisation with the shipped fx config, after the whole 2026-08-21 arc:
 
 | pclk | refresh | 8x16 band | 10x20 band | verdict |
 |---|---|---|---|---|
-| 16 MHz | 39.0 Hz | 49% | 54% | current, lots of margin |
-| **20 MHz** | **48.8 Hz** | **62%** | **68%** | **comfortable** |
-| 26.67 MHz | 65.0 Hz | 82% | 90% | arguable, tight at 10x20 |
-| 32 MHz | 78.0 Hz | 99% | 108% | no |
+| 16 MHz | 39.0 Hz | 36% | 36% | current |
+| **20 MHz** | **48.8 Hz** | **45%** | **46%** | **verified on hardware** |
+| 26.67 MHz | 65.0 Hz | 60% | 61% | plausible, untested |
+| 32 MHz | 78.0 Hz | 72% | 73% | plausible, untested |
+| 40 MHz | 97.6 Hz | 90% | 91% | at the peripheral limit |
+
+(worst phase, `fx:app`, after the LUT and the glyph cache)
 
 At the start of this branch those first two rows read 109%/122% and were both
 over the deadline. **20 MHz is now a config change, not a project.**
