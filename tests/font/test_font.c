@@ -99,14 +99,57 @@ static void test_spot_rows(void)
     }
 }
 
-/* An uncovered codepoint decodes as '?', bold included. */
+/* An uncovered codepoint decodes as '?', bold included. U+E800 is private
+ * use, not in Terminus, and OUTSIDE the sprite slot range (U+E000..E00F,
+ * which decodes from the sprite table instead — see test_sprites). */
 static void test_fallback(void)
 {
     uint8_t out[GB], q[GB];
     font_decode_glyph(0x003F, false, q);
-    font_decode_glyph(0xE000, false, out);   /* private use — not in Terminus */
+    font_decode_glyph(0xE800, false, out);
     TEST_ASSERT_EQUAL_MEMORY(q, out, GB);
-    font_decode_glyph(0xE000, true, out);    /* outside bold subset too */
+    font_decode_glyph(0xE800, true, out);    /* outside bold subset too */
+    TEST_ASSERT_EQUAL_MEMORY(q, out, GB);
+}
+
+/* Dynamic sprite glyphs: unset slots are blank; set rows come back
+ * byte-exact (bold identical — pixel art is not smeared); an update is
+ * visible THROUGH the decoded-glyph cache (set() must invalidate); clear
+ * blanks again; the first cp past the slot range takes the '?' fallback. */
+static void test_sprites(void)
+{
+    uint8_t out[GB], zero[GB], pat1[GB], pat2[GB], q[GB];
+    memset(zero, 0, GB);
+    for (int i = 0; i < (int)GB; i++) {
+        pat1[i] = (uint8_t)(i * 7 + 1);
+        pat2[i] = (uint8_t)(0xA5 ^ i);
+    }
+    const uint16_t cp = font_sprite_cp(3);
+
+    font_decode_glyph(cp, false, out);            /* unset: blank */
+    TEST_ASSERT_EQUAL_MEMORY(zero, out, GB);
+
+    font_sprite_set(3, pat1);
+    font_decode_glyph(cp, false, out);            /* fill */
+    TEST_ASSERT_EQUAL_MEMORY(pat1, out, GB);
+    font_decode_glyph(cp, false, out);            /* cache hit */
+    TEST_ASSERT_EQUAL_MEMORY(pat1, out, GB);
+    font_decode_glyph(cp, true, out);             /* bold = same bitmap */
+    TEST_ASSERT_EQUAL_MEMORY(pat1, out, GB);
+
+    font_sprite_set(3, pat2);                     /* update while cached */
+    font_decode_glyph(cp, false, out);
+    TEST_ASSERT_EQUAL_MEMORY(pat2, out, GB);
+    font_decode_glyph(cp, true, out);
+    TEST_ASSERT_EQUAL_MEMORY(pat2, out, GB);
+
+    font_sprite_clear(3);
+    font_decode_glyph(cp, false, out);
+    TEST_ASSERT_EQUAL_MEMORY(zero, out, GB);
+
+    font_decode_glyph(0x003F, false, q);          /* just past the range */
+    font_decode_glyph((uint16_t)(FONT_SPRITE_BASE + FONT_SPRITE_COUNT),
+                      false, out);
     TEST_ASSERT_EQUAL_MEMORY(q, out, GB);
 }
 
@@ -168,5 +211,6 @@ int main(void)
     RUN_TEST(test_fallback);
     RUN_TEST(test_blank);
     RUN_TEST(test_cache_hit_and_refill);
+    RUN_TEST(test_sprites);
     return UNITY_END();
 }

@@ -17,6 +17,32 @@
 
 #include "esp_heap_caps.h"   /* key-PEM buffers (idfsim stubs it) */
 
+/* Sprite slots owned by the connect screen (font.h slots are a global
+ * resource — record every taker here until an allocator exists). */
+enum { SPR_SEG_L = 0, SPR_SEG_R = 1, SPR_EDGE = 2 };
+
+/* Load sprite @p slot with a full-height vertical band: cell columns
+ * [c0, c1) lit, 0 = leftmost. Gives the connect bars their pixel-resolution
+ * edges — sprite content carries the sub-cell part of a position, cp
+ * placement the cell part. */
+static void sprite_vband(unsigned slot, int c0, int c1)
+{
+    const int w = font_width(), h = font_height();
+    const unsigned mask = ((1u << (w - c0)) - 1u) & ~((1u << (w - c1)) - 1u);
+    uint8_t rows[FONT_MAX_GLYPH_BYTES];
+
+    if (FONT_ROW_BYTES(w) == 1) {
+        for (int r = 0; r < h; r++)
+            rows[r] = (uint8_t)mask;
+    } else {
+        for (int r = 0; r < h; r++) {
+            rows[2 * r]     = (uint8_t)mask;         /* u16 rows, LE */
+            rows[2 * r + 1] = (uint8_t)(mask >> 8);
+        }
+    }
+    font_sprite_set(slot, rows);
+}
+
 static void render_connecting(const char *msg, uint64_t now)
 {
     ui_colors(UI_FG, UI_BG);
@@ -45,25 +71,54 @@ static void render_connecting(const char *msg, uint64_t now)
     ui_puts(lx, cy - 1, line, 0);
 
     int bw = 42, bx = (ui_cols() - bw) / 2;
+    const int fw = font_width(), barpx = bw * fw;
     if (app.conn.armed && app.conn.connect_at > now && app.cfg.ssh_retry_delay_ms) {
         /* Retry wait: an amber bar drains toward the reconnect moment, so
-         * the delay reads as a countdown instead of a stalled connect. */
+         * the delay reads as a countdown instead of a stalled connect. The
+         * boundary cell is a sprite, so the drain moves in pixels, not
+         * cells. */
         uint64_t remain = app.conn.connect_at - now;
         if (remain > app.cfg.ssh_retry_delay_ms)
             remain = app.cfg.ssh_retry_delay_ms;
-        int filled = (int)(remain * (uint64_t)bw / app.cfg.ssh_retry_delay_ms);
+        const int fpx  = (int)(remain * (uint64_t)barpx / app.cfg.ssh_retry_delay_ms);
+        const int full = fpx / fw, part = fpx % fw;
+        if (part)
+            sprite_vband(SPR_EDGE, 0, part);
         ui_pen(OVERLAY_COL_AMBER);
         for (int i = 0; i < bw; i++)
-            ui_putch(bx + i, cy + 1, i < filled ? UI_BLOCK : UI_SHADE1, 0);
+            ui_putch(bx + i, cy + 1,
+                     i < full            ? UI_BLOCK :
+                     (i == full && part) ? font_sprite_cp(SPR_EDGE)
+                                         : UI_SHADE1, 0);
     } else {
-        /* Activity bar: ░▒▓█▓▒░ gradient scrolling with the animation frame. */
-        static const uint16_t grad[7] = {
-            UI_SHADE1, UI_SHADE2, UI_SHADE3, UI_BLOCK,
-            UI_SHADE3, UI_SHADE2, UI_SHADE1
-        };
+        /* Activity bar: a bright 3-cell segment sweeping at PIXEL
+         * resolution — its two edge cells are sprites rebuilt each tick
+         * (sub-cell position), everything else is plain █/░ (cell
+         * position). 5 px per 100 ms tick reads as motion, not strobing. */
+        const int seg = 3 * fw;
+        const int s0  = (app.anim_frame * 5) % barpx, s1 = s0 + seg;
         ui_pen(app.conn.cancelled ? OVERLAY_COL_AMBER : prof_accent(p->name));
-        for (int i = 0; i < bw; i++)
-            ui_putch(bx + i, cy + 1, grad[(i + app.anim_frame) % 7], 0);
+        for (int i = 0; i < bw; i++) {
+            const int c0 = i * fw, c1 = c0 + fw;
+            /* Overlap with [s0,s1) or its wrapped copy — the segment is
+             * shorter than the bar, so at most one applies per cell. */
+            int lo = c0 > s0 ? c0 : s0, hi = c1 < s1 ? c1 : s1;
+            if (lo >= hi) {
+                lo = c0 > s0 - barpx ? c0 : s0 - barpx;
+                hi = c1 < s1 - barpx ? c1 : s1 - barpx;
+            }
+            uint16_t cp;
+            if (lo >= hi)                cp = UI_SHADE1;            /* track */
+            else if (hi - lo == fw)      cp = UI_BLOCK;             /* inside */
+            else if (lo > c0) {          /* segment starts mid-cell */
+                sprite_vband(SPR_SEG_L, lo - c0, fw);
+                cp = font_sprite_cp(SPR_SEG_L);
+            } else {                     /* segment ends mid-cell */
+                sprite_vband(SPR_SEG_R, 0, hi - c0);
+                cp = font_sprite_cp(SPR_SEG_R);
+            }
+            ui_putch(bx + i, cy + 1, cp, 0);
+        }
         if (app.conn.connecting) {
             /* Elapsed seconds right of the bar: a stalled handshake at 40 s
              * should look different from one that just started. */

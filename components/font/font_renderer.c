@@ -19,6 +19,10 @@
  * unconditional — the glyph cache is built on both targets. */
 #include "esp_heap_caps.h"
 
+#if defined(_MSC_VER)
+#include <intrin.h>              /* _ReadWriteBarrier for the sprite flip */
+#endif
+
 static const char *TAG = "font_renderer";
 
 /* Every size this build can select, in font_size_t order. A compiled-out
@@ -82,6 +86,18 @@ static DRAM_ATTR int              s_rb             = 1;   /* FONT_ROW_BYTES(s_wi
 static DRAM_ATTR size_t           s_glyph_bytes    = 16;
 
 static font_size_t                s_active         = FONT_SIZE_8X16;
+
+/* ---- Dynamic sprite glyphs (contract in font.h) ----
+ *
+ * Double-buffered per slot: font_sprite_set() fills the inactive buffer,
+ * flips `active`, and invalidates the slot's decoded-glyph-cache keys — so a
+ * cache refill in the ISR always copies a COMPLETE bitmap, and the sprite
+ * check itself lives only on the cache-miss path (decode_uncached), never in
+ * the per-cell hot path. Zero-initialized => every slot starts blank.
+ * 4-aligned so the refill's word copy applies (strides 16/40/48 are 4n). */
+static DRAM_ATTR _Alignas(4) uint8_t
+    s_sprite_rows[FONT_SPRITE_COUNT][2][FONT_MAX_GLYPH_BYTES];
+static DRAM_ATTR volatile uint8_t s_sprite_active[FONT_SPRITE_COUNT];
 
 static void gcache_init(void);   /* decoded-glyph cache; see below */
 
@@ -454,6 +470,27 @@ static IRAM_ATTR void smear_glyph(void *out)
  */
 static IRAM_ATTR void decode_uncached(uint16_t cp, bool bold, void *out)
 {
+    /* Sprite slots decode from RAM — same bitmap for bold (pixel art is not
+     * smeared). Only cache misses reach this test, so normal glyph decodes
+     * pay nothing for it. The active buffer is complete by construction
+     * (font_sprite_set flips after filling). */
+    const unsigned slot = (unsigned)cp - FONT_SPRITE_BASE;
+    if (slot < FONT_SPRITE_COUNT) {
+        const uint8_t *src = s_sprite_rows[slot][s_sprite_active[slot] & 1u];
+        uint8_t *o = (uint8_t *)out;
+        if ((((uintptr_t)o | s_glyph_bytes) & 3u) == 0) {
+            const uint32_t *sw = (const uint32_t *)src;
+            uint32_t *ow = (uint32_t *)out;
+            const size_t nw = s_glyph_bytes >> 2;
+            for (size_t i = 0; i < nw; i++)
+                ow[i] = sw[i];
+        } else {
+            for (size_t i = 0; i < s_glyph_bytes; i++)
+                o[i] = src[i];
+        }
+        return;
+    }
+
 #if FONT_BOLD_ENABLED
     if (bold) {
         uint16_t off;
@@ -598,4 +635,57 @@ static void gcache_init(void)
     ESP_LOGI(TAG, "Glyph cache: %u B, %u sets x %u ways x %u B",
              (unsigned)(tag_b + bits_b + data_b), (unsigned)GC_SETS,
              (unsigned)GC_WAYS, (unsigned)s_glyph_bytes);
+}
+
+/* ---- Dynamic sprite glyphs: the task-side write path ---- */
+
+/* Drop any cached decode of @p cp, both bold variants. A tag store is a
+ * single 32-bit write and the ISR treats GC_EMPTY as a miss, so this is safe
+ * against a concurrent reader. */
+static void gc_invalidate_cp(uint16_t cp)
+{
+    if (!s_gc_tag)
+        return;
+    for (unsigned b = 0; b <= 1; b++) {
+        const uint32_t key = (uint32_t)cp | (b ? 0x10000u : 0u);
+        const unsigned set = (unsigned)((key * 2654435761u) >> (32u - GC_SETS_LOG));
+        uint32_t *const tg = s_gc_tag + set * GC_WAYS;
+        if (tg[0] == key) tg[0] = GC_EMPTY;
+        if (tg[1] == key) tg[1] = GC_EMPTY;
+    }
+}
+
+/* Keep the buffer fill ordered before the volatile flip (the compiler may
+ * otherwise sink plain stores past a volatile access). */
+#if defined(__GNUC__)
+#define SPRITE_WRITE_BARRIER()  __asm__ volatile("" ::: "memory")
+#else
+#define SPRITE_WRITE_BARRIER()  _ReadWriteBarrier()
+#endif
+
+void font_sprite_set(unsigned slot, const void *rows)
+{
+    if (slot >= FONT_SPRITE_COUNT || !rows)
+        return;
+    const uint16_t cp = font_sprite_cp(slot);
+    const uint8_t  nb = (uint8_t)((s_sprite_active[slot] & 1u) ^ 1u);
+
+    memcpy(s_sprite_rows[slot][nb], rows, s_glyph_bytes);
+    SPRITE_WRITE_BARRIER();
+
+    /* Invalidate around the flip: the first drops entries decoded from the
+     * old buffer; the second drops a fill that raced the flip and
+     * reinstalled one. A fill spanning this whole sequence can still leave
+     * one stale FRAME (not a torn bitmap) — the next set() clears it, which
+     * is the accepted cost of keeping the sprite test off the decode hot
+     * path. */
+    gc_invalidate_cp(cp);
+    s_sprite_active[slot] = nb;
+    gc_invalidate_cp(cp);
+}
+
+void font_sprite_clear(unsigned slot)
+{
+    static const uint8_t zeros[FONT_MAX_GLYPH_BYTES];
+    font_sprite_set(slot, zeros);
 }
