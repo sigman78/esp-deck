@@ -167,10 +167,44 @@ DRAM; the post-build guard enforces it, but new names must match its patterns.
 
 ## 6. Benchmarking pitfalls that actually bit us
 
-**State the terminal content mode.** ISR cost varies **+28.6%** between a blank
-and a fully-painted screen. A figure without its workload is meaningless — we
-lost time "discovering" a 19% regression that was a dense-synthetic figure
-compared against a real-session one.
+### Two numbers are comparable only if the workload was identical — verify it
+
+This is the mistake that has cost the most time here, twice, in different
+disguises. Both times the measurements were correct and the **label** was wrong.
+
+> **1. Different content, same name.** ISR cost varies **+28.6%** between a
+> blank screen and a fully-painted one. A dense-synthetic figure was compared
+> against a real-session one and read as a **19% regression that did not
+> exist**.
+>
+> **2. Same name, different actual workload.** A cache-sizing sweep labelled
+> its rows by the bench's `span` knob. But `span` was a *cap*: the real working
+> set was `rows*13 + cols` bounded by it, so at `span=510` the 100x30 grid
+> touched **477** distinct glyphs and the 80x24 grid only **379**. The two rows
+> being compared were not the same test, which made one font size look
+> disproportionately bad.
+
+The practices that would have caught both:
+
+- **Label a run by what the workload WAS, not by the knob you turned.** If a
+  parameter is a cap, a seed, a ratio or a target, derive the actual figure and
+  put that in the table. `span=510` was honest about the input and silent about
+  the experiment.
+- **Before comparing two runs, state what is held constant** — content, config,
+  geometry, build flags — and check each one. When comparing across font sizes
+  or grid geometries, the working set usually is *not* constant.
+- **Model the workload offline when you can.** `tools/cachesim.py` replays the
+  exact access pattern and prints distinct count and capacity ratio; it exposed
+  the 477-vs-379 split in seconds, with no device run. A twenty-line model beats
+  a re-measurement.
+- **Prefer a control that must not move** (§5) over a cross-run comparison. A
+  control is internal to one run, so it cannot be invalidated by a workload
+  difference between runs.
+- **Distrust a result that is surprisingly lopsided.** Both incidents announced
+  themselves as an implausible asymmetry. That is the cue to re-examine the
+  setup before the code.
+
+### The rest
 
 **Benchmark the configuration you ship.** `bench_stress` returned before
 `cyberdeck_app_init()`, so `display_fx_set()` was never called and the wobble LUT
@@ -227,4 +261,6 @@ reference.
 - [ ] Is there a control phase that should *not* move?
 - [ ] `asmdiff` run — is the useful-work count unchanged?
 - [ ] Measured at every font size, with the shipped fx config?
+- [ ] For any comparison: was the workload genuinely identical, derived
+      rather than assumed?
 - [ ] `check_iram.py` still passing?
