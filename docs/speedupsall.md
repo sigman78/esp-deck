@@ -659,6 +659,11 @@ sizes), then PIE SIMD inside that task.
 
 ## ESP32-S3 memory-access rules (measured 2026-08-21)
 
+> The practical distillation of everything below — how to write and validate
+> a tight data loop on this part — is **`docs/tight-loops.md`**. This section
+> keeps the raw measurements behind it.
+
+
 On-device microbenchmark (`membench` in `bench_stress.c`), internal SRAM,
 1600 B, min of 8 runs. **Uses `volatile`, so it measures raw issue cost, not
 what optimised C achieves** — a real `-O2` byte loop beats 5 cyc/byte. Treat
