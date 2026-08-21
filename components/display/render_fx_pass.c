@@ -128,6 +128,64 @@ IRAM_ATTR void render_fx_clip_apply(color_t *dst, int band_y0, int num_scans,
     }
 }
 
+/*
+ * Shift one rendered scanline horizontally by @p d pixels, in place, filling
+ * the vacated edge with black. Positive d moves content right.
+ *
+ * RGB565 packs two pixels per 32-bit word, so the displacement splits into two
+ * cases and BOTH stay 32-bit aligned — the naive per-pixel `lp[i] = lp[i-d]`
+ * moved one 16-bit pixel at a time and cost 6 cyc/px (8 instructions, both
+ * addresses recomputed every iteration; see docs/speedupsall.md):
+ *
+ *   even d   a whole number of words — one load + one store per two pixels.
+ *   odd  d   source and destination sit a half-word apart, so each output word
+ *            is a funnel shift of two adjacent input words:
+ *                out[i] = (w[j] >> 16) | (w[j+1] << 16)
+ *            which Xtensa can issue as SSAI 16 + SRC.
+ *
+ * The copy overlaps itself, so iteration order follows the sign of d: right
+ * shifts walk down, left shifts walk up. |d| is bounded by the wobble
+ * amplitude (<= 8 px) and asserted well inside one line.
+ */
+#define WOB_NW  (DISPLAY_WIDTH / 2)   /* 32-bit words per scanline (400) */
+
+static IRAM_ATTR void wob_shift_line(color_t *lp, int d)
+{
+    uint32_t *const w = (uint32_t *)lp;
+
+    if ((d & 1) == 0) {                       /* ---- word-aligned move ---- */
+        const int k = d >> 1;
+        if (k > 0) {
+            RENDER_UNROLL
+            for (int i = WOB_NW - 1; i >= k; i--) w[i] = w[i - k];
+            for (int i = k - 1; i >= 0; i--)      w[i] = 0;
+        } else {
+            const int kk = -k;
+            RENDER_UNROLL
+            for (int i = 0; i < WOB_NW - kk; i++)      w[i] = w[i + kk];
+            for (int i = WOB_NW - kk; i < WOB_NW; i++) w[i] = 0;
+        }
+        return;
+    }
+
+    /* ---- odd: funnel shift. k = floor((d-1)/2) via arithmetic shift ---- */
+    const int k = (d - 1) >> 1;
+    if (d > 0) {
+        RENDER_UNROLL
+        for (int i = WOB_NW - 1; i > k; i--)
+            w[i] = (w[i - k - 1] >> 16) | (w[i - k] << 16);
+        w[k] = w[0] << 16;                    /* boundary: high half is black */
+        for (int i = k - 1; i >= 0; i--) w[i] = 0;
+    } else {
+        const int last = WOB_NW - 1 + k;      /* k < 0 */
+        RENDER_UNROLL
+        for (int i = 0; i <= last; i++)
+            w[i] = (w[i - k - 1] >> 16) | (w[i - k] << 16);
+        w[last + 1] = w[WOB_NW - 1] >> 16;    /* boundary: low half is black */
+        for (int i = last + 2; i < WOB_NW; i++) w[i] = 0;
+    }
+}
+
 /* CRT line wobble — a ~16-scanline S-wiggle sweeping down the screen, at
  * most 16 shifted lines per frame. The shift is in-place WITHIN the line:
  * an offset render origin would spill across band boundaries. */
@@ -157,16 +215,8 @@ IRAM_ATTR void render_fx_wobble(color_t *dst, int start_scan, int num_scans)
                           ^ ((uint32_t)(g_fx_frame >> 1) * 2246822519u);
         int d = (dxa * (int)wob_env[k] + 64) >> 7;
         d += (int)((hr >> 9) % 3u) - 1;
-        if (d == 0) continue;
-        color_t *lp = dst + (unsigned)n * DISPLAY_WIDTH;
-        if (d > 0) {                               /* shift right */
-            for (int i = DISPLAY_WIDTH - 1; i >= d; i--) lp[i] = lp[i - d];
-            for (int i = d - 1; i >= 0; i--)             lp[i] = 0;
-        } else {                                   /* shift left */
-            for (int i = 0; i < DISPLAY_WIDTH + d; i++) lp[i] = lp[i - d];
-            for (int i = DISPLAY_WIDTH + d; i < DISPLAY_WIDTH; i++)
-                lp[i] = 0;
-        }
+        if (d == 0 || d <= -DISPLAY_WIDTH || d >= DISPLAY_WIDTH) continue;
+        wob_shift_line(dst + (unsigned)n * DISPLAY_WIDTH, d);
     }
 }
 
