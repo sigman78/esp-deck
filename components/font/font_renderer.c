@@ -83,6 +83,8 @@ static DRAM_ATTR size_t           s_glyph_bytes    = 16;
 
 static font_size_t                s_active         = FONT_SIZE_8X16;
 
+static void gcache_init(void);   /* decoded-glyph cache; see below */
+
 #ifndef BUILD_SIMULATOR
 /* Copy one face's range table + idx arrays + pool into internal DRAM so the
  * bounce-buffer ISR can read it while the flash cache is disabled (NVS
@@ -236,6 +238,7 @@ void font_init(font_size_t size)
     ESP_LOGI(TAG, "Font %s ready: %d ranges/%u B pool, %d bold ranges/%u B pool, %u palette entries",
              v->name, s_num_ranges, (unsigned)reg->pool_bytes, s_num_bold,
              (unsigned)(bold ? bold->pool_bytes : 0), (unsigned)reg->palette_len);
+    gcache_init();
 #else
     /* Simulator: data already in normal RAM, no copy needed */
     s_ranges      = reg->ranges;
@@ -448,7 +451,7 @@ static IRAM_ATTR void smear_glyph(void *out)
  * Decode a glyph's bitmap into @p out — IRAM_ATTR, safe to call from the
  * ISR. See font.h for the contract.
  */
-IRAM_ATTR void font_decode_glyph(uint16_t cp, bool bold, void *out)
+static IRAM_ATTR void decode_uncached(uint16_t cp, bool bold, void *out)
 {
 #if FONT_BOLD_ENABLED
     if (bold) {
@@ -473,3 +476,77 @@ IRAM_ATTR void font_decode_glyph(uint16_t cp, bool bold, void *out)
 #endif
     decode_regular(cp, out);
 }
+
+/*
+ * Decoded-glyph cache.
+ *
+ * build_row_cache() decodes every visible cell on every frame — 3000 decodes
+ * per frame at 100x30, ~146k/s at 48.8 Hz — over a distinct set that is almost
+ * always the 95 printable ASCII codepoints. The same glyph is re-decoded
+ * thousands of times a second. Decode it once at init and the per-frame cost
+ * collapses to a short word copy (measured: 293 cyc -> the copy).
+ *
+ * Direct-mapped, no tags: index is (bold, cp - 0x20), so a hit is a bounds
+ * check and an address computation. Non-ASCII and any allocation failure fall
+ * through to decode_uncached(), which is the whole previous implementation.
+ *
+ * Internal DRAM: the bounce ISR reads this with the flash cache disabled.
+ */
+#define GC_FIRST  0x20u
+#define GC_LAST   0x7Eu
+#define GC_N      (GC_LAST - GC_FIRST + 1u)      /* 95 */
+
+static DRAM_ATTR const uint8_t *s_gcache;        /* [2][GC_N][s_glyph_bytes] */
+static uint8_t                 *s_gcache_owned;  /* free()able alias         */
+
+IRAM_ATTR void font_decode_glyph(uint16_t cp, bool bold, void *out)
+{
+    const unsigned i = (unsigned)cp - GC_FIRST;
+    if (s_gcache && i < GC_N) {
+        const uint32_t *src = (const uint32_t *)(s_gcache +
+            (((size_t)(bold ? 1 : 0) * GC_N) + i) * s_glyph_bytes);
+        uint32_t *dst = (uint32_t *)out;
+        const size_t nw = s_glyph_bytes >> 2;    /* 4 / 10 / 12 words */
+        for (size_t w = 0; w < nw; w++)
+            dst[w] = src[w];
+        return;
+    }
+    decode_uncached(cp, bold, out);
+}
+
+#ifndef BUILD_SIMULATOR
+/* Populate the cache for the active size. Costs ~190 decodes once at boot. */
+static void gcache_init(void)
+{
+    /* font_init() is once-per-boot today (a size change needs a reboot), but
+     * do not leave a stale cache behind if that ever changes. */
+    s_gcache = NULL;
+    heap_caps_free(s_gcache_owned);
+    s_gcache_owned = NULL;
+
+    /* The hit path copies whole words; every shipped stride is 16/40/48 B. */
+    if (s_glyph_bytes & 3u) {
+        ESP_LOGW(TAG, "glyph stride %u not word-multiple - cache disabled",
+                 (unsigned)s_glyph_bytes);
+        return;
+    }
+
+    const size_t bytes = (size_t)GC_N * 2u * s_glyph_bytes;
+    uint8_t *buf = heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!buf) {
+        ESP_LOGW(TAG, "No DRAM for glyph cache (%u B) - decoding per frame",
+                 (unsigned)bytes);
+        return;
+    }
+    for (unsigned b = 0; b < 2; b++)
+        for (unsigned i = 0; i < GC_N; i++)
+            decode_uncached((uint16_t)(GC_FIRST + i), b != 0,
+                            buf + (((size_t)b * GC_N) + i) * s_glyph_bytes);
+    s_gcache_owned = buf;
+    s_gcache       = buf;
+    ESP_LOGI(TAG, "Glyph cache: %u B (2 x %u x %u B)",
+             (unsigned)bytes, (unsigned)GC_N, (unsigned)s_glyph_bytes);
+}
+#else
+static void gcache_init(void) { s_gcache = NULL; }
+#endif
