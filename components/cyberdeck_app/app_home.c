@@ -7,6 +7,7 @@
 #include "app_screens.h"
 #include "app_widgets.h"
 #include "display_fx.h"
+#include "font.h"        /* dynamic sprite glyphs — the Pac-Man marquee */
 #include "keystore.h"
 #include "wifi_manager.h"
 
@@ -39,6 +40,114 @@ static int home_extras(home_extra_t *out)
     if (s_ks_present)                   out[n++] = HX_LOCK;  /* panic button   */
     out[n++] = HX_CONFIG;                                    /* always, last   */
     return n;
+}
+
+/* ── Pac-Man marquee — the dynamic-sprite-glyph showcase ─────────────────
+ *
+ * Three sprite slots animate a Pac-Man chomping across a row of pellets at
+ * PIXEL resolution: as he slides (4 px per 100 ms tick) his one-cell-wide
+ * body straddles two character cells, so slot TAIL carries the part still
+ * in the left cell (art >> k) and slot HEAD the part entering the right
+ * cell (art << (W-k)) — with the pellet composited into HEAD until the
+ * mouth front crosses its center. Slot DOT is the static pellet placed in
+ * every cell ahead; cells behind stay blank (eaten). When he exits the
+ * right edge the whole run wraps and the pellets respawn.
+ *
+ * Sprite slots are a global resource — record every taker here until an
+ * allocator exists. Art is predefined per font size (bit W-1 = leftmost,
+ * disc vertically centered in the cell), generated offline, embedded. */
+enum { SPR_PAC_TAIL = 0, SPR_PAC_HEAD = 1, SPR_PAC_DOT = 2 };
+
+static const uint16_t pac_open_8[]  = { 0x000, 0x000, 0x000, 0x000, 0x03C,
+    0x07C, 0x0F8, 0x0F0, 0x0F0, 0x0F8, 0x07C, 0x03C, 0x000, 0x000, 0x000,
+    0x000 };
+static const uint16_t pac_shut_8[]  = { 0x000, 0x000, 0x000, 0x000, 0x03C,
+    0x07E, 0x0FF, 0x0FF, 0x0FF, 0x0FF, 0x07E, 0x03C, 0x000, 0x000, 0x000,
+    0x000 };
+static const uint16_t pac_dot_8[]   = { 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x018, 0x018, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000 };
+
+static const uint16_t pac_open_10[] = { 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x078, 0x1FC, 0x1E8, 0x3F0, 0x3E0, 0x3E0, 0x3F0, 0x1F8, 0x1FC, 0x078,
+    0x000, 0x000, 0x000, 0x000, 0x000 };
+static const uint16_t pac_shut_10[] = { 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x078, 0x1FE, 0x1EE, 0x3FF, 0x3FF, 0x3FF, 0x3FF, 0x1FE, 0x1FE, 0x078,
+    0x000, 0x000, 0x000, 0x000, 0x000 };
+static const uint16_t pac_dot_10[]  = { 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x030, 0x030, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000 };
+
+static const uint16_t pac_open_12[] = { 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x0F0, 0x3FC, 0x7F8, 0x7D0, 0xFE0, 0xFC0, 0xFC0, 0xFE0, 0x7F0,
+    0x7F8, 0x3FC, 0x0F0, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000 };
+static const uint16_t pac_shut_12[] = { 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x0F0, 0x3FC, 0x7FE, 0x7DE, 0xFFF, 0xFFF, 0xFFF, 0xFFF, 0x7FE,
+    0x7FE, 0x3FC, 0x0F0, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000 };
+static const uint16_t pac_dot_12[]  = { 0x000, 0x000, 0x000, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x0E0, 0x0E0, 0x0E0, 0x000, 0x000,
+    0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000 };
+
+/* Pack uint16 row values into the active size's sprite row layout. */
+static void sprite_set_rows16(unsigned slot, const uint16_t *rows)
+{
+    uint8_t buf[FONT_MAX_GLYPH_BYTES];
+    const int h = font_height();
+    if (FONT_ROW_BYTES(font_width()) == 1) {
+        for (int r = 0; r < h; r++)
+            buf[r] = (uint8_t)rows[r];
+    } else {
+        for (int r = 0; r < h; r++) {
+            buf[2 * r]     = (uint8_t)rows[r];        /* u16 rows, LE */
+            buf[2 * r + 1] = (uint8_t)(rows[r] >> 8);
+        }
+    }
+    font_sprite_set(slot, buf);
+}
+
+static void draw_pacman(int row)
+{
+    const int W = font_width(), H = font_height(), cols = ui_cols();
+    const uint16_t *art, *dot;
+    switch (W) {
+    case 10: art = (app.anim_frame & 2) ? pac_shut_10 : pac_open_10;
+             dot = pac_dot_10; break;
+    case 12: art = (app.anim_frame & 2) ? pac_shut_12 : pac_open_12;
+             dot = pac_dot_12; break;
+    default: art = (app.anim_frame & 2) ? pac_shut_8  : pac_open_8;
+             dot = pac_dot_8;  break;
+    }
+
+    /* Left edge in strip pixels; +W of runout so he fully exits first. */
+    const int span = (cols + 1) * W;
+    const int px   = (int)((app.anim_frame * 4u) % (unsigned)span);
+    const int ci   = px / W, k = px % W;
+    const unsigned wmask = (1u << W) - 1u;
+    /* The pellet ahead survives until the mouth front crosses its center. */
+    const bool dot_alive = k <= W / 2;
+
+    uint16_t t[FONT_MAX_GLYPH_BYTES / 2];
+    for (int r = 0; r < H; r++)
+        t[r] = (uint16_t)(art[r] >> k);
+    sprite_set_rows16(SPR_PAC_TAIL, t);
+    for (int r = 0; r < H; r++) {
+        unsigned v = k ? (unsigned)(art[r] << (W - k)) & wmask : 0u;
+        if (dot_alive)
+            v |= dot[r];
+        t[r] = (uint16_t)v;
+    }
+    sprite_set_rows16(SPR_PAC_HEAD, t);
+    sprite_set_rows16(SPR_PAC_DOT, dot);
+
+    ui_pen(OVERLAY_COL_AMBER);
+    if (ci < cols)
+        ui_putch(ci, row, font_sprite_cp(SPR_PAC_TAIL), 0);
+    if (ci + 1 < cols)
+        ui_putch(ci + 1, row, font_sprite_cp(SPR_PAC_HEAD), 0);
+    ui_pen(OVERLAY_COL_BLUE);
+    for (int x = ci + 2; x < cols; x++)
+        ui_putch(x, row, font_sprite_cp(SPR_PAC_DOT), 0);
+    ui_pen(OVERLAY_COL_DEFAULT);
 }
 
 /* Little ● / ○ LED then a label + value; returns the column just past the
@@ -200,6 +309,9 @@ void render_home(void)
                 "no profiles - edit profiles.ini in storage", 0);
         ui_pen(OVERLAY_COL_DEFAULT);
     }
+
+    /* Pac-Man marquee just above the footer — the sprite-glyph showcase. */
+    draw_pacman(ui_rows() - 2);
 
     /* Footer legend; pairing hints only when the build has BLE, the lock
      * hotkey only with a keystore. An active toast owns the right edge —
