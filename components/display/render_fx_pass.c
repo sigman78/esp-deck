@@ -129,70 +129,32 @@ IRAM_ATTR void render_fx_clip_apply(color_t *dst, int band_y0, int num_scans,
 }
 
 /*
- * Shift one rendered scanline horizontally by @p d pixels, in place, filling
- * the vacated edge with black. Positive d moves content right.
+ * CRT line wobble — a ~16-scanline S-wiggle sweeping down the screen, at most
+ * 16 displaced lines per frame.
  *
- * RGB565 packs two pixels per 32-bit word, so the displacement splits into two
- * cases and BOTH stay 32-bit aligned — the naive per-pixel `lp[i] = lp[i-d]`
- * moved one 16-bit pixel at a time and cost 6 cyc/px (8 instructions, both
- * addresses recomputed every iteration; see docs/speedupsall.md):
+ * Rather than rendering straight and shifting afterwards, the displacement is
+ * handed to the scan as a per-scanline destination WORD offset, so the pixels
+ * land wobbled the first time they are written and the shift pass disappears.
+ * That converts a ~37,000-cycle spike on one band per frame into a few cycles
+ * on every band.
  *
- *   even d   a whole number of words — one load + one store per two pixels.
- *   odd  d   source and destination sit a half-word apart, so each output word
- *            is a funnel shift of two adjacent input words:
- *                out[i] = (w[j] >> 16) | (w[j+1] << 16)
- *            which Xtensa can issue as SSAI 16 + SRC.
+ * The catch, and why displacement is quantised to even pixels: RGB565 packs two
+ * pixels per 32-bit word, so an ODD displacement is a half-word offset that no
+ * pointer arithmetic can express — it would force the scan to straddle pixel
+ * pairs across cell boundaries. Even displacement is a plain word offset. The
+ * cost is that the wiggle steps in 2 px increments instead of 1, which on an
+ * 800 px panel is below the noise floor of a deliberately glitchy effect.
  *
- * The copy overlaps itself, so iteration order follows the sign of d: right
- * shifts walk down, left shifts walk up. |d| is bounded by the wobble
- * amplitude (<= 8 px) and asserted well inside one line.
+ * Fills @p out with one word offset per scanline of the band and returns true
+ * if any is non-zero (false lets the scan take its untouched fast path).
  */
-#define WOB_NW  (DISPLAY_WIDTH / 2)   /* 32-bit words per scanline (400) */
-
-static IRAM_ATTR void wob_shift_line(color_t *lp, int d)
+IRAM_ATTR bool render_fx_wobble_offsets(int start_scan, int num_scans, int8_t *out)
 {
-    uint32_t *const w = (uint32_t *)lp;
+    for (int i = 0; i < num_scans; i++)
+        out[i] = 0;
 
-    if ((d & 1) == 0) {                       /* ---- word-aligned move ---- */
-        const int k = d >> 1;
-        if (k > 0) {
-            RENDER_UNROLL
-            for (int i = WOB_NW - 1; i >= k; i--) w[i] = w[i - k];
-            for (int i = k - 1; i >= 0; i--)      w[i] = 0;
-        } else {
-            const int kk = -k;
-            RENDER_UNROLL
-            for (int i = 0; i < WOB_NW - kk; i++)      w[i] = w[i + kk];
-            for (int i = WOB_NW - kk; i < WOB_NW; i++) w[i] = 0;
-        }
-        return;
-    }
-
-    /* ---- odd: funnel shift. k = floor((d-1)/2) via arithmetic shift ---- */
-    const int k = (d - 1) >> 1;
-    if (d > 0) {
-        RENDER_UNROLL
-        for (int i = WOB_NW - 1; i > k; i--)
-            w[i] = (w[i - k - 1] >> 16) | (w[i - k] << 16);
-        w[k] = w[0] << 16;                    /* boundary: high half is black */
-        for (int i = k - 1; i >= 0; i--) w[i] = 0;
-    } else {
-        const int last = WOB_NW - 1 + k;      /* k < 0 */
-        RENDER_UNROLL
-        for (int i = 0; i <= last; i++)
-            w[i] = (w[i - k - 1] >> 16) | (w[i - k] << 16);
-        w[last + 1] = w[WOB_NW - 1] >> 16;    /* boundary: low half is black */
-        for (int i = last + 2; i < WOB_NW; i++) w[i] = 0;
-    }
-}
-
-/* CRT line wobble — a ~16-scanline S-wiggle sweeping down the screen, at
- * most 16 shifted lines per frame. The shift is in-place WITHIN the line:
- * an offset render origin would spill across band boundaries. */
-IRAM_ATTR void render_fx_wobble(color_t *dst, int start_scan, int num_scans)
-{
     if (!g_fx_snap.wobble)
-        return;
+        return false;
 
     /* wob_env = sin(2*pi*(k+1)/17)*127: one full vertical period. dxa adds
      * ±25% amplitude drift (~10 Hz LCG); yc walks the wiggle top down the
@@ -206,18 +168,22 @@ IRAM_ATTR void render_fx_wobble(color_t *dst, int start_scan, int num_scans)
     const int dxa = (dx * (12 + (int)((hf >> 7) & 7))) >> 4;
     const int yc = (int)(((unsigned)g_fx_frame * 5u) >> 1);
     const int n0 = yc - start_scan;
+    bool any = false;
     for (int k = 0; k < 16 && dx != 0; k++) {
         const int n = n0 + k;
         if (n < 0 || n >= num_scans) continue;     /* other band / off */
-        /* ±1 px jitter hashed from absolute y + frame — sub-row bands of
-         * one frame agree at their seam. */
+        /* ±2 px jitter hashed from absolute y + frame — sub-row bands of
+         * one frame agree at their seam. Even, like the envelope term. */
         const uint32_t hr = ((uint32_t)(start_scan + n) * 2654435761u)
                           ^ ((uint32_t)(g_fx_frame >> 1) * 2246822519u);
         int d = (dxa * (int)wob_env[k] + 64) >> 7;
-        d += (int)((hr >> 9) % 3u) - 1;
-        if (d == 0 || d <= -DISPLAY_WIDTH || d >= DISPLAY_WIDTH) continue;
-        wob_shift_line(dst + (unsigned)n * DISPLAY_WIDTH, d);
+        d = (d / 2) * 2;                           /* truncate toward zero */
+        d += ((int)((hr >> 9) % 3u) - 1) * 2;
+        if (d <= -DISPLAY_WIDTH || d >= DISPLAY_WIDTH) continue;
+        out[n] = (int8_t)(d / 2);                  /* pixels -> words */
+        any |= out[n] != 0;
     }
+    return any;
 }
 
 /* Signal-loss static burst — grayscale snow on a few pseudo-random
