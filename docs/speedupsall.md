@@ -641,24 +641,40 @@ disproportionate share of what was removed was stack traffic rather than ALU.
 
 ### Glyph cache — decode removed (2026-08-21)
 
-Same rule as the LUT, applied to the decoder: 3000 decodes per frame over ~95
-distinct ASCII codepoints. Decode once at `font_init`, direct-mapped by
-`(bold, cp - 0x20)`, hit = a word copy.
+Same rule as the LUT applied to the decoder: 3000 decodes per frame over a
+distinct set far smaller than the font. Terminus ships ~1470 glyphs (70 KB at
+12x24 if cached outright), so the cache is **bounded and associative**:
+256 entries, 2-way, round-robin replacement, keyed on `(bold, cp)`.
 
 | dense, worst chunk | 8x16 | 10x20 |
 |---|---|---|
-| `off` | 360 → **245 us** (−31.9%) | 260 → **170 us** (−34.7%) |
-| `bold` | 373 → 248 us (−33.5%) | 269 → 172 us (−36.0%) |
-| `fx:app` | 404 → **294 us** (−27.2%) | 278 → **187 us** (−32.6%) |
+| `off` (ASCII) | 360 → **246 us** (−31.7%) | 260 → **171 us** (−34.2%) |
+| `t:mix160` (TUI repertoire) | 370 → **250 us** (−32.5%) | — → 172 us |
 | `t:blank` | 233 → 233 us (0.0%) | 171 → 171 us (0.0%) |
 
-Decode: **293 → 29.8 cyc/glyph**, share of band **34.8% → 3.5%**. At 10x20
-`off` (170) now sits ON `t:blank` (171) — a cached decode is a 40 B word copy,
-the blank path a 40 B word fill, so dense content costs what a blank screen
-does. `bold` collapses onto `dense`, the synthesize-and-smear penalty gone.
+An ASCII-only cache was tried first and rejected: it left every box-drawing and
+accented cell decoding, costing **+51%** on a TUI-shaped screen (370 vs 245 us).
+The associative version brings non-ASCII to **within 4 us of pure ASCII** while
+the ASCII path pays only **+0.6%** for the hash and tag compare.
 
-Costs 2 x 95 x glyph_bytes internal DRAM (3.0 / 7.6 / 9.1 KB by size);
-allocation failure degrades to the old path.
+**Sizing** (`t:mixNNN` phases — distinct codepoints vs worst band):
+
+| distinct | 8x16 | 10x20 |
+|---|---|---|
+| 160 (realistic TUI) | 250 us (+1.6%) | 172 us (+0.6%) |
+| 320 (1.25x capacity) | 273 us (+11%) | 197 us (+15%) |
+| 510 (2x capacity) | 404 us (+64%) | 266 us (+55%) |
+
+No cliff: an overflowing set costs one decode for the loser, not a cascade,
+amortised over 3000 cells. Even 510 distinct — a font chart, not a terminal —
+sits at 65% of the 20 MHz deadline. 256 entries is the right size.
+
+Why not true LRU: it needs a recency write on every hit, 3000 ISR-context
+stores per frame, to improve a case already under 1%. Round-robin advances a
+per-set bit only on fill, so hits stay read-only.
+
+Costs 5.1 / 11.3 / 13.3 KB internal DRAM by size; allocation failure degrades
+to decoding per frame.
 
 ### Where that leaves pclk
 
