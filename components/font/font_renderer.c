@@ -478,51 +478,97 @@ static IRAM_ATTR void decode_uncached(uint16_t cp, bool bold, void *out)
 }
 
 /*
- * Decoded-glyph cache.
+ * Decoded-glyph cache — 2-way set associative, bounded.
  *
- * build_row_cache() decodes every visible cell on every frame — 3000 decodes
- * per frame at 100x30, ~146k/s at 48.8 Hz — over a distinct set that is almost
- * always the 95 printable ASCII codepoints. The same glyph is re-decoded
- * thousands of times a second. Decode it once at init and the per-frame cost
- * collapses to a short word copy (measured: 293 cyc -> the copy).
+ * build_row_cache() decodes every visible cell on every frame: 3000 decodes
+ * per frame at 100x30, ~146k/s at 48.8 Hz, over a distinct set far smaller
+ * than the font (Terminus ships ~1470 glyphs; caching all of them would cost
+ * 70 KB at 12x24). So: cache a bounded working set and evict.
  *
- * Direct-mapped, no tags: index is (bold, cp - 0x20), so a hit is a bounds
- * check and an address computation. Non-ASCII and any allocation failure fall
- * through to decode_uncached(), which is the whole previous implementation.
+ * Sized at 256 entries. A realistic TUI screen — ASCII plus box drawing,
+ * blocks and accents — is roughly 130-190 distinct glyphs including bold, so
+ * 256 leaves headroom without thrashing. Overflow is graceful rather than
+ * cliff-edged: a set that overflows costs one decode for the loser, not a
+ * cascade, and there are 3000 cells to amortise it over.
  *
- * Internal DRAM: the bounce ISR reads this with the flash cache disabled.
+ * 2-way, not direct-mapped: with ~150 items in 256 direct-mapped slots the
+ * birthday bound says ~44% of them would share a slot with something else.
+ * Two ways drops the overflow probability (3+ items landing in one set) to
+ * ~12% of sets. 4-way would be better still but costs more tag compares on
+ * every hit, and 2-way already puts the miss cost under 1% of the band.
+ *
+ * Replacement is round-robin per set, flipped only when a line is FILLED.
+ * True LRU would need a recency write on every hit — 3000 stores per frame in
+ * ISR context — to improve a case that is already under 1%. Not worth it.
+ *
+ * Filled lazily; the first frame warms it. Internal DRAM: the bounce ISR reads
+ * this with the flash cache disabled.
  */
-#define GC_FIRST  0x20u
-#define GC_LAST   0x7Eu
-#define GC_N      (GC_LAST - GC_FIRST + 1u)      /* 95 */
+#define GC_SETS_LOG 7u
+#define GC_SETS     (1u << GC_SETS_LOG)          /* 128 */
+#define GC_WAYS     2u
+#define GC_ENT      (GC_SETS * GC_WAYS)          /* 256 */
+#define GC_EMPTY    0xFFFFFFFFu                  /* keys are <= 0x1FFFF */
 
-static DRAM_ATTR const uint8_t *s_gcache;        /* [2][GC_N][s_glyph_bytes] */
-static uint8_t                 *s_gcache_owned;  /* free()able alias         */
+static DRAM_ATTR uint32_t *s_gc_tag;             /* [GC_ENT]                  */
+static DRAM_ATTR uint8_t  *s_gc_bits;            /* [GC_SETS/8] victim bits   */
+static DRAM_ATTR uint8_t  *s_gc_data;            /* [GC_ENT][s_glyph_bytes]   */
+static uint8_t            *s_gc_owned;           /* single free()able block   */
+
+/* Round-robin victim, advanced only on fill so hits stay read-only. */
+static IRAM_ATTR unsigned gc_victim(unsigned set)
+{
+    const unsigned byte = set >> 3, bit = 1u << (set & 7u);
+    const unsigned w = (s_gc_bits[byte] & bit) ? 1u : 0u;
+    s_gc_bits[byte] ^= (uint8_t)bit;
+    return w;
+}
+
+static IRAM_ATTR unsigned gc_fill(unsigned set, uint32_t key,
+                                  uint16_t cp, bool bold)
+{
+    uint32_t *const tg = s_gc_tag + set * GC_WAYS;
+    unsigned way;
+    if      (tg[0] == GC_EMPTY) way = 0;         /* warm-up: take a free way */
+    else if (tg[1] == GC_EMPTY) way = 1;
+    else                        way = gc_victim(set);
+    decode_uncached(cp, bold,
+                    s_gc_data + (size_t)(set * GC_WAYS + way) * s_glyph_bytes);
+    tg[way] = key;
+    return way;
+}
 
 IRAM_ATTR void font_decode_glyph(uint16_t cp, bool bold, void *out)
 {
-    const unsigned i = (unsigned)cp - GC_FIRST;
-    if (s_gcache && i < GC_N) {
-        const uint32_t *src = (const uint32_t *)(s_gcache +
-            (((size_t)(bold ? 1 : 0) * GC_N) + i) * s_glyph_bytes);
-        uint32_t *dst = (uint32_t *)out;
-        const size_t nw = s_glyph_bytes >> 2;    /* 4 / 10 / 12 words */
-        for (size_t w = 0; w < nw; w++)
-            dst[w] = src[w];
+    if (!s_gc_tag) {
+        decode_uncached(cp, bold, out);
         return;
     }
-    decode_uncached(cp, bold, out);
+    const uint32_t key = (uint32_t)cp | (bold ? 0x10000u : 0u);
+    const unsigned set = (unsigned)((key * 2654435761u) >> (32u - GC_SETS_LOG));
+    uint32_t *const tg = s_gc_tag + set * GC_WAYS;
+
+    unsigned way;
+    if      (tg[0] == key) way = 0;
+    else if (tg[1] == key) way = 1;
+    else                   way = gc_fill(set, key, cp, bold);
+
+    const uint32_t *src = (const uint32_t *)(s_gc_data +
+        (size_t)(set * GC_WAYS + way) * s_glyph_bytes);
+    uint32_t *dst = (uint32_t *)out;
+    const size_t nw = s_glyph_bytes >> 2;        /* 4 / 10 / 12 words */
+    for (size_t w = 0; w < nw; w++)
+        dst[w] = src[w];
 }
 
 #ifndef BUILD_SIMULATOR
-/* Populate the cache for the active size. Costs ~190 decodes once at boot. */
 static void gcache_init(void)
 {
     /* font_init() is once-per-boot today (a size change needs a reboot), but
      * do not leave a stale cache behind if that ever changes. */
-    s_gcache = NULL;
-    heap_caps_free(s_gcache_owned);
-    s_gcache_owned = NULL;
+    s_gc_tag = NULL; s_gc_bits = NULL; s_gc_data = NULL;
+    heap_caps_free(s_gc_owned);
+    s_gc_owned = NULL;
 
     /* The hit path copies whole words; every shipped stride is 16/40/48 B. */
     if (s_glyph_bytes & 3u) {
@@ -531,22 +577,28 @@ static void gcache_init(void)
         return;
     }
 
-    const size_t bytes = (size_t)GC_N * 2u * s_glyph_bytes;
-    uint8_t *buf = heap_caps_malloc(bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t tag_b  = (size_t)GC_ENT * sizeof(uint32_t);
+    const size_t bits_b = GC_SETS / 8u;
+    const size_t data_b = (size_t)GC_ENT * s_glyph_bytes;
+    uint8_t *buf = heap_caps_malloc(tag_b + bits_b + data_b,
+                                    MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!buf) {
         ESP_LOGW(TAG, "No DRAM for glyph cache (%u B) - decoding per frame",
-                 (unsigned)bytes);
+                 (unsigned)(tag_b + bits_b + data_b));
         return;
     }
-    for (unsigned b = 0; b < 2; b++)
-        for (unsigned i = 0; i < GC_N; i++)
-            decode_uncached((uint16_t)(GC_FIRST + i), b != 0,
-                            buf + (((size_t)b * GC_N) + i) * s_glyph_bytes);
-    s_gcache_owned = buf;
-    s_gcache       = buf;
-    ESP_LOGI(TAG, "Glyph cache: %u B (2 x %u x %u B)",
-             (unsigned)bytes, (unsigned)GC_N, (unsigned)s_glyph_bytes);
+    s_gc_owned = buf;
+    s_gc_tag   = (uint32_t *)buf;                /* 4-aligned by malloc */
+    s_gc_bits  = buf + tag_b;
+    s_gc_data  = buf + tag_b + bits_b;           /* tag_b+bits_b = 1040, 4-aligned */
+
+    for (unsigned i = 0; i < GC_ENT; i++) s_gc_tag[i] = GC_EMPTY;
+    for (unsigned i = 0; i < bits_b; i++) s_gc_bits[i] = 0;
+
+    ESP_LOGI(TAG, "Glyph cache: %u B, %u sets x %u ways x %u B",
+             (unsigned)(tag_b + bits_b + data_b), (unsigned)GC_SETS,
+             (unsigned)GC_WAYS, (unsigned)s_glyph_bytes);
 }
 #else
-static void gcache_init(void) { s_gcache = NULL; }
+static void gcache_init(void) { s_gc_tag = NULL; }
 #endif
