@@ -589,6 +589,56 @@ Derived: **10.49 → 6.56 cyc/px**, core-1 duty **65.5% → 40.9%**, fps ceiling
 **59.6 → 95.4**. Costs 3.2 KB internal DRAM (`pr[2][100][4]`); D/IRAM 50.8%,
 168 KB free. `bg[]`/`xf[]` stay for the underline pass.
 
+### Why it is faster — the assembly (tools/asmdiff.py)
+
+Both revisions compiled with identical flags, `render_scan_band` compared
+(`scan_band_8x16` inlines into it when one size is linked):
+
+| | instrs | regs | frame | spill st | spill ld | **pixel st** | useful ld |
+|---|---|---|---|---|---|---|---|
+| before (`scan_gpair`) | 2142 | 18 | 112 B | 108 | 217 | **105** | 43 |
+| after (pair LUT) | **1226** | 17 | **80 B** | 56 | 112 | **105** | 133 |
+
+**Pixel stores are identical (105 -> 105)** — same output, so this is pure
+efficiency, not less work.
+
+Per pixel pair (one 32-bit store), the emitted code goes 11 instructions -> 4:
+
+```
+BEFORE                              AFTER
+  extui a13, a12, 4, 1                extui  a3, a11, 4, 2   ; BOTH bits, one index
+  extui a15, a12, 5, 1                addx4  a3, a3, a14     ; LUT base + idx*4
+  neg   a13, a13                      l32i.n a3, a3, 0       ; precomputed pair
+  neg   a15, a15                      s32i.n a3, a8, 4
+  and   a13, a14, a13
+  and   a15, a14, a15
+  xor   a13, a11, a13
+  xor   a15, a11, a15
+  slli  a13, a13, 16
+  or    a13, a13, a15
+  s32i.n a13, a10, 4
+```
+
+Two causes, and they compound:
+
+1. **Instruction count in the emit: 11 -> 4 per pair (2.75x).** Extracting the
+   two glyph bits as a single 2-bit index instead of two 1-bit masks removes
+   the whole `neg`/`and`/`xor`/`slli`/`or` chain. Opcode deltas across the
+   function: `and` -192, `xor` -192, `neg` -186, `or` -96, `slli` -82, against
+   `addx4` +96 for the indexing.
+2. **Register pressure — the live set per cell HALVES.** The paired-column
+   loop had to keep `bg0, xf0, bg1, xf1` live at once; now it keeps two LUT
+   base pointers `t0, t1`. Two fewer live values per cell pair is exactly what
+   was spilling: frame 112 -> 80 B, stack traffic 325 -> 168 accesses (-48%).
+
+The second effect is why the LUT's loads are free: **+90 useful loads replaced
+-157 spill accesses**, a net -67 memory operations. The LUT reads land in the
+slots the spill reloads vacated.
+
+Instruction count -42.8% predicts the measurement well: `t:blank` (pure scan,
+no decode) came in at -47.2%, slightly better than the count alone, because a
+disproportionate share of what was removed was stack traffic rather than ALU.
+
 ### Where that leaves pclk
 
 Band utilisation with the shipped fx config, after the whole 2026-08-21 arc:
