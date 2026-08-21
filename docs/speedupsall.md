@@ -659,15 +659,29 @@ the ASCII path pays only **+0.6%** for the hash and tag compare.
 
 **Sizing** (`t:mixNNN` phases — distinct codepoints vs worst band):
 
-| distinct | 8x16 | 10x20 |
+| phase | 8x16 (100x30) | 10x20 (80x24) |
 |---|---|---|
-| 160 (realistic TUI) | 250 us (+1.6%) | 172 us (+0.6%) |
-| 320 (1.25x capacity) | 273 us (+11%) | 197 us (+15%) |
-| 510 (2x capacity) | 404 us (+64%) | 266 us (+55%) |
+| `t:mix160` — 160 distinct, 0.62x cap | 250 us (+1.6%) | 172 us (+0.6%) |
+| `t:mix320` — 320 distinct, 1.25x cap | 273 us (+11%) | 197 us (+15%) |
+| `t:mix510` — see note | 404 us (+64%) | 266 us (+55%) |
+
+> **`span` is a cap, not the distinct count.** The generator walks
+> `r*13 + c`, so the working set is `rows*13 + cols` bounded by span. At 160
+> and 320 both grids see the full span and are comparable. At 510 they are
+> **not**: 8x16 reaches **477 distinct (1.86x capacity)** while 10x20 reaches
+> only **379 (1.48x)**, which is why 8x16 looks so much worse in that row. It
+> is a benchmark artifact, not a property of the cache — at 320, where both
+> grids see the same 320 glyphs, **10x20 is the worse of the two**.
+
+`tools/cachesim.py` replays the exact access pattern against the cache model
+and predicts max misses/row of 97 (8x16) vs 70 (10x20) at `t:mix510`, ratio
+1.39 against a measured cycle-delta ratio of 1.65 — the residual being
+per-glyph decode variance.
 
 No cliff: an overflowing set costs one decode for the loser, not a cascade,
-amortised over 3000 cells. Even 510 distinct — a font chart, not a terminal —
-sits at 65% of the 20 MHz deadline. 256 entries is the right size.
+amortised over 3000 cells. Even the deepest case measured (477 distinct — a
+font chart, not a terminal) sits at 65% of the 20 MHz deadline. 256 entries is
+the right size.
 
 Why not true LRU: it needs a recency write on every hit, 3000 ISR-context
 stores per frame, to improve a case already under 1%. Round-robin advances a
