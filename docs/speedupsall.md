@@ -564,6 +564,49 @@ grounds and that still holds, but it does **not** help this problem. A blank-cel
 fast path only pays on content that has blanks, and the deadline is set by worst-case
 dense content where there are none.
 
+## Pixel-pair LUT — the scan rewrite (measured 2026-08-21)
+
+The scan's inner loop recomputed `bg ^ (xf & mask)` per pixel per scanline. A
+cell has only **two** colours, so a pixel pair has only **four** possible
+outcomes — precompute them per cell once per ROW and index with the glyph's two
+bits. Per output word: ~10 ALU ops become one `extui` plus one indexed load.
+
+```c
+d[p >> 1] = t0[(b0 >> (W - 2 - p)) & 3];   /* bit 1 = left px, bit 0 = right */
+```
+
+| dense, worst chunk | 8x16 [820 us] | 10x20 [512.5 us] |
+|---|---|---|
+| `off` | 567 → **360 us** (−36.5%) | 391 → **260 us** (−33.4%) |
+| `bold` | 581 → 373 us (−35.7%) | 421 → 269 us (−36.1%) |
+| `fx:app` | 602 → **404 us** (−32.8%) | 401 → **278 us** (−30.7%) |
+| `t:blank` | 441 → 233 us (−47.2%) | 296 → 171 us (−42.3%) |
+
+`t:blank` falls hardest — it is pure scan with no decode, so it shows the win
+undiluted. That is the control.
+
+Derived: **10.49 → 6.56 cyc/px**, core-1 duty **65.5% → 40.9%**, fps ceiling
+**59.6 → 95.4**. Costs 3.2 KB internal DRAM (`pr[2][100][4]`); D/IRAM 50.8%,
+168 KB free. `bg[]`/`xf[]` stay for the underline pass.
+
+### Where that leaves pclk
+
+Band utilisation with the shipped fx config, after the whole 2026-08-21 arc:
+
+| pclk | refresh | 8x16 band | 10x20 band | verdict |
+|---|---|---|---|---|
+| 16 MHz | 39.0 Hz | 49% | 54% | current, lots of margin |
+| **20 MHz** | **48.8 Hz** | **62%** | **68%** | **comfortable** |
+| 26.67 MHz | 65.0 Hz | 82% | 90% | arguable, tight at 10x20 |
+| 32 MHz | 78.0 Hz | 99% | 108% | no |
+
+At the start of this branch those first two rows read 109%/122% and were both
+over the deadline. **20 MHz is now a config change, not a project.**
+
+Remaining levers, in order: ASCII glyph cache (decode is still ~31% of the
+worst band), prebuild task (levels the 23–28% avg/max spread at the half-row
+sizes), then PIE SIMD inside that task.
+
 ## ESP32-S3 memory-access rules (measured 2026-08-21)
 
 On-device microbenchmark (`membench` in `bench_stress.c`), internal SRAM,
