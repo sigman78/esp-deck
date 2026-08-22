@@ -251,8 +251,8 @@ Command escape) string through a clean callback (`cb.osc`), so a private
 sequence is a first-class hook:
 
     # remote helper, ~2 lines of shell profile:
-    deckget() { printf '\e]7777;fetch;%s' "$(realpath "$1")"; }
-    deckput() { printf '\e]7777;offer;%s' "$(realpath "$1")"; }
+    deckget() { printf '\e]7777;fetch;%s\a' "$(realpath "$1")"; }
+    deckput() { printf '\e]7777;offer;%s\a' "$(realpath "$1")"; }
 
 The OSC handler pops a local confirm toast ("fetch /path (12 KB)?"); on
 accept, the ssh task opens `libssh2_sftp_open` on the live session and
