@@ -88,34 +88,33 @@ static const uint16_t pac_dot_12[]  = { 0x000, 0x000, 0x000, 0x000, 0x000,
     0x000, 0x000, 0x000, 0x000, 0x000, 0x0E0, 0x0E0, 0x0E0, 0x000, 0x000,
     0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000 };
 
-/* Pack uint16 row values into the active size's sprite row layout. */
-static void sprite_set_rows16(unsigned slot, const uint16_t *rows)
+/* The static pellet is (re)loaded on HOME entry, not per tick: a per-tick
+ * set would invalidate its glyph-cache line and force the ISR to re-decode
+ * the most-shared sprite on screen every frame for nothing. */
+static bool s_pac_dot_ready;
+
+static const uint16_t *pac_dot_art(void)
 {
-    uint8_t buf[FONT_MAX_GLYPH_BYTES];
-    const int h = font_height();
-    if (FONT_ROW_BYTES(font_width()) == 1) {
-        for (int r = 0; r < h; r++)
-            buf[r] = (uint8_t)rows[r];
-    } else {
-        for (int r = 0; r < h; r++) {
-            buf[2 * r]     = (uint8_t)rows[r];        /* u16 rows, LE */
-            buf[2 * r + 1] = (uint8_t)(rows[r] >> 8);
-        }
+    switch (font_width()) {
+    case 10: return pac_dot_10;
+    case 12: return pac_dot_12;
+    default: return pac_dot_8;
     }
-    font_sprite_set(slot, buf);
 }
 
 static void draw_pacman(int row)
 {
     const int W = font_width(), H = font_height(), cols = ui_cols();
-    const uint16_t *art, *dot;
+    const uint16_t *art, *dot = pac_dot_art();
     switch (W) {
-    case 10: art = (app.anim_frame & 2) ? pac_shut_10 : pac_open_10;
-             dot = pac_dot_10; break;
-    case 12: art = (app.anim_frame & 2) ? pac_shut_12 : pac_open_12;
-             dot = pac_dot_12; break;
-    default: art = (app.anim_frame & 2) ? pac_shut_8  : pac_open_8;
-             dot = pac_dot_8;  break;
+    case 10: art = (app.anim_frame & 2) ? pac_shut_10 : pac_open_10; break;
+    case 12: art = (app.anim_frame & 2) ? pac_shut_12 : pac_open_12; break;
+    default: art = (app.anim_frame & 2) ? pac_shut_8  : pac_open_8;  break;
+    }
+
+    if (!s_pac_dot_ready) {
+        font_sprite_set_rows16(SPR_PAC_DOT, dot);
+        s_pac_dot_ready = true;
     }
 
     /* Left edge in strip pixels; +W of runout so he fully exits first. */
@@ -126,18 +125,24 @@ static void draw_pacman(int row)
     /* The pellet ahead survives until the mouth front crosses its center. */
     const bool dot_alive = k <= W / 2;
 
-    uint16_t t[FONT_MAX_GLYPH_BYTES / 2];
+    /* Sized in ROWS: glyph_bytes >= height at every size (uint16 per row
+     * regardless of the packed byte width — a /2 here overflowed the stack
+     * on 8x16-only builds, where rows pack to single bytes). */
+    uint16_t t[FONT_MAX_GLYPH_BYTES];
     for (int r = 0; r < H; r++)
         t[r] = (uint16_t)(art[r] >> k);
-    sprite_set_rows16(SPR_PAC_TAIL, t);
+    /* Sprites update before ui_present() publishes the matching cell
+     * placement, so an ISR frame landing in between can pair new art with
+     * last tick's cells — one LCD frame of ghost on cell-advance ticks,
+     * self-healing, accepted. */
+    font_sprite_set_rows16(SPR_PAC_TAIL, t);
     for (int r = 0; r < H; r++) {
         unsigned v = k ? (unsigned)(art[r] << (W - k)) & wmask : 0u;
         if (dot_alive)
             v |= dot[r];
         t[r] = (uint16_t)v;
     }
-    sprite_set_rows16(SPR_PAC_HEAD, t);
-    sprite_set_rows16(SPR_PAC_DOT, dot);
+    font_sprite_set_rows16(SPR_PAC_HEAD, t);
 
     ui_pen(OVERLAY_COL_AMBER);
     if (ci < cols)
@@ -339,6 +344,7 @@ void enter_home(uint64_t now)
     app.state = ST_HOME;
     app.home.kbd_bonded = ble_has_bond();   /* gate the "Pair keyboard" HOME tile */
     s_ks_present = keystore_state() != KEYSTORE_ABSENT;  /* "Lock deck" tile */
+    s_pac_dot_ready = false;   /* session entry blanks the slots — reload */
     app.home.next_refresh = 0;
     /* Arriving on HOME counts as activity: a session drop or provisioning
      * toast must live its full lifetime before the rain paints over it. */

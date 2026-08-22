@@ -98,6 +98,9 @@ static font_size_t                s_active         = FONT_SIZE_8X16;
 static DRAM_ATTR _Alignas(4) uint8_t
     s_sprite_rows[FONT_SPRITE_COUNT][2][FONT_MAX_GLYPH_BYTES];
 static DRAM_ATTR volatile uint8_t s_sprite_active[FONT_SPRITE_COUNT];
+/* Bumped at the START of every set(): a cache fill that spans the whole
+ * update sees the change and declines to publish its line (gc_fill). */
+static DRAM_ATTR volatile uint8_t s_sprite_gen[FONT_SPRITE_COUNT];
 
 static void gcache_init(void);   /* decoded-glyph cache; see below */
 
@@ -570,9 +573,22 @@ static IRAM_ATTR unsigned gc_fill(unsigned set, uint32_t key,
     if      (tg[0] == GC_EMPTY) way = 0;         /* warm-up: take a free way */
     else if (tg[1] == GC_EMPTY) way = 1;
     else                        way = gc_victim(set);
+
+    const unsigned slot = (unsigned)cp - FONT_SPRITE_BASE;
+    const uint8_t  gen  = (slot < FONT_SPRITE_COUNT) ? s_sprite_gen[slot] : 0;
+
     decode_uncached(cp, bold,
                     s_gc_data + (size_t)(set * GC_WAYS + way) * s_glyph_bytes);
-    tg[way] = key;
+
+    /* A sprite update racing this fill would otherwise leave old pixels
+     * cached under a valid tag with nothing left to invalidate them (the
+     * updater's invalidates ran before our tag store). Publish the line
+     * only on an unchanged generation; the caller still gets the decoded
+     * bytes, and the next lookup simply refills. */
+    if (slot < FONT_SPRITE_COUNT && s_sprite_gen[slot] != gen)
+        tg[way] = GC_EMPTY;
+    else
+        tg[way] = key;
     return way;
 }
 
@@ -650,8 +666,8 @@ static void gc_invalidate_cp(uint16_t cp)
         const uint32_t key = (uint32_t)cp | (b ? 0x10000u : 0u);
         const unsigned set = (unsigned)((key * 2654435761u) >> (32u - GC_SETS_LOG));
         uint32_t *const tg = s_gc_tag + set * GC_WAYS;
-        if (tg[0] == key) tg[0] = GC_EMPTY;
-        if (tg[1] == key) tg[1] = GC_EMPTY;
+        for (unsigned w = 0; w < GC_WAYS; w++)
+            if (tg[w] == key) tg[w] = GC_EMPTY;
     }
 }
 
@@ -670,22 +686,51 @@ void font_sprite_set(unsigned slot, const void *rows)
     const uint16_t cp = font_sprite_cp(slot);
     const uint8_t  nb = (uint8_t)((s_sprite_active[slot] & 1u) ^ 1u);
 
+    /* Generation first: a cache fill overlapping ANY part of this sequence
+     * sees the bump and declines to publish (gc_fill) — closing the race
+     * the invalidates below cannot (a fill whose tag store lands after the
+     * second invalidate). ONE writer per slot (font.h contract). */
+    s_sprite_gen[slot]++;
     memcpy(s_sprite_rows[slot][nb], rows, s_glyph_bytes);
     SPRITE_WRITE_BARRIER();
 
     /* Invalidate around the flip: the first drops entries decoded from the
-     * old buffer; the second drops a fill that raced the flip and
-     * reinstalled one. A fill spanning this whole sequence can still leave
-     * one stale FRAME (not a torn bitmap) — the next set() clears it, which
-     * is the accepted cost of keeping the sprite test off the decode hot
-     * path. */
+     * old buffer; the second drops a fill that raced the flip and finished
+     * before the generation bump was visible to it. */
     gc_invalidate_cp(cp);
     s_sprite_active[slot] = nb;
     gc_invalidate_cp(cp);
+}
+
+void font_sprite_set_rows16(unsigned slot, const uint16_t *rows)
+{
+    if (slot >= FONT_SPRITE_COUNT || !rows)
+        return;
+    /* Pack uint16 row values into the active size's row layout here, next
+     * to the decoder that defines it — callers never touch the byte
+     * format. */
+    uint8_t buf[FONT_MAX_GLYPH_BYTES];
+    const int h = s_height;
+    if (s_rb == 1) {
+        for (int r = 0; r < h; r++)
+            buf[r] = (uint8_t)rows[r];
+    } else {
+        for (int r = 0; r < h; r++) {
+            buf[2 * r]     = (uint8_t)rows[r];        /* u16 rows, LE */
+            buf[2 * r + 1] = (uint8_t)(rows[r] >> 8);
+        }
+    }
+    font_sprite_set(slot, buf);
 }
 
 void font_sprite_clear(unsigned slot)
 {
     static const uint8_t zeros[FONT_MAX_GLYPH_BYTES];
     font_sprite_set(slot, zeros);
+}
+
+void font_sprite_clear_all(void)
+{
+    for (unsigned s = 0; s < FONT_SPRITE_COUNT; s++)
+        font_sprite_clear(s);
 }
