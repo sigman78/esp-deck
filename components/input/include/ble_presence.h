@@ -28,6 +28,10 @@ bool ble_presence_enrolled(void);
 /** Seen recently enough to count as "here" (see PRESENT window in the .c). */
 bool ble_presence_present(void);
 
+/** Present AND the smoothed RSSI clears the near threshold (~1-2 m; a
+ *  calibration knob, not a ruler — check live dBm via the P status toast). */
+bool ble_presence_near(void);
+
 /** Milliseconds since the last resolved sighting; UINT32_MAX if never. */
 uint32_t ble_presence_age_ms(void);
 

@@ -104,15 +104,18 @@ void render_home(void)
     snprintf(kbdinfo, sizeof(kbdinfo), "%-11s %s", ble_status_str(), kn);
     int ke = draw_status_led(1, kbd, "KBD", kbdinfo);
 
-    /* Phone-presence chip after the KBD status: green = resolved sighting
-     * within the window, red = enrolled but away, amber = enroll mode
-     * (advertising, waiting for the phone to pair). */
+    /* Phone-presence chip after the KBD status: green = near (RSSI over
+     * the ~1-2 m gate), blue = in range but far, red = enrolled but gone,
+     * amber = enroll mode (advertising, waiting for the phone to pair). */
     if (app.cfg.presence &&
         (app.cfg.presence->enrolled() || app.cfg.presence->enroll_state() == 1)) {
-        const bool adv = app.cfg.presence->enroll_state() == 1;
-        const bool ph  = !adv && app.cfg.presence->present();
-        ui_pen(adv ? OVERLAY_COL_AMBER
-                   : ph ? OVERLAY_COL_GREEN : OVERLAY_COL_RED);
+        const bool adv  = app.cfg.presence->enroll_state() == 1;
+        const bool ph   = !adv && app.cfg.presence->present();
+        const bool near = ph && app.cfg.presence->near();
+        ui_pen(adv  ? OVERLAY_COL_AMBER          /* enrolling            */
+             : near ? OVERLAY_COL_GREEN          /* within arm's reach   */
+             : ph   ? OVERLAY_COL_BLUE           /* in range, but far    */
+                    : OVERLAY_COL_RED);          /* gone                 */
         ui_putch(ke + 2, 1, ph ? UI_LED_ON : UI_LED_OFF, 0);
         ui_puts(ke + 4, 1, "PHN", OVERLAY_ATTR_BOLD);
         ui_pen(OVERLAY_COL_DEFAULT);
@@ -410,7 +413,11 @@ void home_input(const cyberdeck_input_t *ev, ui_key_t k, char ch, uint64_t now)
         }
         else if ((ch == 'p' || ch == 'P') && app.cfg.presence) {
             /* Phone presence (prototype): P starts/cancels enroll mode when
-             * no phone is stored, shows status when one is. */
+             * no phone is stored; with one enrolled, P shows status and a
+             * SECOND P within 2 s forgets (identity + bond) and drops
+             * straight back into enroll — the clean re-pair gesture. The
+             * phone side still needs its own "Forget This Device". */
+            static uint64_t s_p_last;
             const cyberdeck_presence_ops_t *pr = app.cfg.presence;
             if (pr->enroll_state() == 1) {
                 pr->enroll_stop();
@@ -418,15 +425,22 @@ void home_input(const cyberdeck_input_t *ev, ui_key_t k, char ch, uint64_t now)
             } else if (!pr->enrolled()) {
                 pr->enroll_start();
                 toast(now, "pair 'CYBERDECK' from the phone now");
+            } else if (now - s_p_last < 2000) {
+                pr->forget();
+                pr->enroll_start();
+                toast(now, "phone forgotten - pair again now");
             } else if (pr->present()) {
-                toast(now, "phone here (%d dBm)", pr->rssi());
+                toast(now, "phone here (%d dBm) - P again to re-pair",
+                      pr->rssi());
             } else {
                 const uint32_t age = pr->age_ms();
                 if (age == UINT32_MAX)
-                    toast(now, "phone enrolled - not seen yet");
+                    toast(now, "phone not seen yet - P again to re-pair");
                 else
-                    toast(now, "phone away (%us)", (unsigned)(age / 1000));
+                    toast(now, "phone away (%us) - P again to re-pair",
+                          (unsigned)(age / 1000));
             }
+            s_p_last = now;
             render_home();
         }
         break;

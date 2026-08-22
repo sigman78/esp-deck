@@ -65,6 +65,12 @@ static const char *TAG = "ble_presence";
 /* Sighting windows. Continuity advertisements run at a couple of Hz on an
  * idle iPhone; PRESENT_MS is generous so a missed burst does not flap. */
 #define PRESENT_MS      45000
+/* "Near" tier: smoothed RSSI above NEAR_DBM counts as within arm's reach
+ * (~1-2 m for a phone on a desk; pockets and bodies cost 10+ dB — calibrate
+ * against the live dBm in the P status toast). 6 dB of hysteresis so the
+ * chip does not flap at the boundary. */
+#define NEAR_DBM        (-68)
+#define NEAR_EXIT_DBM   (-74)
 #define SCAN_ITVL       0x0140     /* 200 ms  */
 #define SCAN_WINDOW     0x0030     /* 30 ms => ~15% duty */
 
@@ -133,11 +139,18 @@ static void phone_load(void)
 
 /* ---- RPA resolution ----------------------------------------------------- */
 
-/* ah(IRK, prand): AES-128(k, 0..0 || prand) & 0xFFFFFF, spec byte order. */
+/* ah(IRK, prand): AES-128(k, 0..0 || prand) & 0xFFFFFF, spec byte order —
+ * the SMP-little-endian stored IRK reversed into the MSB-first AES key.
+ *
+ * On this stack this path is a FALLBACK: bonding places the peer IRK in
+ * the controller's resolving list, so the enrolled phone's advertisements
+ * arrive already resolved (see on_disc below) and its raw RPAs never reach
+ * us. The software resolver covers configurations where that is not true
+ * (resolving list full or cleared while phone.bin survives). */
 static bool rpa_matches(const uint8_t val[6])
 {
     uint8_t key[16], pt[16] = { 0 }, ct[16];
-    for (int i = 0; i < 16; i++)               /* LE-stored IRK -> MSB key */
+    for (int i = 0; i < 16; i++)
         key[i] = s_phone.irk[15 - i];
     pt[13] = val[5];                           /* prand (top bits 01, checked
                                                 * by the caller) */
@@ -159,9 +172,13 @@ void ble_presence_on_disc(const uint8_t val[6], uint8_t addr_type, int rssi)
         return;
 
     bool hit = false;
-    /* Identity address straight in the advert (privacy off / static). */
-    if (addr_type == s_phone.ident_type &&
-        memcmp(val, s_phone.ident, 6) == 0) {
+    /* Identity address in the report — CONFIRMED ON HARDWARE (2026-08-21):
+     * the bonded phone's advertisements arrive controller-resolved as the
+     * identity with a BLE_ADDR_*_ID type (observed type=2 at ~2 s cadence).
+     * Match on the ADDRESS alone: the stored identity type (0/1) never
+     * equals the resolved delivery type (2/3), and that mismatch was
+     * exactly the first bring-up bug. */
+    if (memcmp(val, s_phone.ident, 6) == 0) {
         hit = true;
     } else if ((addr_type == BLE_ADDR_RANDOM ||
                 addr_type == BLE_ADDR_RANDOM_ID) &&
@@ -200,10 +217,32 @@ bool ble_presence_present(void)
     return s_have_phone && ble_presence_age_ms() < PRESENT_MS;
 }
 
+bool ble_presence_near(void)
+{
+    static bool s_near;                        /* hysteresis memory */
+    if (!ble_presence_present()) {
+        s_near = false;
+    } else if (s_near) {
+        s_near = s_rssi_ema >= NEAR_EXIT_DBM;
+    } else {
+        s_near = s_rssi_ema >= NEAR_DBM;
+    }
+    return s_near;
+}
+
 ble_presence_enroll_t ble_presence_enroll_state(void) { return s_enroll; }
 
 void ble_presence_forget(void)
 {
+    /* Delete the NimBLE bond too — a stale deck-side bond makes the next
+     * pairing attempt fail confusingly once the phone has forgotten us
+     * (and it keeps the dead IRK in the controller resolving list). */
+    if (s_have_phone) {
+        ble_addr_t id = { .type = s_phone.ident_type };
+        memcpy(id.val, s_phone.ident, 6);
+        ble_store_util_delete_peer(&id);
+    }
+
     s_have_phone = false;
     s_last_rpa_valid = false;
     s_last_seen_us = -1;
@@ -212,6 +251,7 @@ void ble_presence_forget(void)
     char p[128];
     phone_path(p, sizeof(p));
     remove(p);
+    ESP_LOGI(TAG, "phone forgotten (identity + bond)");
 }
 
 /* ---- own passive scan (keyboard connected) ------------------------------ */
