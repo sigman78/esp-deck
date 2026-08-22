@@ -102,7 +102,21 @@ void render_home(void)
     const char *kn = (kbd && app.cfg.ble->get_name) ? app.cfg.ble->get_name() : "";
     char kbdinfo[64];
     snprintf(kbdinfo, sizeof(kbdinfo), "%-11s %s", ble_status_str(), kn);
-    draw_status_led(1, kbd, "KBD", kbdinfo);
+    int ke = draw_status_led(1, kbd, "KBD", kbdinfo);
+
+    /* Phone-presence chip after the KBD status: green = resolved sighting
+     * within the window, red = enrolled but away, amber = enroll mode
+     * (advertising, waiting for the phone to pair). */
+    if (app.cfg.presence &&
+        (app.cfg.presence->enrolled() || app.cfg.presence->enroll_state() == 1)) {
+        const bool adv = app.cfg.presence->enroll_state() == 1;
+        const bool ph  = !adv && app.cfg.presence->present();
+        ui_pen(adv ? OVERLAY_COL_AMBER
+                   : ph ? OVERLAY_COL_GREEN : OVERLAY_COL_RED);
+        ui_putch(ke + 2, 1, ph ? UI_LED_ON : UI_LED_OFF, 0);
+        ui_puts(ke + 4, 1, "PHN", OVERLAY_ATTR_BOLD);
+        ui_pen(OVERLAY_COL_DEFAULT);
+    }
 
     /* All systems go: a small amber ☺ in the margin when net + keyboard up. */
     if (wifi_manager_is_connected() && kbd) {
@@ -287,6 +301,27 @@ void home_tick(uint64_t now)
     /* Expire toasts regardless of the saver, so a wake never flashes
      * a long-dead message. */
     if (app.toast[0] && now >= app.toast_until) app.toast[0] = '\0';
+
+    /* Walk-away auto-lock (prototype): the phone was HERE, then unseen for
+     * a minute, while the store sits unlocked — raise the gate, same path
+     * as the L panic key. Armed on a sighting so a deck booted with the
+     * phone already absent never self-locks out of nowhere; runs on HOME
+     * only (v1 semantics: a live session holds the deck open). */
+    if (app.cfg.presence && s_ks_present &&
+        keystore_state() == KEYSTORE_UNLOCKED) {
+        static bool armed;
+        const cyberdeck_presence_ops_t *pr = app.cfg.presence;
+        if (pr->present()) {
+            armed = true;
+        } else if (armed && pr->enrolled() && pr->age_ms() > 60000) {
+            armed = false;
+            keystore_lock();
+            app_creds_wipe();
+            unlock_open_gate(now);
+            return;
+        }
+    }
+
     if (saver_tick_home(now)) return;
     if (now >= app.home.next_refresh) {
         app.home.next_refresh = now + ANIM_PERIOD_MS;   /* animation cadence */
@@ -372,6 +407,27 @@ void home_input(const cyberdeck_input_t *ev, ui_key_t k, char ch, uint64_t now)
             keystore_lock();                /* keyboard panic button */
             app_creds_wipe();
             unlock_open_gate(now);
+        }
+        else if ((ch == 'p' || ch == 'P') && app.cfg.presence) {
+            /* Phone presence (prototype): P starts/cancels enroll mode when
+             * no phone is stored, shows status when one is. */
+            const cyberdeck_presence_ops_t *pr = app.cfg.presence;
+            if (pr->enroll_state() == 1) {
+                pr->enroll_stop();
+                toast(now, "phone enroll cancelled");
+            } else if (!pr->enrolled()) {
+                pr->enroll_start();
+                toast(now, "pair 'CYBERDECK' from the phone now");
+            } else if (pr->present()) {
+                toast(now, "phone here (%d dBm)", pr->rssi());
+            } else {
+                const uint32_t age = pr->age_ms();
+                if (age == UINT32_MAX)
+                    toast(now, "phone enrolled - not seen yet");
+                else
+                    toast(now, "phone away (%us)", (unsigned)(age / 1000));
+            }
+            render_home();
         }
         break;
     default:
