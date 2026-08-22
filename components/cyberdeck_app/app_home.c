@@ -104,9 +104,11 @@ void render_home(void)
     snprintf(kbdinfo, sizeof(kbdinfo), "%-11s %s", ble_status_str(), kn);
     int ke = draw_status_led(1, kbd, "KBD", kbdinfo);
 
-    /* Phone-presence chip after the KBD status: green = near (RSSI over
-     * the ~1-2 m gate), blue = in range but far, red = enrolled but gone,
-     * amber = enroll mode (advertising, waiting for the phone to pair). */
+    /* Phone-presence chip after the KBD status. COLOR alone carries the
+     * state (a fill-vs-hollow LED on top read as noise): green = near
+     * (RSSI over the ~1-2 m gate), blue = in range but far, red =
+     * enrolled but gone, amber = enroll mode (advertising, waiting for
+     * the phone to pair). */
     if (app.cfg.presence &&
         (app.cfg.presence->enrolled() || app.cfg.presence->enroll_state() == 1)) {
         const bool adv  = app.cfg.presence->enroll_state() == 1;
@@ -116,7 +118,7 @@ void render_home(void)
              : near ? OVERLAY_COL_GREEN          /* within arm's reach   */
              : ph   ? OVERLAY_COL_BLUE           /* in range, but far    */
                     : OVERLAY_COL_RED);          /* gone                 */
-        ui_putch(ke + 2, 1, ph ? UI_LED_ON : UI_LED_OFF, 0);
+        ui_putch(ke + 2, 1, UI_LED_ON, 0);
         ui_puts(ke + 4, 1, "PHN", OVERLAY_ATTR_BOLD);
         ui_pen(OVERLAY_COL_DEFAULT);
     }
